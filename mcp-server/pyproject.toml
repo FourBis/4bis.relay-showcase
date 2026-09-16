@@ -1,0 +1,45 @@
+[project]
+name = "relay"
+version = "0.1.0"
+description = "Local conversational AI workspace for multiple repositories"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "httpx>=0.27",
+    "google-api-python-client>=2.120",
+    "google-auth>=2.27",
+    "tenacity>=8.2",  # reintentos para el notify
+    # Version used by the runner; validate SDK migrations before upgrading.
+    "pydantic-ai-slim[openai,mcp]==2.5.1",
+    # Local MCP servers still use FastMCP from the v1 SDK.
+    "mcp>=1.12,<2",
+    # Auto-reindex incremental de cbm (Opción A, 2026-07-14): el watcher
+    # interno de cbm nunca se invoca; lo suple el relay (cbm_watcher.py).
+    # Sigue haciendo falta con el residente de 2026-09-02 (ADR-017
+    # revertido): ese proceso tiene cwd neutro y no vigila ningún repo.
+    "watchdog>=4",
+    # CRM local (trycompai/crm): el relay le lee el Postgres read-only.
+    "asyncpg>=0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "playwright>=1.45",
+]
+# Trazas OTel (2026-08-26). Opcional a propósito: sin esto el relay
+# arranca igual y `tracing.setup_tracing()` avisa y sigue. `logfire-api`
+# (el shim no-op) ya viene con pydantic-ai; lo que falta es el SDK.
+tracing = ["logfire>=4"]
+
+[project.scripts]
+relay-server = "relay.server:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

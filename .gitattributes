@@ -1,0 +1,12 @@
+# Line endings: el repo guarda LF siempre (191 de 195 archivos de texto
+# ya estaban así). Sin esto, el core.autocrlf=true de una máquina Windows
+# vuelve a meter CRLF, y cualquier refactor que reescriba un archivo
+# entero produce un diff de archivo entero: en d57bc04, tab-projects.js
+# mostró 3214 líneas cambiadas para 17 cambios reales.
+* text=auto eol=lf
+
+# Vendored libs y build output: se sirven tal cual, sin conversión.
+mcp-server/admin_static/static/vendor-* -text whitespace=-blank-at-eol,-blank-at-eof
+# Preserve upstream notices and the context lines required by git apply.
+third_party_licenses/npm-LICENSES.txt whitespace=-blank-at-eol
+third_party_licenses/*.patch whitespace=-blank-at-eol,-blank-at-eof

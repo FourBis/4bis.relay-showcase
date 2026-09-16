@@ -1,0 +1,97 @@
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+google-credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv-*/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Estado de agentes (se regenera)
+state/
+
+# Borrador de CHANGELOG pendiente (se regenera con
+# mcp-server/scripts/changelog_pendiente.py, no es prosa curada)
+docs/CHANGELOG_PENDIENTE.md
+
+# Logs del relay (Iter 10.4). Si los escribís en el cwd, pisarlos
+# con `git checkout` mata el proceso que tiene el file handle abierto
+# en Windows. Arrancá el relay redirigiendo a %TEMP% o a un dir
+# fuera del repo. Ver docs/ADMIN_UI.md §Tab Diagramas.
+# El patrón cubre TODOS los .log del repo y no dos nombres sueltos:
+# `server.out.log`, `server.err.log`, `relay.test.log` y
+# `relay.crm-test.log` estaban trackeados igual, así que cada arranque
+# del relay ensuciaba el árbol y un `git checkout` sobre ellos era
+# exactamente el cuelgue que este bloque venía a evitar. Se sacaron del
+# índice el 2026-08-18 (siguen en disco).
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Andamiaje descartable: scripts de refactors puntuales (parchear el
+# HTML, calcular contraste, inspeccionar la DB, cortar bloques). Se
+# usan una vez y se tiran — no deben volver a entrar al repo.
+#
+# El 2026-08-18 se barrieron 20 que SÍ habían entrado y llevaban meses
+# en la raíz: check_*.py, probe*.py, inspect*.ps1, run_*.ps1,
+# extract_experts.py, import_test.py y un archivo llamado `-w` (CSS
+# huérfano de un comando mal tipeado). Los patrones de abajo son para
+# que no vuelvan.
+_tmp_*
+/check_*.py
+/probe*.py
+/inspect*.ps1
+/run_*.ps1
+/extract_*.py
+/import_test.py
+
+# Salidas de los e2e (las regenera mcp-server/e2e_admin.py) y la
+# relay.db vacía que quedaba en la raíz: la base real vive en
+# ~/.4bis/relay.db.
+e2e-*.png
+/relay.db
+
+# Local integration settings and generated data
+.claude/
+.mcp.json
+node_modules/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.pfx
+*.p12
+*.bak
+*.zip
+*.bundle
+chats/
+attachments/
+jsonl/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+/pip/cache/

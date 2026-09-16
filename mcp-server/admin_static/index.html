@@ -1,0 +1,2507 @@
+﻿<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Relay — Workspace</title>
+<!-- Sin esto el navegador pide /favicon.ico solo, el relay no tiene esa
+     ruta, y queda un 404 rojo en la consola en cada carga — ruido que
+     compite con los errores que sí importan. SVG inline: cero requests. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%94%81%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/admin/static/admin.css">
+<!-- Estilos: admin.css es el bundle compilado con Tailwind CLI v3
+     (fuente de verdad: static/admin.src.css; regenerar con build-css.ps1).
+     Cero JIT en runtime, cero red externa. -->
+</head>
+<body class="workspace-mode bg-zinc-950 text-zinc-100 antialiased">
+<a href="#main" class="skip-link">Saltar al contenido</a>
+<div class="workspace-shell">
+  <header class="workspace-bar">
+    <button class="workspace-brand" data-workspace-open="chat" aria-label="Abrir chat"><span class="workspace-mark">r.</span><strong>relay</strong><span class="workspace-brand-sub">tu espacio de trabajo</span></button>
+    <div class="workspace-bar-actions">
+      <button id="workspace-launcher" class="workspace-launch-button" aria-haspopup="dialog" aria-controls="workspace-launcher-dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Abrir herramienta <kbd>Ctrl ⇧ K</kbd></button>
+      <button id="search-trigger" class="workspace-icon" title="Buscar conversaciones y proyectos · Ctrl+K" aria-label="Buscar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></button>
+    </div>
+    <div id="topbar" class="workspace-vitals">
+      <button id="topbar-status" class="topbar-item" title="Abrir actividad"><span id="topbar-dot" class="topbar-dot"></span><span id="topbar-runs">Conectando…</span></button>
+      <button id="topbar-tokens-wrap" class="topbar-item" title="Abrir consumo de tokens"><span class="topbar-k">hoy</span><span id="topbar-tokens" class="topbar-v">…</span></button>
+      <button id="topbar-chats-wrap" class="topbar-item" title="Abrir conversaciones"><span id="topbar-chats" class="topbar-v">…</span><span class="topbar-k">chats</span></button>
+      <span id="status-indicator" class="sr-only"></span>
+    </div>
+  </header>
+  <main id="main" tabindex="-1" class="workspace-stage" aria-label="Espacio de trabajo">
+    <div id="workspace-welcome" class="workspace-welcome">
+      <span class="workspace-eyebrow">ESPACIO DE TRABAJO</span>
+      <h1>Todo lo que necesitas.<br>A tu manera.</h1>
+      <p>Conversa, abre tus herramientas y acomoda las ideas.</p>
+      <div class="workspace-welcome-actions"><button class="btn btn-primary" data-workspace-open="chat">Abrir chat</button><button class="btn" data-workspace-open="projects">Explorar proyectos</button></div>
+    </div>
+    <div id="workspace-windows"></div>
+    <div id="workspace-parking" hidden>
+      <!-- Estado -->
+      <section id="tab-status" class="panel">
+        <header class="mb-5">
+          <h2 class="panel-title">Estado general</h2>
+        </header>
+
+        <!-- Nivel 1: la salud del relay. El boton de reiniciar vive
+             ACA, al lado de lo que reinicia, y no bajo un titulo
+             "Acciones" que no decia de que. -->
+        <div class="card flex flex-wrap items-start justify-between gap-6 p-5">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2.5">
+              <span id="status-health-dot" class="h-2 w-2 shrink-0 rounded-full bg-zinc-600"></span>
+              <span id="status-health-text" class="text-base font-semibold text-zinc-100">sondeando…</span>
+            </div>
+            <div id="status-health-meta"
+                 class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-zinc-400"></div>
+          </div>
+          <div class="flex shrink-0 flex-col items-end gap-1.5">
+            <button id="restart-btn" class="btn danger" type="button">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg>
+              Reiniciar relay
+            </button>
+            <span class="text-[11px] text-zinc-500">corta conexiones activas · la UI se recarga sola</span>
+          </div>
+        </div>
+
+        <!-- Nivel 2: lo del dia. UNA sola grilla de KPI en todo el tab. -->
+        <h3 class="section-title">Actividad de hoy</h3>
+        <div id="stats-grid" class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"></div>
+
+        <!-- Nivel 3: el inventario. Son datos que cambian una vez por
+             semana; en tamano KPI competian con los de arriba. -->
+        <div id="status-inventory"
+             class="card mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3"></div>
+
+        <!-- Bot de Discord: proceso y gateway se caen por separado y se
+             arreglan distinto, así que van como dos semáforos, no uno.
+             El /health del bot devuelve 200 con el gateway caído. -->
+        <h3 class="section-title">Bot de Discord</h3>
+        <div class="card flex flex-wrap items-center justify-between gap-4 p-4">
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <span id="bot-chain" class="flex flex-wrap items-center gap-2 text-sm text-zinc-300">sondeando…</span>
+            <span id="bot-detail" class="text-xs text-zinc-500"></span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <button id="bot-start-btn" class="btn btn-primary" type="button" hidden>
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg>
+              Arrancar bot
+            </button>
+            <button id="bot-refresh-btn" class="icon-btn" type="button"
+                    title="volver a sondear" aria-label="volver a sondear el bot">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <h3 class="section-title">Sesiones VS Code</h3>
+        <div class="table-wrap">
+          <table id="sessions-table">
+            <thead>
+              <tr>
+                <th class="th">nombre</th><th class="th">target</th><th class="th">SSE</th>
+                <th class="th">pausada</th><th class="th">último handshake</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+      </section>
+
+      <!-- En curso (Sub-ola 2.1: liveness panel) -->
+      <section id="tab-running" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Chats en curso</h2>
+          <p class="panel-sub">Runs vivos ahora mismo. <strong>Refresca con el botón</strong>
+            (no hay polling automático, decisión del usuario).
+            <strong>Status</strong> abre un modal con snapshot vivo (fase, tool actual,
+            elapsed/idle, tokens). <strong>Cancelar</strong> mata el run
+            (también vía <code>POST /experts/cancel/{chat_id}</code>).</p>
+        </header>
+        <div class="toolbar">
+          <label class="label">últimos:
+            <select id="running-limit" class="select">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <label class="label"><input id="running-include-finished" type="checkbox">
+            incluir los recién terminados (≤ 30s)</label>
+          <button id="running-refresh" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <span id="running-summary" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="running-table">
+            <thead>
+              <tr>
+                <th class="th th-sort" data-col="0" tabindex="0" role="button">inicio</th><th class="th th-sort" data-col="1" tabindex="0" role="button">proyecto</th><th class="th th-sort" data-col="2" tabindex="0" role="button">autor</th>
+                <th class="th th-sort" data-col="3" tabindex="0" role="button">origen</th><th class="th">elapsed</th><th class="th">fase</th>
+                <th class="th">tool</th><th class="th th-sort" data-col="7" tabindex="0" role="button">tokens in</th><th class="th"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted mt-4" id="running-empty" hidden>
+          Sin chats en curso ahora mismo. Cuando alguien tire <code>POST /experts/run</code>
+          van a aparecer acá.</p>
+      </section>
+
+      <!-- Métricas (Sprint 1) -->
+      <section id="tab-gestion" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Gestión</h2>
+          <p class="panel-sub">Tablero de empresa (GitHub Projects v2), en vivo. La verdad vive en GitHub: acá solo se lee.</p>
+        </header>
+        <div class="toolbar">
+          <label class="label">tablero:
+            <select id="gestion-board-sel" class="select w-[340px]">
+              <option value="">(principal)</option>
+            </select>
+          </label>
+          <button class="btn btn-primary" id="gestion-refresh"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+        </div>
+        <div id="gestion-board" class="mt-4"></div>
+      </section>
+
+      <section id="tab-metrics" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Actividad y consumo</h2>
+          <p class="panel-sub">Ejecuciones, consumo y resultados de tus proyectos.</p>
+        </header>
+        <div class="toolbar">
+          <button class="btn btn-primary" id="metrics-refresh"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <label class="label">periodo:
+            <select id="metrics-days" class="select" title="atajo: cuenta los últimos N días hacia atrás, dejando hoy como fin">
+              <option value="7" selected>7 días</option>
+              <option value="30">30 días</option>
+              <option value="90">90 días</option>
+            </select>
+          </label>
+          <label class="label">desde:
+            <input id="metrics-from" type="date" class="select" title="inicio del rango absoluto (YYYY-MM-DD)">
+          </label>
+          <label class="label">hasta:
+            <input id="metrics-to" type="date" class="select" title="fin del rango absoluto (YYYY-MM-DD). Si está vacío, se usa hoy.">
+          </label>
+          <button class="btn" id="metrics-range-apply" title="usar el rango from/to en vez del atajo de días">
+            aplicar rango
+          </button>
+          <button class="btn" id="metrics-range-clear" hidden title="volver al atajo de días">
+            limpiar rango
+          </button>
+          <label class="label">proyecto:
+            <select id="metrics-project" class="select">
+              <option value="">todos</option>
+            </select>
+          </label>
+          <label class="label">estado:
+            <select id="metrics-state" class="select">
+              <option value="">todos</option>
+              <option value="ok">ok</option>
+              <option value="error">intentos con error</option>
+              <option value="running">en curso</option>
+              <option value="cancelled">cancelados</option>
+              <option value="split">subdivididos</option>
+            </select>
+          </label>
+          <label class="label">proveedor:
+            <select id="metrics-provider" class="select">
+              <option value="">todos</option>
+            </select>
+          </label>
+          <label class="label">rol:
+            <select id="metrics-role" class="select">
+              <option value="">todos</option>
+              <option value="executor">ejecutor</option>
+              <option value="planner">planificador</option>
+              <option value="verifier">verificador</option>
+              <option value="documenter">documentador</option>
+            </select>
+          </label>
+          <button class="btn" id="metrics-clear" hidden><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> limpiar filtros</button>
+          <span id="metrics-status" class="muted"></span>
+        </div>
+        <p id="metrics-filter-note" class="muted mb-3" hidden></p>
+        <div id="metrics-kpi" class="workspace-metric-grid"></div>
+        <details class="workspace-filters"><summary>Desglose de consumo y ejecuciones</summary>
+          <div id="metrics-secondary" class="workspace-metric-grid"></div>
+        </details>
+        <details class="workspace-filters"><summary>Cómo se mide el consumo</summary>
+        <p class="muted mb-6"><strong>Tokens in</strong> son tokens
+          <em>facturados</em>, no únicos: el historial se reenvía en cada
+          vuelta del agente, así que un run de 10 vueltas paga el contexto
+          10 veces. Los deltas comparan contra el período anterior de igual
+          largo.</p></details>
+        <h3 class="section-title">Runs por día</h3>
+        <div id="metrics-trend" class="chart-wrap card p-4"></div>
+        <p class="muted mt-2 mb-2">Cada barra es un día del período, partida
+          en runs que terminaron ok y runs que no. Los días sin actividad
+          valen cero y siguen ocupando su lugar en el eje.</p>
+
+        <!-- `details` nativo: colapsar no necesita JS ni CSS nuevo, y el
+             estado abierto/cerrado ya es accesible por teclado. Por
+             modelo y Top proyectos abren por default (son los que se
+             miran siempre); horaria y errores quedan cerrados para que
+             la pantalla no arranque como un muro de datos. -->
+        <!-- Por proveedor va ARRIBA en ancho completo: la pregunta que
+             contesta (cuánto cae en el provider pago) es más urgente
+             que la de modelo y no compite por ancho. -->
+        <details class="card p-4 mb-6" open>
+          <summary class="section-title cursor-pointer">Por proveedor</summary>
+          <div id="metrics-by-provider" class="text-sm"></div>
+        </details>
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <details class="card p-4" open>
+            <summary class="section-title cursor-pointer">Por modelo</summary>
+            <div id="metrics-by-model" class="text-sm"></div>
+          </details>
+          <details class="card p-4" open>
+            <summary class="section-title cursor-pointer">Top proyectos</summary>
+            <div id="metrics-by-project" class="text-sm"></div>
+          </details>
+          <details class="card p-4">
+            <summary class="section-title cursor-pointer">Distribución horaria</summary>
+            <div id="metrics-hourly" class="text-sm"></div>
+          </details>
+          <details class="card p-4">
+            <summary class="section-title cursor-pointer">Errores</summary>
+            <div id="metrics-by-errors" class="text-sm"></div>
+          </details>
+        </div>
+      </section>
+
+
+      <!-- Chats -->
+      <!-- Chat: workspace unificado tipo VS Code (2026-07-20e).
+           Reemplaza los tabs Chats + Conversaciones. Sidebar = lista de
+           conversaciones; panel = hilo con burbujas + tool calls inline;
+           cerradas read-only con summary arriba. "En curso" queda aparte
+           como vista de operaciones. -->
+      <section id="tab-chat" class="panel" hidden>
+        <div class="chat-workspace">
+          <!-- SIDEBAR: lista de conversaciones -->
+          <aside class="chat-sidebar">
+            <div class="chat-sidebar-head">
+              <div class="flex items-center gap-2">
+                <button id="chat-sidebar-toggle" class="chat-collapse-btn" type="button"
+                        title="Colapsar lista de conversaciones" aria-label="Colapsar lista">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5">
+                    <path d="M14.5 6l-5 6 5 6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <h2 class="chat-sidebar-label text-sm font-semibold text-zinc-200">Conversaciones</h2>
+                <button id="chat-new" class="btn btn-primary btn-xs ml-auto"
+                        title="Nueva conversación multi-turno"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="chat-sidebar-label"> Nuevo</span></button>
+              </div>
+              <input id="chat-search" type="search" autocomplete="off"
+                     class="input mt-2 w-full text-xs" placeholder="🔍 filtrar…">
+              <div class="chat-sidebar-tools mt-2 flex items-center gap-1.5">
+                <!-- `input` + `datalist` y no `select`: son 52 proyectos y
+                     un select nativo no se puede escribir, así que había
+                     que bajar la lista entera y buscar a ojo. El datalist
+                     es autocompletado del navegador — cero JS de filtrado
+                     y cero dependencias. Lo llena tab-chats.js. -->
+                <input id="chat-project-filter" list="chat-project-opts"
+                       class="input chat-proj-select text-xs" type="search"
+                       autocomplete="off" placeholder="todos los proyectos"
+                       aria-label="Filtrar por proyecto">
+                <datalist id="chat-project-opts"></datalist>
+                <button id="chat-memoria-toggle" class="btn chat-icon-btn"
+                        title="Facts + memoria FTS5 del proyecto">📚</button>
+                <button id="chat-quick-note" class="btn chat-icon-btn"
+                        title="Nota rápida (workspace notes)">📝</button>
+                <button id="chat-refresh" class="btn chat-icon-btn"
+                        title="Refrescar lista" aria-label="refrescar la lista de conversaciones"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg></button>
+              </div>
+            </div>
+            <div id="chat-conv-list" class="chat-conv-list"></div>
+            <!-- Lo que se ve cuando la columna está colapsada. Antes
+                 quedaban el chevron y el ➕ flotando en 48px vacíos: no
+                 se entendía qué columna era ni que adentro había 98
+                 conversaciones. El número es el de abiertas y el rótulo
+                 va en vertical porque es lo único que entra. -->
+            <div class="chat-rail" aria-hidden="true">
+              <span id="chat-rail-count" class="chat-rail-count">0</span>
+              <span class="chat-rail-label">Conversaciones</span>
+            </div>
+          </aside>
+
+          <!-- Backdrop del drawer (solo <md; en desktop la lista es una
+               columna fija y esto nunca se muestra). Mismo patrón que
+               #sidebar-backdrop del rail global. -->
+          <div id="chat-drawer-backdrop" aria-hidden="true"></div>
+
+          <!-- Tiradores: los paneles eran de ancho fijo (288px la lista,
+               360px el grafo) y no había forma de darle más aire a
+               ninguno. Arrastrar y listo; doble click vuelve al default.
+               Lo maneja panel-resize.js y persiste en localStorage. -->
+          <div class="chat-resizer" data-resize="sidebar" role="separator"
+               aria-orientation="vertical" tabindex="0"
+               aria-label="Ancho de la lista de conversaciones"
+               title="Arrastrá para redimensionar · doble click para el default"></div>
+
+          <!-- MAIN: conversación / memoria / vacío -->
+          <div class="chat-main">
+            <div id="chat-empty" class="chat-empty">
+              <div class="workspace-chat-welcome">
+                <span class="workspace-eyebrow">CONVERSA · CREA · CONECTA</span>
+                <h2>¿En qué trabajamos?</h2>
+                <p>Una conversación para empezar.<br>Un espacio para todo lo que venga después.</p>
+                <div class="workspace-welcome-actions"><button id="workspace-chat-new" class="btn btn-primary">Nueva conversación</button><button class="btn chat-drawer-btn chat-drawer-btn-empty" type="button" aria-expanded="false">Mis conversaciones</button></div>
+                <p class="workspace-chat-hint">Abre herramientas junto al chat.<br>Separa una respuesta o una tabla para seguir trabajando con ella.</p>
+              </div>
+            </div>
+
+            <div id="chat-convo" class="chat-convo" hidden>
+              <header class="chat-convo-head">
+                <!-- Abre la lista de conversaciones como drawer. Solo
+                     visible en <md: en desktop la lista ya está al lado. -->
+                <button id="chat-drawer-btn" class="btn chat-icon-btn chat-drawer-btn"
+                        type="button" aria-expanded="false"
+                        title="Conversaciones" aria-label="Abrir conversaciones">☰</button>
+                <span id="chat-convo-status" class="badge dim">—</span>
+                <strong id="chat-panel-title" class="truncate font-mono text-xs text-zinc-300"></strong>
+                <!-- Solo en borrador (➕ Nuevo): el proyecto se elige acá y la
+                     conversación recién se crea al mandar el primer mensaje. -->
+                <select id="chat-draft-project" class="select chat-proj-select text-xs" hidden></select>
+                <span id="chat-panel-meta" class="ml-auto hidden truncate text-[11px] text-zinc-400 md:inline"></span>
+                <button id="chat-panel-vscode" class="btn btn-xs" hidden
+                        title="Abrir el repo en VS Code">🧠 VS Code</button>
+                <a id="chat-panel-gh-link" class="btn btn-xs" hidden target="_blank" rel="noopener"
+                   title="Abrir repo en GitHub" aria-label="Abrir repo en GitHub">🐙</a>
+                <!-- Un click: vincula al Discord de siempre y crea el DM. Es el
+                     botón de "me voy, seguime avisando al celu" — y también el
+                     que repara un vínculo sin hilo, porque hereda el usuario
+                     que la conversación ya tenga. -->
+                <button id="chat-panel-follow-mobile" class="btn btn-xs" hidden
+                        title="Vincular y recibir las respuestas por DM de Discord">
+                  📱 Seguir en el celu</button>
+                <button id="chat-panel-link-discord" class="btn chat-icon-btn" hidden
+                        title="Vincular con otro usuario de Discord">🔗</button>
+                <button id="chat-panel-unlink-discord" class="btn chat-icon-btn danger" hidden
+                        title="Desvincular Discord">🔗</button>
+                <!-- Aviso sonoro al terminar. Arranca encendido; el mute es por
+                     conversación y vive en localStorage. -->
+                <button id="chat-panel-chime" class="btn chat-icon-btn" hidden
+                        title="Avisar con un sonido cuando termine">🔔</button>
+                <!-- Vuelve a abrir el panel del plan. Visible en toda
+                     conversación abierta: el plan existe para cualquier
+                     pedido, chico o grande, y esconderlo cuando no hay
+                     grafo lo volvía imposible de encontrar. -->
+                <button id="chat-panel-grafo" class="btn btn-xs" hidden
+                        title="Ver el plan y en qué anda">🕸 Plan</button>
+                <span id="chat-panel-context" class="badge dim" hidden></span>
+                <!-- Tiempo de USO de la conversación: la suma de lo que
+                     duraron los runs. El reloj de pared (que sale en el
+                     title) miente por un orden de magnitud — una conv
+                     queda abierta entre pedido y pedido. Es la misma
+                     cuenta que va a las horas del PR en /cerrar. -->
+                <span id="chat-panel-usage" class="badge dim" hidden></span>
+                <!-- Iter 10.3: chip de rama + borrar rama local acumulada.
+                     Ambos ocultos por default; renderHeader los prende
+                     según el estado de la conv. -->
+                <span id="chat-panel-branch" class="badge dim" hidden
+                      title="Rama local de git creada en /nuevo"></span>
+                <button id="chat-panel-delete-branch" class="btn btn-xs danger" hidden
+                        title="Borrar la rama local acumulada (la publicada la manejas por GitHub)">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l0.9 12.2h9.2L17.5 7"/></svg> Borrar rama</button>
+                <button id="chat-panel-diff" class="btn btn-xs" hidden
+                        title="Ver qué cambió en la rama (git diff contra la base, sin LLM)">
+                  📄 Diff</button>
+                <!-- Extraer != compactar: este saca los hechos y deja
+                     el hilo intacto; "Compactar" ademas recorta los
+                     turnos viejos y pisa el resumen (2026-08-21). -->
+                <button id="chat-panel-extract-facts" class="btn btn-xs" hidden
+                        title="Destilar hechos de este hilo SIN cerrarlo ni recortarlo. Quedan pendientes de aprobación en Memoria">
+                  🧠 Extraer facts</button>
+                <button id="chat-panel-compact" class="btn btn-xs" hidden
+                        title="Resumir el hilo y liberar contexto SIN cerrarlo (misma rama, mismo Discord)">
+                  🗜 Compactar</button>
+                <button id="chat-panel-close-conv" class="btn btn-xs" hidden
+                        title="Cerrar la conversación: compacta la memoria y abre el PR de la rama">
+                  🔒 Cerrar</button>
+              </header>
+              <div id="chat-summary" class="chat-summary" hidden></div>
+              <div id="chat-panel-messages" class="chat-messages"></div>
+              <!-- Sugerencias de continuación: un tap manda el próximo paso
+                   sin escribir. Se llenan al terminar cada run. -->
+              <div id="chat-suggestions" class="chat-suggestions" hidden></div>
+              <!-- Adjuntos pendientes de este mensaje: se suben al
+                   elegirlos y se mandan con el próximo envío. -->
+              <div id="chat-attach-tray" class="chat-attach-tray" hidden></div>
+              <!-- Aviso de plan corriendo, con cronómetro. Va PEGADO al
+                   composer y no dentro del panel del grafo porque el
+                   problema que resuelve pasa acá: el composer no sabe
+                   del grafo (`activeChat.busy` mira los runs del chat, y
+                   un grafo no crea ninguno), así que decía "Mensaje…" y
+                   mandar algo arrancaba un pedido nuevo compitiendo con
+                   el plan por los mismos archivos. Lo llena chat-grafo.js. -->
+              <div id="chat-grafo-aviso" class="chat-grafo-aviso" hidden></div>
+              <footer id="chat-input-bar" class="chat-input-bar">
+                <input id="chat-attach-input" type="file" multiple hidden
+                       accept="image/*,.txt,.md,.markdown,.rst,.json,.csv,.tsv,.log,.xml,.yaml,.yml,.sql,.tex,.ini,.toml,.html,.htm,.pdf,.xlsx,.xls,.xlsm,.docx,.doc,.pptx,.ppt,.odt,.ods,.odp,.rtf,.zip,.tar,.gz,.tgz,.7z,.epub,.parquet,.db,.sqlite">
+                <!-- Los iconos van en COLUMNA (2026-08-27): en fila se comian
+                     ancho del textarea, que es lo unico que crece. Apilados
+                     ocupan el alto que el composer ya tiene reservado. -->
+                <div class="chat-input-col">
+                <button id="chat-attach-btn" class="btn chat-icon-btn" type="button"
+                        title="Adjuntar archivo o imagen — texto e imágenes van en el prompt; el resto (xlsx, pdf, docx, zip…) queda en disco y el experto lo abre con sus tools (también podés pegar o arrastrar)"
+                        aria-label="Adjuntar">📎</button>
+                <!-- Con qué modelo corre ESTE mensaje, por rol del
+                     runner. Vacío = el del proyecto, que es lo de
+                     siempre. Los llena /admin/api/models; el 🖼 marca
+                     los que ven imágenes.
+
+                     Antes era un <select> suelto acá en la barra: comía
+                     ancho del composer y solo alcanzaba al ejecutor.
+                     Ahora vive en un popover y cubre las cuatro etapas.
+                     El id #chat-model se mantiene: es el del ejecutor y
+                     hay código que lo lee por ese nombre. -->
+                <div class="chat-model-wrap">
+                  <button id="chat-model-btn" class="btn chat-icon-btn" type="button"
+                          aria-haspopup="true" aria-expanded="false"
+                          title="Modelo por rol para este mensaje">🧠</button>
+                  <div id="chat-model-pop" class="chat-model-pop">
+                    <p class="chat-model-pop-title">Modelo de este mensaje</p>
+                    <label class="chat-model-row">Ejecutor
+                      <select id="chat-model" class="input text-xs"></select>
+                    </label>
+                    <label class="chat-model-row">Planificador
+                      <select id="chat-role-planner" class="input text-xs"></select>
+                    </label>
+                    <label class="chat-model-row">Verificador
+                      <select id="chat-role-verifier" class="input text-xs"></select>
+                    </label>
+                    <label class="chat-model-row">Documentador
+                      <select id="chat-role-documenter" class="input text-xs"></select>
+                    </label>
+                    <p class="chat-model-pop-note">Vale solo para el
+                      próximo mensaje. Para dejarlo fijo, Config → Modelo
+                      por rol.</p>
+                  </div>
+                </div>
+                </div><!-- /chat-input-col izquierda -->
+                <textarea id="chat-panel-input" rows="2"
+                          class="input flex-1 min-h-[56px] py-2 font-mono text-xs"
+                          placeholder="Mensaje… (Ctrl+Enter envía)"></textarea>
+                <div class="chat-input-col chat-input-col-acciones">
+                  <button id="chat-panel-send" class="btn btn-primary">Enviar <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg></button>
+                  <button id="chat-panel-busy" class="btn" hidden disabled>⏳ pensando…</button>
+                  <!-- Solo mientras corre (setBusy los prende): corregir el rumbo
+                       sin cancelar, o cortar el run. Apilados y no en fila: son
+                       los dos que aparecen JUNTOS, y en fila empujaban el
+                       textarea justo cuando mas hace falta escribir la
+                       correccion. -->
+                  <button id="chat-panel-steer" class="btn" hidden
+                          title="Mandar la corrección al run en curso (se aplica al cerrar la tool en vuelo)">
+                    🧭 Corregir</button>
+                  <button id="chat-panel-stop" class="btn danger" hidden
+                          title="Cortar el run en curso"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Parar</button>
+                </div>
+              </footer>
+              <p id="chat-readonly-note" class="chat-readonly-note" hidden>
+                🔒 Conversación cerrada — solo lectura. Abre una nueva con
+                <strong>➕ Nuevo</strong> para seguir trabajando.
+              </p>
+              <!-- Event log legacy: Fase 3 lo funde en burbujas inline. Oculto. -->
+              <details id="chat-panel-events" hidden><summary></summary>
+                <ol id="chat-panel-events-list"></ol></details>
+            </div>
+
+            <!-- Memoria del proyecto (facts + FTS5, movida de Conversaciones) -->
+            <div id="chat-memoria" class="chat-memoria" hidden>
+              <header class="mb-4 flex items-center gap-3">
+                <h3 class="panel-title !mb-0 text-base">📚 Memoria del proyecto</h3>
+                <button id="chat-memoria-back" class="btn btn-xs ml-auto">← Volver al chat</button>
+              </header>
+              <p class="panel-sub mb-3">Elige un proyecto en el filtro de la izquierda
+                para ver sus facts y su memoria compactada.</p>
+
+              <h4 class="section-title">Facts (ADR-026) <span id="chat-facts-summary" class="muted"></span></h4>
+              <!-- Aprobacion estricta (2026-08-21): un fact recien
+                   destilado NO llega al experto hasta que se aprueba
+                   aca. El filtro arranca en "pendientes" a proposito:
+                   es la cola de trabajo, no el archivo historico. -->
+              <div class="toolbar">
+                <select id="chat-facts-status" class="select text-xs">
+                  <option value="pending">⏳ pendientes de aprobar</option>
+                  <option value="approved">✓ aprobados (los que ve el experto)</option>
+                  <option value="rejected">✕ rechazados</option>
+                  <option value="">todos</option>
+                </select>
+                <input id="chat-fact-nuevo" type="text" class="input min-w-[280px] flex-1"
+                       placeholder="escribir un fact a mano (nace aprobado)"
+                       maxlength="2000">
+                <button id="chat-fact-add" class="btn">+ Agregar</button>
+              </div>
+              <div class="table-wrap">
+                <table id="chat-facts-table">
+                  <thead><tr><th class="th">fact</th><th class="th">estado</th>
+                    <th class="th">fuente (conv)</th>
+                    <th class="th">creado</th><th class="th"></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+
+              <h4 class="section-title">Memoria FTS5 (ADR-027) <span id="chat-mem-badge"></span></h4>
+              <div class="toolbar">
+                <input id="chat-mem-query" type="text" class="input min-w-[240px]"
+                       placeholder="buscar (ej: postgres, deploy)">
+                <button id="chat-mem-search" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg> Buscar</button>
+                <button id="chat-mem-recent" class="btn">⏱ Recientes</button>
+                <span id="chat-mem-summary" class="muted"></span>
+              </div>
+              <div class="table-wrap">
+                <table id="chat-mem-table">
+                  <thead><tr><th class="th">conv</th><th class="th">rank</th>
+                    <th class="th">summary</th><th class="th"></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- raw .md viewer (lo abre "En curso"). Overlay flotante. -->
+            <div id="chat-viewer" class="chat-viewer" hidden>
+              <div class="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2.5">
+                <strong id="chat-viewer-title" class="break-all font-mono text-xs text-zinc-300"></strong>
+                <button id="chat-viewer-close" class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+              </div>
+              <pre id="chat-viewer-md" class="chat-md max-h-[70vh] !rounded-none !border-0"></pre>
+            </div>
+          </div>
+
+          <!-- PANEL DEL GRAFO (F3, 2026-08-23) — el plan mientras corre.
+               Vive acá, al lado del hilo y no en una pantalla aparte, por
+               una razón: el avance del plan solo tiene sentido MIENTRAS
+               leés lo que el bot está diciendo. En otra pestaña habría
+               que ir a buscarlo, y un tablero al que hay que ir a buscar
+               es un tablero que nadie mira.
+
+               Arranca oculto: aparece cuando la conversación tiene un
+               grafo, y solo entonces. Lo llena chat-grafo.js. -->
+          <div class="chat-resizer" data-resize="grafo" role="separator"
+               aria-orientation="vertical" tabindex="0" hidden
+               aria-label="Ancho del panel del plan"
+               title="Arrastrá para redimensionar · doble click para el default"></div>
+          <aside id="chat-grafo" class="chat-grafo" data-cerrado="1" hidden>
+            <div class="chat-grafo-head">
+              <span id="chat-grafo-estado" class="badge dim">—</span>
+              <strong class="chat-grafo-titulo">Plan</strong>
+              <!-- Ensanchar el panel, no solo agrandar el dibujo: con
+                   siete nodos en una fila el viewBox mide ~832 unidades
+                   y en 360px el SVG se achica al 41%, o sea letra de
+                   4.5px. El zoom resuelve el detalle; el ancho resuelve
+                   el panorama, y son problemas distintos. -->
+              <button id="chat-grafo-ancho" class="btn chat-icon-btn ml-auto"
+                      type="button" title="Ensanchar el panel"
+                      aria-pressed="false">⤢</button>
+              <button id="chat-grafo-cerrar" class="btn chat-icon-btn"
+                      type="button" title="Ocultar el panel" aria-label="cerrar el panel del grafo"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+            </div>
+            <!-- Pestañas. El grafo contesta "¿qué es paralelo y qué es
+                 cadena?"; el resumen contesta "¿qué está pasando ahora y
+                 qué falta?", que en un panel angosto se lee mejor como
+                 texto que como dibujo. Misma card: son dos vistas del
+                 mismo plan, no dos lugares distintos. -->
+            <div class="chat-grafo-tabs" role="tablist">
+              <button id="chat-grafo-tab-grafo" class="chat-grafo-tab activa"
+                      type="button" role="tab" aria-selected="true"
+                      data-vista="grafo">Grafo</button>
+              <button id="chat-grafo-tab-resumen" class="chat-grafo-tab"
+                      type="button" role="tab" aria-selected="false"
+                      data-vista="resumen">Resumen</button>
+            </div>
+            <div class="chat-grafo-progreso">
+              <!-- Dos segmentos y no uno: `porcentaje` cuenta las tareas
+                   CERRADAS, y una fallada está cerrada. Una sola barra
+                   verde pintaba 75% con una sola tarea bien hecha —
+                   exactamente la mentira que un tablero no puede
+                   permitirse. Verde = hechas, rojo = falladas o
+                   bloqueadas, gris = lo que falta. -->
+              <div class="chat-grafo-barra">
+                <i id="chat-grafo-barra-ok" class="gbien"></i>
+                <i id="chat-grafo-barra-mal" class="gmal"></i>
+              </div>
+              <span id="chat-grafo-conteo" class="chat-grafo-conteo">—</span>
+            </div>
+            <!-- Veredicto de la verificación de cierre del grafo (UNA
+                 por grafo, ver `orquestador._verificar_al_cerrar`). Va
+                 acá arriba y no en el detalle de un nodo porque habla
+                 del grafo ENTERO, y porque una perspectiva que opina y
+                 no llega a ninguna pantalla es peor que no tenerla: de
+                 68 veredictos `off_plan` de los chats, 33 no se vieron
+                 nunca. Lo llena chat-grafo.js. -->
+            <div id="chat-grafo-veredicto" class="chat-grafo-veredicto"
+                 hidden></div>
+            <!-- Zoom. El lienzo ya tiene `overflow: auto`, así que
+                 agrandar el SVG por encima del panel da el paneo gratis
+                 — no hace falta arrastrar ni una librería. -->
+            <div id="chat-grafo-zoom" class="chat-grafo-zoom">
+              <button id="chat-grafo-zoom-menos" class="btn btn-xs"
+                      type="button" title="Alejar">−</button>
+              <span id="chat-grafo-zoom-nivel" class="chat-grafo-zoom-nivel"
+                    title="Nivel de zoom">entra</span>
+              <button id="chat-grafo-zoom-mas" class="btn btn-xs"
+                      type="button" title="Acercar">+</button>
+              <button id="chat-grafo-zoom-fit" class="btn btn-xs"
+                      type="button" title="Que entre en el panel">⤡</button>
+            </div>
+            <div id="chat-grafo-lienzo" class="chat-grafo-lienzo"></div>
+            <!-- Resumen: el plan por capas, en texto. Sale de los mismos
+                 `capas` que el dibujo, así que no hay una segunda verdad
+                 que se pueda desincronizar. -->
+            <div id="chat-grafo-resumen" class="chat-grafo-resumen" hidden></div>
+            <div id="chat-grafo-detalle" class="chat-grafo-detalle" hidden></div>
+            <div class="chat-grafo-pie">
+              <button id="chat-grafo-parar" class="btn btn-xs danger" type="button"
+                      title="Cortar el plan y los nodos en vuelo"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Parar el plan</button>
+              <!-- F4: el plan quedó a medias (se cortó el relay, lo
+                   pararon, o una tarea espera y ya la resolviste). El
+                   relay sana los nodos huérfanos al arrancar pero NO
+                   relanza solo: arrancar trabajo que nadie pidió es otra
+                   cosa que reparar. Este botón es ese pedido. -->
+              <button id="chat-grafo-seguir" class="btn btn-xs btn-primary" type="button"
+                      title="Retomar el plan donde quedó"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg> Retomar</button>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- Voz (D-PEND-003, 2026-07-13): transcripts de voice input.
+           GET /voice/transcripts (lista) + /voice/transcripts/{id}
+           (detalle en modal). Solo lectura. -->
+      <section id="tab-voice" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Voz</h2>
+          <p class="panel-sub">Transcripts de voice input (docs/VOICE_INPUT.md).
+            Se generan con <code>/listen</code> (audio adjunto) o
+            <code>/join</code>+<code>/leave</code> (grabación VC) desde Discord.
+            Click en una fila para ver el texto completo y el resumen de
+            <code>/process</code> si lo hay. <strong>📝 Crear issue</strong>
+            aplica la skill on-demand <code>create-github-issue-from-transcript</code>
+            (no se inyecta automáticamente; vive solo en este botón).</p>
+        </header>
+        <div class="toolbar">
+          <button id="voice-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <span id="voice-summary" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="voice-table">
+            <thead><tr>
+              <th class="th th-sort" data-col="0" tabindex="0" role="button">trx_id</th><th class="th th-sort" data-col="1" tabindex="0" role="button">fecha</th><th class="th th-sort" data-col="2" tabindex="0" role="button">autor</th>
+              <th class="th th-sort" data-col="3" tabindex="0" role="button">modo</th><th class="th">duración</th><th class="th th-sort" data-col="5" tabindex="0" role="button">proyecto</th>
+              <th class="th"></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Night Runs (Iter 5.4): lista + detalle de TODAS las corridas.
+           El endpoint GET /admin/api/night-runs devuelve runs[];
+           click en uno abre el detalle con tasks/results/branch/PR. -->
+      <section id="tab-night-runs" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Night Runs</h2>
+          <p class="panel-sub">Corridas del modo nocturno. Click en una fila
+            para ver el plan ledger, las tareas, la rama y el PR.</p>
+        </header>
+        <div class="toolbar">
+          <button id="night-runs-refresh" class="btn">Refrescar</button>
+          <select id="night-runs-project" class="select"
+                  title="filtrar por proyecto">
+            <option value="">— todos los proyectos —</option>
+          </select>
+          <select id="night-runs-limit" class="select" title="límite">
+            <option value="20">20</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+          <span id="night-runs-summary" class="muted">—</span>
+        </div>
+        <div class="table-wrap">
+          <table id="night-runs-table">
+            <thead>
+              <tr>
+                <th class="th">inicio</th>
+                <th class="th">proyecto</th>
+                <th class="th">run_id</th>
+                <th class="th">end_reason</th>
+                <th class="th">tareas</th>
+                <th class="th">PR</th>
+                <th class="th">rama</th>
+                <th class="th">acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="night-runs-empty" class="empty" hidden>
+            No hay corridas todavía.
+          </div>
+        </div>
+      </section>
+
+      <!-- CRM local (trycompai/crm): sincroniza empresas + deals +
+           contactos leyendo su Postgres. Read-only: para editar, andá al
+           CRM en localhost:3000. Sin credencial que cargar. -->
+      <section id="tab-crm" class="panel" hidden>
+        <header class="mb-5 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 class="panel-title">CRM</h2>
+            <p class="panel-sub">Espejo read-only de tus empresas, deals y
+              contactos. Se edita en el CRM; acá se cruza con los proyectos:
+              cada proyecto es un deal.</p>
+          </div>
+          <a id="crm-open" class="btn btn-primary" target="_blank"
+             rel="noopener" href="http://localhost:3000">
+            Abrir el CRM
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" class="h-3.5 w-3.5"><path d="M7 17L17 7M9 7h8v8"
+                 stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+        </header>
+
+        <!-- Barra de estado: conexión al CRM + totales + acción. -->
+        <div class="card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <span id="crm-conn" class="muted">verificando conexión…</span>
+            <span id="crm-summary" class="text-sm text-zinc-500"></span>
+          </div>
+          <div class="flex items-center gap-2">
+            <!-- Solo aparece si la app del CRM no contesta (app_up del
+                 check): arranca el contenedor de Postgres y `bun run dev`. -->
+            <button id="crm-start" class="btn btn-primary" hidden
+                    title="Arranca el Postgres y el dev server del CRM (docs/CRM_LOCAL.md)"
+                    >Levantar CRM</button>
+            <button id="crm-digest-btn" class="btn"
+                    title="Silencio + issues abiertos por cliente, listo para postear en Discord"
+                    >Generar digest</button>
+            <button id="crm-sync" class="btn">Sincronizar</button>
+          </div>
+        </div>
+        <div id="crm-status" class="mt-3"></div>
+
+        <!-- Lista densa: una fila por cliente. Se probó una grilla de
+             cards y con clientes de pocos deals quedaban cajas grandes
+             medio vacías; en fila entra todo lo que se compara (deals,
+             etapa, proyectos, monto) alineado y sin scroll. -->
+        <div id="crm-grid" class="card mt-4 divide-y divide-zinc-800/70"></div>
+        <div id="crm-empty" class="empty mt-4" hidden>
+          Sin clientes sincronizados todavía. Pulsá Sincronizar.
+        </div>
+        <!-- Cadena cliente → deal → proyecto → git → kanban → issues/PR, en
+             panel lateral: abajo obligaba a scrollear y se perdía la lista.
+             Sin backdrop a propósito — se salta de un cliente a otro
+             clickeando la lista, sin cerrar. Sale de
+             GET /admin/api/crm/clients/{id}; los contadores de issues/PR se
+             piden por proyecto después, para no bloquear el render con el
+             spawn de `gh`.
+
+             Va DENTRO de la section: al cambiar de tab, el [hidden] del
+             panel lo tapa también (es fixed, si no quedaría flotando sobre
+             otro tab). Display SOLO por .open. -->
+        <aside id="crm-detail" class="side-panel" aria-label="Detalle del cliente"></aside>
+      </section>
+      <!-- Zombies (Iter 5.3): chats running viejos sin proceso vivo.
+           Endpoint GET /admin/api/chats/zombies; DELETE para limpiar. -->
+      <section id="tab-zombies" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Zombies</h2>
+          <p class="panel-sub">Chats que figuran <code>running</code> en DB pero
+            el relay no tiene proceso vivo (reinicio, crash sin cleanup, etc.).
+            Acá los puedes limpiar.</p>
+        </header>
+        <div class="toolbar">
+          <button id="zombies-refresh" class="btn">Refrescar</button>
+          <span class="label">threshold
+            <select id="zombies-older-than" class="select">
+              <option value="60">60s</option>
+              <option value="300" selected>5min</option>
+              <option value="3600">1h</option>
+              <option value="86400">24h</option>
+            </select>
+          </span>
+          <span id="zombies-summary" class="muted">—</span>
+        </div>
+        <div class="table-wrap">
+          <table id="zombies-table">
+            <thead>
+              <tr>
+                <th class="th">chat_id</th>
+                <th class="th">proyecto</th>
+                <th class="th">iniciado</th>
+                <th class="th">origen</th>
+                <th class="th">acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="zombies-empty" class="empty" hidden>
+            No hay zombies con ese threshold.
+          </div>
+        </div>
+      </section>
+
+      <!-- Proyectos -->
+      <section id="tab-projects" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Proyectos</h2>
+          <p class="panel-sub">Tu trabajo, sus agentes y conexiones. Abre un proyecto para ver sus detalles.</p>
+        </header>
+        <div class="toolbar">
+          <button id="project-new" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Nuevo proyecto</button>
+          <button id="projects-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <button id="projects-orphans" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg> Ver huérfanos cbm (<span id="orphans-count">0</span>)</button>
+        </div>
+        <!-- La tabla la monta dataTable() (ui-table.js): thead, buscador,
+             orden y paginado salen de la definicion de columnas en
+             tab-projects.js, no de markup a mano. Los encabezados que
+             eran solo un emoji (🌙 / 📡 / 📋) ahora tienen texto:
+             un header sin nombre no se puede ordenar ni leer en voz alta. -->
+        <div id="projects-table"></div>
+      </section>
+
+      <!-- Huérfanos cbm -->
+      <section id="tab-orphans" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Repos indexados en cbm sin experto</h2>
+          <p class="panel-sub">Están en el knowledge graph pero no en la tabla
+            <code>projects</code>. Acá los puedes agregar como experto con un click
+            (system_prompt template, native_tools=["cbm"], mcp_servers vacío —
+            filesystem/shell ya son nativos).</p>
+          <!-- Antes vivía en el toolbar de la tabla; mudado al <header>
+               porque dataTable() escribe su propio .dt-count y se
+               pisaban. El copy "X huérfanos de Y indexados (Z ya en DB)"
+               es contextual del módulo, no del conteo de filas. -->
+          <p id="orphans-summary" class="panel-sub muted mt-2"></p>
+        </header>
+        <div id="orphans-table"></div>
+
+        <h3 class="section-title">Ignorados (no aparecen en la lista de arriba)</h3>
+        <p class="panel-sub mb-4">Si ignoraste algo por error o cambiaste de opinión, lo
+          traes de vuelta desde acá. Persistente (sobrevive reinicios).</p>
+        <!-- dataTable(): son 43 filas y la pregunta que se le hace a esta
+             tabla es "¿está X ignorado?", que sin buscador es un Ctrl+F. -->
+        <div id="ignored-table"></div>
+      </section>
+
+      <!-- Skills (autoaprendizaje, 2026-07-12) -->
+      <section id="tab-skills" class="panel" hidden>
+        <header class="mb-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <h2 class="panel-title !mb-0">Skills</h2>
+            <!-- Arriba y no enterrado en la card de presupuesto: es el
+                 archivo que va en el system prompt de CADA run. -->
+            <button id="instructions-edit" class="btn"
+              title="editar ~/.copilot/copilot-instructions.md — va entero en el system prompt de cada run">
+              📝 Instrucciones del system prompt</button>
+          </div>
+          <p class="panel-sub">Autoaprendizaje estilo hermes-agent: al compactar una
+            conversación, si hubo un <strong>procedimiento reusable</strong> el
+            compactador lo destila como <strong>borrador</strong>. Nada se instala
+            solo: acá lo revisas, lo editas si hace falta y al aprobarlo se copia a
+            <code>~/.copilot/skills</code>, donde se inyecta en el system prompt de
+            cada push (ADR-010).</p>
+        </header>
+
+        <!-- Presupuesto: lo que se paga en CADA push antes de escribir
+             una palabra útil (ponytail + índice de skills + fallback). -->
+        <h3 class="section-title !mt-0">Presupuesto del system prompt</h3>
+        <div class="card p-4">
+          <div class="mb-3 flex flex-wrap items-center gap-3">
+            <button id="budget-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Recalcular</button>
+            <label class="label !mb-0" for="budget-project">proyecto</label>
+            <select id="budget-project" class="select w-auto">
+              <option value="">(global)</option>
+            </select>
+            <span id="budget-summary" class="muted"></span>
+          </div>
+          <div id="budget-bar" class="budget-bar" role="img"
+               aria-label="uso del presupuesto de tokens"></div>
+          <div id="budget-legend" class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs"></div>
+          <p class="muted mt-3 text-xs">Estimación <code>chars/4</code>: sirve para
+            decidir qué recortar, no para facturar. El índice de skills es
+            <strong>name + description</strong> de cada skill prendida — el
+            <code>SKILL.md</code> completo NO viaja.</p>
+          <div id="budget-top" class="mt-3"></div>
+        </div>
+
+        <!-- Alta desde GitHub: mismo flujo que MCPs pero sin ejecutar nada. -->
+        <h3 class="section-title">Instalar desde GitHub</h3>
+        <p class="panel-sub mb-4">Clona el repo, lista sus <code>SKILL.md</code> y
+          tú marcas cuáles entran. No se ejecuta nada: una skill es markdown.
+          El riesgo es <strong>prompt injection</strong> (entra al system prompt),
+          así que lee con 👁 antes de instalar lo que no conoces.</p>
+        <div class="toolbar">
+          <select id="skills-catalog" class="select">
+            <option value="">— repos sugeridos —</option>
+          </select>
+          <input id="skills-repo-url" type="text" class="input font-mono flex-1"
+                 placeholder="https://github.com/owner/repo">
+          <button id="skills-browse-btn" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.5v12M7 12l5 5 5-5M5 20h14"/></svg> Clonar y listar</button>
+        </div>
+
+        <div id="skills-browse-panel" class="card mt-4 p-4" hidden>
+          <div class="mb-3 flex flex-wrap items-center gap-3">
+            <strong class="text-sm text-zinc-200">Repo</strong>
+            <code id="skills-browse-url" class="font-mono text-xs text-zinc-400"></code>
+            <span id="skills-browse-state" class="badge dim">pending</span>
+            <code id="skills-browse-commit" class="font-mono text-[10px] text-zinc-400"></code>
+            <button id="skills-browse-close" class="btn btn-xs ml-auto"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> Descartar clon</button>
+          </div>
+          <div id="skills-browse-msg" class="muted mb-3"></div>
+          <div id="skills-browse-controls" class="toolbar" hidden>
+            <input id="skills-browse-filter" type="text" class="input flex-1"
+                   placeholder="filtrar por nombre o descripción…">
+            <button id="skills-browse-all" class="btn btn-xs">Todas</button>
+            <button id="skills-browse-none" class="btn btn-xs">Ninguna</button>
+            <label class="flex items-center gap-1.5 text-xs text-zinc-400">
+              <input id="skills-browse-overwrite" type="checkbox" class="accent-emerald-500">
+              sobrescribir existentes</label>
+            <label class="flex items-center gap-1.5 text-xs text-zinc-400"
+                   title="entran al disco pero no al system prompt hasta que las prendas">
+              <input id="skills-browse-enabled" type="checkbox" class="accent-emerald-500" checked>
+              prendidas al instalar</label>
+            <button id="skills-browse-install" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.5v12M7 12l5 5 5-5M5 20h14"/></svg> Instalar seleccionadas</button>
+          </div>
+          <div class="table-wrap mt-3">
+            <table id="skills-browse-table">
+              <thead>
+                <tr>
+                  <th class="th w-8"></th>
+                  <th class="th">nombre</th><th class="th">descripción</th>
+                  <th class="th">ruta</th><th class="th">tamaño</th>
+                  <th class="th">tokens</th><th class="th text-right">ver</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <h3 class="section-title">Borradores del compactador</h3>
+        <div class="toolbar">
+          <select id="drafts-status" class="select">
+            <option value="pending" selected>pendientes</option>
+            <option value="approved">aprobados</option>
+            <option value="rejected">rechazados</option>
+            <option value="">todos</option>
+          </select>
+          <button id="drafts-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <span id="drafts-summary" class="muted"></span>
+        </div>
+        <!-- dataTable() (ui-table.js): antes era una tabla a mano con
+             <tbody>.innerHTML = … y los listeners atados a cada <tr>
+             morían en el primer refresh. Con delegación + dataTable
+             queda igual que la tabla de Instaladas de abajo (cierre
+             de la inconsistencia interna del tab). -->
+        <div id="drafts-table"></div>
+
+        <h3 class="section-title">Instaladas</h3>
+        <p class="panel-sub mb-4">Las que el SkillCache inyecta hoy:
+          <code>name + description</code> si están en <em>Inyectada</em>,
+          solo el nombre si están en <em>On-demand</em> (el experto pide
+          el cuerpo con <code>read_skill</code>). Directorio:
+          <code id="skills-dir">…</code></p>
+        <div class="toolbar">
+          <button id="skills-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <span id="skills-summary" class="muted"></span>
+        </div>
+        <!-- La monta dataTable() (ui-table.js): ordenar por tokens es
+             justo la pregunta que uno le hace a esta tabla —qué skill
+             está pagando más presupuesto de prompt— y antes no se podía. -->
+        <div id="skills-table"></div>
+      </section>
+
+      <!-- Indexación -->
+      <section id="tab-index" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Bulk indexación — elige tus repos</h2>
+          <p class="panel-sub">Navega tu filesystem, marca los que quieres indexar y
+            dispara. Cada repo te dice si <strong>ya tiene experto</strong> en la DB y
+            si está <strong>indexado en cbm</strong>.</p>
+        </header>
+        <div class="toolbar">
+          <input id="browse-path" type="text" class="input w-[420px]"
+                 placeholder="raíz de tus repos (tab Config)">
+          <label class="label">depth:
+            <select id="browse-depth" class="select">
+              <option value="1">1 (solo hijos)</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </label>
+          <button id="browse-btn" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg> Browse</button>
+          <button id="browse-select-all" class="btn" title="marcar todos">☑ todos</button>
+          <button id="browse-select-none" class="btn" title="desmarcar todos">☐ ninguno</button>
+          <button id="browse-select-unindexed" class="btn" title="solo los NO indexados en cbm">⚡ no indexados</button>
+          <button id="browse-select-no-expert" class="btn" title="solo los SIN experto en la DB">🤖 sin experto</button>
+        </div>
+
+        <div id="browse-summary" class="muted mb-2"></div>
+        <div class="table-wrap">
+          <table id="browse-table">
+            <thead>
+              <tr>
+                <th class="th"></th>
+                <th class="th">path</th>
+                <th class="th">experto</th>
+                <th class="th">cbm</th>
+                <th class="th">nodes/edges</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="toolbar mt-5 border-t border-zinc-800 pt-4">
+          <label class="label">Concurrencia:
+            <input id="bulk-conc" type="number" min="1" max="6" value="2" class="input w-16"></label>
+          <label class="label"><input id="bulk-force" type="checkbox"> force (reindexar aunque esté)</label>
+          <button id="bulk-start" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg> Indexar seleccionados (<span id="bulk-selected-count">0</span>)</button>
+        </div>
+
+        <div id="bulk-progress" class="mt-4" hidden>
+          <div class="bar"><div id="bulk-bar-fill"></div></div>
+          <p id="bulk-summary" class="muted mt-2"></p>
+          <div class="table-wrap mt-3" >
+            <table id="bulk-table" hidden>
+              <thead><tr><th class="th">path</th><th class="th">status</th><th class="th">nodes</th>
+                <th class="th">edges</th><th class="th">seg</th><th class="th">error</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <h3 class="section-title">Archivos indexados (vista de tabla)</h3>
+        <p class="panel-sub mb-4">Pick un proyecto y reindexa o inspecciona la tabla.
+          v1 no muestra grafo, solo tabla plana.</p>
+        <div class="toolbar">
+          <select id="index-projects" class="select"></select>
+          <button id="reindex-btn" class="btn">Reindexar</button>
+          <button id="refresh-files-btn" class="btn">Refrescar tabla</button>
+          <span id="reindex-status" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="files-table">
+            <thead>
+              <tr>
+                <th class="th">path</th><th class="th">nombre</th>
+                <th class="th">in-degree</th><th class="th">out-degree</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Diagramas (mermaid editor). Antes vivía al final del <main>,
+           literal pegado a </section> de tab-logs sin newline — bug
+           visible en el código (la nav decía "Conocimiento" y el
+           layout lo dejaba huérfano al final). Movido acá para que
+           el orden DOM matchee el orden de la nav. -->
+      <section id="tab-diagrams" class="panel" hidden></section>
+
+      <!-- Comandos -->
+      <section id="tab-commands" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Comandos dinámicos</h2>
+          <p class="panel-sub">Comandos que el bot puede invocar. <code>handler</code> es un
+            dotted path Python (ej: <code>relay.commands.build</code>). El
+            <code>args_schema</code> es JSON Schema; si está presente, los args se validan
+            antes de ejecutar. Prueba un comando abajo con un click.</p>
+        </header>
+        <div class="toolbar">
+          <button id="cmd-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <button id="cmd-new" class="btn btn-primary">+ Nuevo comando</button>
+          <span id="cmd-summary" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="commands-table">
+            <thead>
+              <tr>
+                <th class="th">nombre</th><th class="th">descripción</th><th class="th">handler</th>
+                <th class="th">schema</th><th class="th">on</th><th class="th"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- .field en vez de la ristra de utilidades que estaba inline
+             (flex flex-col gap-1 text-[11px] font-semibold uppercase...)
+             repetida en cada label: era la cuarta variante de label. -->
+        <section id="cmd-form-wrap" class="form-section mt-5" hidden>
+          <header class="form-section-head">
+            <h3 id="cmd-form-title" class="form-section-title">Nuevo comando</h3>
+          </header>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="cmd-name">Nombre<span class="req">*</span></label>
+              <input id="cmd-name" type="text" class="input font-mono" placeholder="mi_comando">
+            </div>
+            <div class="field">
+              <label class="field-label" for="cmd-enabled">Habilitado</label>
+              <label class="label"><input id="cmd-enabled" type="checkbox" checked>
+                el bot lo puede invocar</label>
+            </div>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="cmd-description">Descripción</label>
+            <input id="cmd-description" type="text" class="input" placeholder="Qué hace el comando">
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="cmd-handler">Handler<span class="req">*</span></label>
+            <input id="cmd-handler" type="text" class="input font-mono" placeholder="relay.commands.mi_handler">
+            <p class="field-hint">dotted path de Python, ej. <code>relay.commands.build</code></p>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="cmd-schema">args_schema</label>
+            <textarea id="cmd-schema" class="input w-full font-mono text-xs" rows="5"
+                      placeholder='{"type":"object","properties":{...}}'></textarea>
+            <p class="field-hint">JSON Schema, opcional. Si está, los args se
+              validan antes de ejecutar.</p>
+          </div>
+          <div class="field-actions">
+            <button id="cmd-save" class="btn btn-primary">Guardar</button>
+            <button id="cmd-cancel" class="btn">Cancelar</button>
+            <span id="cmd-form-msg" class="muted"></span>
+          </div>
+        </section>
+
+        <h3 class="section-title">Probar un comando</h3>
+        <div class="toolbar">
+          <select id="cmd-run-name" class="select"></select>
+          <!-- El placeholder lo pone tab-commands.js con los args REALES
+               del comando elegido: cada uno usa su propia clave
+               (`project`, `target`, `chat`, `name`) y un ejemplo fijo
+               servía para unos y mentía para otros. Al lado había un
+               input "project (opcional)" que el backend leía y tiraba:
+               no podía funcionar sin una clave común. Se sacó. -->
+          <input id="cmd-run-args" type="text" class="input min-w-[280px] font-mono"
+                 placeholder="args JSON">
+          <button id="cmd-run-btn" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg> Ejecutar</button>
+        </div>
+        <pre id="command-run-output" class="chat-md max-h-72" hidden></pre>
+      </section>
+
+      <!-- Modelos: la tabla `models`. Fuente de verdad del selector del
+           chat, del guard de visión y de las tarifas. -->
+      <section id="tab-models" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Modelos</h2>
+          <p class="panel-sub">Tabla <code>models</code>. Lo que está
+            <strong>prendido</strong> aparece en el selector del chat.
+            <strong>Visión</strong> se mide, no se deduce: hay modelos que
+            aceptan una imagen, no dan error y contestan igual sin verla
+            (<code>glm-5.2</code>). Para medir uno:
+            <code>python scripts/probe_vision.py &lt;spec&gt;</code>. Para traer
+            el catálogo de un provider:
+            <code>python scripts/import_models.py nvidia</code>.</p>
+        </header>
+        <div class="flex flex-wrap items-center gap-3 mb-3">
+          <input id="models-filter" class="input text-xs" style="max-width:16rem"
+                 placeholder="filtrar por spec o nombre…">
+          <label class="text-xs flex items-center gap-1">
+            <input type="checkbox" id="models-all"> ver todos (incluye apagados)
+          </label>
+          <span id="models-count" class="muted text-xs"></span>
+          <span class="flex-1"></span>
+          <button id="models-new" class="btn btn-primary btn-xs"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Nuevo</button>
+          <button id="models-refresh" class="btn btn-xs" aria-label="refrescar el catálogo de modelos" title="refrescar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg></button>
+        </div>
+        <!-- .table-wrap/.th como el resto: esta tabla se habia escrito
+             con su propio estilo a mano (px-2 py-1, text-zinc-400) y era
+             la unica del admin que no se veia como las demas. -->
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="th th-sort" data-col="0" tabindex="0" role="button" title="Aparece en el selector del chat">On</th>
+                <th class="th th-sort" data-col="1" tabindex="0" role="button">Spec</th>
+                <th class="th th-sort" data-col="2" tabindex="0" role="button">Nombre</th>
+                <th class="th th-sort" data-col="3" tabindex="0" role="button">Visión</th>
+                <th class="th th-sort text-right" data-col="4" tabindex="0" role="button" title="USD por millón de tokens">In</th>
+                <th class="th th-sort text-right" data-col="5" tabindex="0" role="button" title="USD por millón de tokens">Out</th>
+                <th class="th th-sort" data-col="6" tabindex="0" role="button">Key</th>
+                <th class="th"></th>
+              </tr>
+            </thead>
+            <tbody id="models-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- MCPs (plan MCP_REGISTRY F3) -->
+      <section id="tab-mcp" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">MCPs on-demand</h2>
+          <p class="panel-sub">Catálogo de MCP servers (tabla <code>mcp_servers</code>). Duermen
+            hasta que un run los pide con <code>--con db</code> o el experto llama
+            <code>use_capability</code>; el reaper los apaga tras el idle timeout.
+            Sin proyectos linkeados = global (sirve a todos). Credenciales en
+            <code>env</code> SIEMPRE por referencia <code>env:NOMBRE</code> (se resuelven
+            contra el <code>.env</code> del relay, nunca quedan en la DB).</p>
+        </header>
+        <div class="toolbar">
+          <button id="mcp-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <button id="mcp-new" class="btn btn-primary">+ Nuevo MCP</button>
+          <span id="mcp-summary" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="mcp-table">
+            <thead>
+              <tr>
+                <th class="th">nombre</th><th class="th">capability</th>
+                <th class="th">transporte</th><th class="th">modo</th>
+                <th class="th">proyectos</th><th class="th">health</th>
+                <th class="th">vetting</th><th class="th">on</th><th class="th"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- .field como Config, Comandos y el editor de modelos. Este era el
+             ultimo lugar con la ristra de utilidades inline repetida en
+             cada label (16 veces en este solo form). -->
+        <section id="mcp-form-wrap" class="form-section mt-5" hidden>
+          <header class="form-section-head">
+            <h3 id="mcp-form-title" class="form-section-title">Nuevo MCP</h3>
+          </header>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="mcp-name">Nombre<span class="req">*</span></label>
+              <input id="mcp-name" type="text" class="input font-mono" placeholder="postgres-sample-app">
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-capability">Capability</label>
+              <select id="mcp-capability" class="select">
+                <option>db</option><option>browser</option><option>docs</option>
+                <option>web</option><option>github</option><option>aws</option>
+                <option>files</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-transport">Transporte</label>
+              <select id="mcp-transport" class="select">
+                <option>stdio</option><option>http</option><option>sse</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-idle">Idle timeout</label>
+              <input id="mcp-idle" type="number" class="input" value="300">
+              <p class="field-hint">segundos sin uso antes de bajar el proceso</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-command">Comando</label>
+              <input id="mcp-command" type="text" class="input font-mono" placeholder="npx">
+              <p class="field-hint">solo para transporte <code>stdio</code></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-url">URL</label>
+              <input id="mcp-url" type="text" class="input font-mono" placeholder="http://localhost:9999/mcp">
+              <p class="field-hint">solo para <code>http</code> / <code>sse</code></p>
+            </div>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="mcp-args">Args</label>
+            <input id="mcp-args" type="text" class="input font-mono"
+                   placeholder='["-y", "@modelcontextprotocol/server-postgres"]'>
+            <p class="field-hint">array JSON</p>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="mcp-env">Env</label>
+            <textarea id="mcp-env" class="input w-full font-mono text-xs" rows="4"
+                      placeholder='{"DATABASE_URL": "env:SAMPLE_APP_PG_DSN"}'></textarea>
+            <p class="field-hint">JSON. Las credenciales van como
+              <code>env:NOMBRE</code>, nunca el valor en claro.</p>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="mcp-projects">Proyectos</label>
+            <input id="mcp-projects" type="text" class="input font-mono" placeholder="sample-app, inventorydemo">
+            <p class="field-hint">slugs separados por coma; vacío = global</p>
+          </div>
+          <div class="field mt-4">
+            <span class="field-label">Opciones</span>
+            <div class="flex flex-wrap gap-5">
+              <label class="label"><input id="mcp-ondemand" type="checkbox" checked> on-demand</label>
+              <label class="label"><input id="mcp-readonly" type="checkbox" checked> read-only</label>
+              <label class="label"><input id="mcp-enabled" type="checkbox"> habilitado</label>
+            </div>
+          </div>
+          <div class="field-actions">
+            <button id="mcp-save" class="btn btn-primary">Guardar</button>
+            <button id="mcp-cancel" class="btn">Cancelar</button>
+            <span id="mcp-form-msg" class="muted"></span>
+          </div>
+        </section>
+
+        <h3 class="section-title">Agregar desde GitHub</h3>
+        <p class="panel-sub mb-2">Pega la URL del repo: el relay clona un commit pineado,
+          un scan estático detecta red flags (<em>no ejecuta nada</em>), el veredicto
+          final se muestra con todos los hallazgos y <strong>te pide confirmación</strong>
+          antes de instalar. Si el detector no puede inferir el comando, completalo
+          en el form y confirma. <span class="text-amber-300">Honestidad de seguridad:
+          esto NO es sandbox — código de terceros corre en tu máquina.</span></p>
+        <div class="toolbar">
+          <input id="mcp-gh-url" type="text" class="input min-w-[380px] font-mono"
+                 placeholder="https://github.com/org/algun-mcp-server">
+          <button id="mcp-install-btn" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.5v12M7 12l5 5 5-5M5 20h14"/></svg> Clonar</button>
+        </div>
+
+        <!-- Panel del job. Aparece cuando arranca un install. -->
+        <div id="mcp-install-panel" class="card mt-4 p-4" hidden>
+          <div class="mb-3 flex flex-wrap items-center gap-3">
+            <strong class="text-sm text-zinc-200">Job</strong>
+            <code id="mcp-job-id" class="font-mono text-xs text-zinc-400"></code>
+            <span id="mcp-job-state"><span class="badge dim">pending</span></span>
+            <span class="text-xs text-zinc-400" id="mcp-job-updated"></span>
+          </div>
+          <div id="mcp-job-error" class="warn-box" hidden></div>
+
+          <!-- Paso a paso: cada paso se marca cuando pasa. -->
+          <ol id="mcp-job-steps"
+              class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+            <li data-step="cloning">clonando</li>
+            <li data-step="cloned" class="hidden">·</li>
+            <li data-step="scanning" class="hidden">scanning</li>
+            <li data-step="scanned" class="hidden">·</li>
+            <li data-step="vetting" class="hidden">vetting</li>
+            <li data-step="vetted" class="hidden">·</li>
+            <li data-step="awaiting_confirm" class="hidden">esperando confirmación</li>
+          </ol>
+
+          <!-- Hallazgos del scan estático. Vacío si no hay. -->
+          <h4 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-400">Scan estático</h4>
+          <ul id="mcp-scan-findings"
+              class="mb-4 max-h-40 space-y-1 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-xs text-zinc-300 empty:hidden"></ul>
+
+          <!-- Veredicto de vetting. -->
+          <div class="grid gap-3 md:grid-cols-2">
+            <div>
+              <h4 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-400">Vetting</h4>
+              <div class="flex items-center gap-2">
+                <span id="mcp-vet-verdict"><span class="badge dim">unknown</span></span>
+              </div>
+              <p id="mcp-vet-report"
+                 class="mt-2 max-h-40 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 text-xs text-zinc-300"></p>
+            </div>
+            <div>
+              <h4 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-400">Detalles</h4>
+              <table class="status-detail">
+                <tr><th>URL</th><td id="mcp-job-url" class="break-all font-mono text-xs"></td></tr>
+                <tr><th>Slug</th><td><code id="mcp-job-slug"></code></td></tr>
+                <tr><th>Commit pineado</th><td><code id="mcp-job-commit"></code></td></tr>
+                <tr><th>Install dir</th><td><code id="mcp-job-dir" class="break-all"></code></td></tr>
+              </table>
+            </div>
+          </div>
+
+          <h4 class="mb-2 mt-5 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+            Propuesta detectada
+          </h4>
+          <p id="mcp-needs-manual-hint"
+             class="warn-box hidden">
+            <strong>Comando no detectado.</strong> Toca los campos abajo antes de confirmar.
+          </p>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="mcp-prop-cmd">Comando</label>
+              <input id="mcp-prop-cmd" type="text" class="input font-mono" placeholder="npx">
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-prop-args">Args</label>
+              <input id="mcp-prop-args" type="text" class="input font-mono" placeholder='["-y", "@x/y"]'>
+              <p class="field-hint">array JSON</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-prop-cap">Capability</label>
+              <select id="mcp-prop-cap" class="select">
+                <option>browser</option><option>db</option><option>docs</option>
+                <option>web</option><option>github</option><option>aws</option>
+                <option>files</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mcp-prop-name">Nombre</label>
+              <input id="mcp-prop-name" type="text" class="input font-mono" placeholder="postgres-sample-app">
+              <p class="field-hint">pisa el que detectó el scan</p>
+            </div>
+          </div>
+
+          <div class="toolbar mt-4 mb-0">
+            <button id="mcp-install-confirm" class="btn btn-primary">✓ Confirmar e instalar</button>
+            <button id="mcp-install-discard" class="btn danger"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> Descartar</button>
+            <button id="mcp-install-close" class="btn">Cerrar panel</button>
+            <span id="mcp-install-msg" class="muted"></span>
+          </div>
+        </div>
+
+        <!-- Conexiones SQL (2026-08-16). Van acá y no en un tab propio
+             porque para el humano son lo mismo que un MCP: "a qué cosa
+             externa puede llegar el experto". La diferencia (que las
+             ejecuta el relay y no un subprocess) es implementación. -->
+        <h3 class="section-title">Conexiones SQL</h3>
+        <p class="panel-sub mb-2">Bases que el experto puede consultar desde el chat con
+          <code>db_query</code>. El modelo usa el <strong>alias</strong> y nunca ve la
+          cadena: así la contraseña no entra al historial del hilo, que se guarda en
+          disco y se re-manda al modelo en cada turno. <strong>Solo lectura</strong>
+          salvo que marques <em>escribir</em> — un <code>DELETE</code> sin
+          <code>WHERE</code> contra la producción de un cliente no tiene deshacer.
+          <code>relay</code> es un alias reservado (la base del propio relay, siempre
+          de lectura). El experto también puede usar una cadena que le pegues en el
+          chat, y en ese caso es de lectura sí o sí.</p>
+        <div class="toolbar">
+          <button id="db-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <span id="db-summary" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="db-table">
+            <thead>
+              <tr>
+                <th class="th">alias</th><th class="th">motor</th>
+                <th class="th">cadena (redactada)</th><th class="th">permiso</th>
+                <th class="th">descripción</th><th class="th"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <section class="form-section mt-3">
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="db-alias">Alias<span class="req">*</span></label>
+              <input id="db-alias" type="text" class="input font-mono" placeholder="crm">
+              <p class="field-hint">es lo único que ve el modelo</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="db-desc">Descripción</label>
+              <input id="db-desc" type="text" class="input" placeholder="CRM de producción">
+            </div>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="db-dsn">Cadena de conexión<span class="req">*</span></label>
+            <input id="db-dsn" type="text" class="input font-mono"
+                   placeholder="postgres://usuario:clave@host:5432/base">
+            <p class="field-hint">DSN o ruta a un <code>.db</code>. No entra al
+              historial del hilo: el modelo usa el alias y nunca ve esto.</p>
+          </div>
+          <div class="field mt-4">
+            <span class="field-label">Permisos</span>
+            <label class="label"><input id="db-escribir" type="checkbox">
+              permitir escribir</label>
+            <p class="field-hint">Sin marcar es solo lectura. Un
+              <code>DELETE</code> sin <code>WHERE</code> contra la producción
+              de un cliente no tiene deshacer.</p>
+          </div>
+          <div class="field-actions">
+            <button id="db-save" class="btn btn-primary">Guardar conexión</button>
+            <span id="db-msg" class="muted"></span>
+          </div>
+        </section>
+
+      </section>
+
+      <!-- Config -->
+      <section id="tab-config" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Configuración del relay</h2>
+          <p class="panel-sub">Ajusta el comportamiento del relay. Abre solo la sección que necesitas.</p>
+        </header>
+
+        <div class="form-grid">
+          <section class="form-section">
+            <header class="form-section-head">
+              <h3 class="form-section-title">Red</h3>
+              <p class="form-section-sub">El bind decide quién puede llegar
+                al relay. Cambiarlo pide reiniciar.</p>
+            </header>
+            <div class="field">
+              <label class="field-label" for="cfg-relay-host">Bind host</label>
+              <select id="cfg-relay-host" class="select">
+                <option value="127.0.0.1">127.0.0.1 — solo esta máquina (recomendado)</option>
+                <option value="0.0.0.0">0.0.0.0 — expuesto a la LAN</option>
+              </select>
+              <p class="field-hint"><code>RELAY_HOST</code> ·
+                <span id="cfg-host-effective"></span></p>
+            </div>
+            <div id="cfg-lan-warning" class="warn-box" hidden>
+              <strong>0.0.0.0 expone el relay a toda tu red local.</strong>
+              Cualquier dispositivo de la LAN podrá pegarle a
+              <code>/experts/run</code>, <code>/commands/*/run</code> (ejecutan
+              procesos) y <code>/prompts</code>. Las rutas <code>/admin/*</code> y
+              <code>/api/*</code> quedan protegidas por el guard de localhost
+              (403 desde la LAN), pero el resto NO tiene auth (ADR-002).
+              Úsalo solo si lo necesitás (ej: bot en Docker) y en una red de confianza.
+            </div>
+          </section>
+
+          <section class="form-section">
+            <header class="form-section-head">
+              <h3 class="form-section-title">Paths</h3>
+              <p class="form-section-sub">Dónde busca repos el file browser
+                y qué raíz puede leer cbm.</p>
+            </header>
+            <div class="field">
+              <label class="field-label" for="cfg-repos-root">Raíz de repos</label>
+              <input id="cfg-repos-root" type="text" class="input"
+                     placeholder="p.ej. C:\Users\usuario\source\repos">
+              <p class="field-hint"><code>FOURBIS_REPOS_ROOT</code> · la usa el
+                file browser y vale como <code>CBM_ALLOWED_ROOT</code></p>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <header class="form-section-head">
+              <h3 class="form-section-title">Seguimiento GitHub</h3>
+              <p class="form-section-sub">Alimenta el tab Gestión. Sin esto,
+                el tablero queda vacío.</p>
+            </header>
+            <div class="field">
+              <label class="field-label" for="cfg-gh-owner">Organización</label>
+              <div class="flex items-center gap-2">
+                <input id="cfg-gh-owner" type="text" class="input min-w-0 flex-1"
+                       placeholder="p.ej. AuroraDemo">
+                <button id="cfg-gh-load" class="btn">Buscar tableros</button>
+              </div>
+              <p class="field-hint"><code>GITHUB_BOARD_OWNER</code></p>
+            </div>
+            <div class="field mt-4">
+              <label class="field-label" for="cfg-gh-number">Tablero</label>
+              <select id="cfg-gh-number" class="select">
+                <option value="">(sin configurar)</option>
+              </select>
+              <p class="field-hint"><code>GITHUB_BOARD_NUMBER</code>
+                <span id="cfg-gh-msg"></span></p>
+            </div>
+            <div class="field mt-4">
+              <label class="field-label" for="cfg-discord-guild">Servidor Discord</label>
+              <input id="cfg-discord-guild" type="text" class="input"
+                     inputmode="numeric" placeholder="p.ej. 123456789012345678">
+              <p class="field-hint"><code>DISCORD_GUILD_ID</code> · habilita el
+                link al canal en el tab Proyectos</p>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <header class="form-section-head">
+              <h3 class="form-section-title">Expert runtime</h3>
+              <p class="form-section-sub">Cuánto puede tardar un chat entero
+                y cuánto una tool sola antes de que las corten.</p>
+            </header>
+            <div class="field">
+              <label class="field-label" for="cfg-expert-timeout">Timeout por chat</label>
+              <div class="flex items-center gap-2">
+                <input id="cfg-expert-timeout" type="number" min="30" max="3600"
+                       step="30" value="600" class="input w-24">
+                <button id="cfg-expert-timeout-save" class="btn">Setear</button>
+                <button id="cfg-expert-timeout-reset" class="btn">default (env)</button>
+              </div>
+              <p class="field-hint">segundos, 30–3600. Si el experto se queda
+                corto en tareas pesadas, subilo a 900 o 1200. Por proyecto
+                también podés en <code>defaults_json.timeout</code>.
+                <span id="cfg-expert-timeout-msg"></span></p>
+            </div>
+            <div class="field mt-4">
+              <label class="field-label" for="cfg-tool-timeout">Timeout por tool</label>
+              <div class="flex items-center gap-2">
+                <input id="cfg-tool-timeout" type="number" min="5" max="600"
+                       step="5" value="60" class="input w-24">
+                <button id="cfg-tool-timeout-save" class="btn">Setear</button>
+                <button id="cfg-tool-timeout-reset" class="btn">default (env)</button>
+              </div>
+              <p class="field-hint">segundos, 5–600. Si una tool cuelga (ej:
+                <code>cbm_query</code> en un grafo enorme), pydantic-ai la mata
+                y el LLM puede intentar otra. Bajalo para fallar rápido.
+                <span id="cfg-tool-timeout-msg"></span></p>
+            </div>
+          </section>
+        </div>
+
+        <section class="form-section mt-4">
+          <header class="form-section-head">
+            <h3 class="form-section-title">Modelo por rol (runner por etapas)</h3>
+            <p class="form-section-sub">Cada turno del runner puede correr con
+              un modelo distinto. <strong>(cascada)</strong> deja el
+              comportamiento de siempre: <code>.env</code> → compactador →
+              ejecutor. Un proyecto puede pisar esto con
+              <code>defaults_json.planner_model</code> y compañía; el selector
+              del chat vale solo para ese envío. El planificador de grafos usa
+              su propia clave por proyecto: <code>graph_planner_model</code>.</p>
+          </header>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="cfg-role-executor">Ejecutor</label>
+              <select id="cfg-role-executor" class="select"></select>
+              <p class="field-hint"><code>FOURBIS_MODEL</code>
+                <span id="cfg-role-executor-eff"></span></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cfg-role-planner">Planificador</label>
+              <select id="cfg-role-planner" class="select"></select>
+              <p class="field-hint"><code>FOURBIS_PLANNER_MODEL</code>
+                <span id="cfg-role-planner-eff"></span></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cfg-role-verifier">Verificador</label>
+              <select id="cfg-role-verifier" class="select"></select>
+              <p class="field-hint"><code>FOURBIS_VERIFIER_MODEL</code>
+                <span id="cfg-role-verifier-eff"></span></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cfg-role-documenter">Documentador</label>
+              <select id="cfg-role-documenter" class="select"></select>
+              <p class="field-hint"><code>FOURBIS_DOCUMENTER_MODEL</code>
+                <span id="cfg-role-documenter-eff"></span></p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cfg-role-compactor">Compactador</label>
+              <select id="cfg-role-compactor" class="select"></select>
+              <p class="field-hint"><code>FOURBIS_COMPACTOR_MODEL</code>
+                <span id="cfg-role-compactor-eff"></span></p>
+            </div>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="cfg-model-prices">Tarifas por modelo
+              (USD por millón de tokens)</label>
+            <textarea id="cfg-model-prices" class="input w-full font-mono text-xs"
+                      rows="7" spellcheck="false"
+                      placeholder='{"minimax:MiniMax-M3": {"in": 0.3, "out": 1.2},
+ "nvidia:*": {"in": 0, "out": 0, "ref_in": 0.6, "ref_out": 2.4}}'></textarea>
+            <p class="field-hint"><code>MODEL_PRICES</code>. La clave admite
+              <code>*</code> al final como comodín (gana el patrón más
+              específico). <code>in</code> y <code>out</code> son lo que se
+              paga; <code>ref_in</code> y <code>ref_out</code> son el precio
+              del mismo modelo en un proveedor pagado y solo sirven para
+              estimar cuánto ahorra el free tier. Un modelo sin tarifa
+              aparece como <strong>—</strong> en métricas, no como $0.</p>
+          </div>
+        </section>
+
+        <!-- Un solo boton para cuatro secciones no es un descuido: el
+             backend tiene UN endpoint de config y guarda todo junto. Antes
+             estaba suelto al final de una pila de filas y no se sabia que
+             abarcaba; ahora lo dice. -->
+        <div class="field-actions">
+          <button id="cfg-save" class="btn btn-primary">Guardar cambios</button>
+          <span id="cfg-msg" class="muted"></span>
+          <span class="muted ml-auto">Guarda Red, Paths, GitHub y Modelo por rol.
+            Expert runtime y las plantillas tienen su propio guardado.</span>
+        </div>
+        <div id="cfg-restart-note" class="warn-box" hidden>
+          <strong>RELAY_HOST cambió:</strong> toma efecto en el próximo
+          arranque del relay (<code>stop.ps1</code> + <code>start.ps1</code>).
+          El bind de aiohttp no se puede cambiar en vivo.
+        </div>
+
+        <section class="form-section mt-4">
+          <header class="form-section-head">
+            <h3 class="form-section-title">Modo nocturno — plantillas de directiva</h3>
+            <p class="form-section-sub">Se usan desde el chat con
+              <code>/noche @nombre</code>, y se listan con <code>/plantillas</code>.
+              Sin proyecto = global (sirve para cualquier repo); con proyecto,
+              <strong>tapa</strong> a la global del mismo nombre.</p>
+          </header>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="tpl-nombre">Nombre<span class="req">*</span></label>
+              <input id="tpl-nombre" type="text" class="input" placeholder="p.ej. release">
+            </div>
+            <div class="field">
+              <label class="field-label" for="tpl-proyecto">Proyecto</label>
+              <select id="tpl-proyecto" class="select"></select>
+              <p class="field-hint">vacío = global, sirve para cualquier repo</p>
+            </div>
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="tpl-notas">Nota</label>
+            <input id="tpl-notas" type="text" class="input"
+                   placeholder="para qué sirve (opcional)">
+          </div>
+          <div class="field mt-4">
+            <label class="field-label" for="tpl-directiva">Directiva</label>
+            <textarea id="tpl-directiva" rows="10"
+                      class="input w-full font-mono text-xs"
+                      placeholder="Objetivo: ...&#10;&#10;P1. ...&#10;P2. ..."></textarea>
+            <p class="field-hint">Numerá los puntos: el planificador los extrae
+              y chequea cobertura. Nombrá solo paths que resuelvan contra el
+              índice cbm — una ref inválida descarta la tarea entera, en silencio.</p>
+          </div>
+          <div class="field-actions">
+            <button id="tpl-guardar" class="btn btn-primary">Guardar plantilla</button>
+            <button id="tpl-nueva" class="btn">Limpiar</button>
+            <span id="tpl-estado" class="muted"></span>
+          </div>
+          <div class="table-wrap mt-4">
+            <table>
+              <thead><tr>
+                <th class="th">Nombre</th><th class="th">Ámbito</th>
+                <th class="th">Nota</th><th class="th"></th>
+              </tr></thead>
+              <tbody id="tpl-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Usuarios / roles (2026-08-21). Hasta ahora la tabla `users`
+             se editaba por SQL y el cambio recien valia al reiniciar.
+             OJO con lo que esto NO es: no da ni saca acceso al relay,
+             eso lo decide la policy de Cloudflare Access. Aca solo se
+             dice cual de los que YA entran es owner. -->
+        <section class="form-section mt-4">
+          <header class="form-section-head">
+            <h3 class="form-section-title">Usuarios y roles</h3>
+            <p class="form-section-sub">Quien no está en la lista entra como
+              <code>member</code>: puede correr expertos y ver los resultados,
+              pero no tocar config, MCPs, modo nocturno ni borrar nada. Esto
+              <strong>no</strong> da ni quita acceso al relay — de eso se
+              encarga la policy de Access.</p>
+          </header>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="cfg-user-email">Email</label>
+              <input id="cfg-user-email" type="email" class="input"
+                     placeholder="alguien@example.test" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="field-label" for="cfg-user-role">Rol</label>
+              <select id="cfg-user-role" class="select">
+                <option value="owner">owner — todo</option>
+                <option value="member">member — correr y ver</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-actions">
+            <button id="cfg-user-add" class="btn btn-primary">Guardar usuario</button>
+            <span id="cfg-user-msg" class="muted"></span>
+          </div>
+          <div class="table-wrap mt-4">
+            <table id="cfg-users-table">
+              <thead><tr><th class="th">email</th><th class="th">rol</th>
+                <th class="th">desde</th><th class="th"></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <h3 class="section-title">Efectivo ahora</h3>
+        <div id="cfg-effective-grid" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+      </section>
+
+      <!-- Informe (UI 2026-07-20: gasto de tokens tipo registro) -->
+      <section id="tab-report" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Informe de uso</h2>
+          <p class="panel-sub">Tokens, runs y errores agregados por día, proyecto y
+            autor. La fuente es el índice <code>chats</code> completo (no el tope de
+            200 del listado).</p>
+        </header>
+        <div class="toolbar">
+          <label class="label">rango:
+            <select id="report-days" class="select">
+              <option value="7">7 días</option>
+              <option value="30" selected>30 días</option>
+              <option value="90">90 días</option>
+            </select>
+          </label>
+          <select id="report-project" class="select">
+            <option value="">todos los proyectos</option>
+          </select>
+          <button id="report-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+        </div>
+        <div id="report-kpis" class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"></div>
+
+        <h3 class="section-title">Tokens de entrada por día</h3>
+        <div id="report-chart" class="chart-wrap card p-4"></div>
+        <details class="mt-2">
+          <summary class="cursor-pointer select-none text-xs text-zinc-400 hover:text-zinc-300">ver datos como tabla</summary>
+          <div class="table-wrap mt-2">
+            <table id="report-daily-table">
+              <thead><tr>
+                <th class="th">día</th><th class="th">runs</th>
+                <th class="th">tokens in</th><th class="th">tokens out</th>
+                <th class="th">tools</th><th class="th">duración prom.</th>
+                <th class="th">errores</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </details>
+
+        <h3 class="section-title">Por proyecto</h3>
+        <div class="table-wrap">
+          <table id="report-projects-table">
+            <thead><tr>
+              <th class="th">proyecto</th><th class="th">runs</th>
+              <th class="th">tokens in</th><th class="th">tokens out</th>
+              <th class="th">tools</th><th class="th">duración prom.</th>
+              <th class="th">errores</th><th class="th">último run</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h3 class="section-title">Por autor / origen</h3>
+        <div class="table-wrap">
+          <table id="report-authors-table">
+            <thead><tr>
+              <th class="th">autor</th><th class="th">origen</th><th class="th">runs</th>
+              <th class="th">tokens in</th><th class="th">tokens out</th>
+              <th class="th">duración prom.</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Logs (UI 2026-07-20: ring buffer en vivo del relay) -->
+      <section id="tab-logs" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Logs del relay</h2>
+          <p class="panel-sub">Tail en vivo de las últimas 2000 líneas (buffer en
+            memoria — se vacía al reiniciar). El histórico persistente está en
+            <code>~/.4bis/logs/relay.log</code>, rotado a 10 MB × 5.
+            Filtra por chat para ver un run completo.</p>
+        </header>
+        <div class="toolbar">
+          <select id="logs-level" class="select">
+            <option value="">todos los niveles</option>
+            <option value="WARNING">warning+</option>
+            <option value="ERROR">solo errores</option>
+          </select>
+          <input id="logs-search" class="input w-64" placeholder="filtrar texto…">
+          <input id="logs-chat" class="input w-48" placeholder="chat_id (o prefijo)…">
+          <button id="logs-chat-clear" class="btn" title="quitar el filtro por chat"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> chat</button>
+          <button id="logs-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <label class="label"><input id="logs-auto" type="checkbox"> auto (5s)</label>
+          <span id="logs-count" class="muted"></span>
+        </div>
+        <div id="logs-box" class="log-box"></div>
+      </section>
+    </div>
+  </main>
+  <footer class="workspace-dock" aria-label="Ventanas del workspace">
+    <button class="workspace-icon" id="workspace-home" title="Minimizar todas" aria-label="Minimizar todas las ventanas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8"/></svg></button>
+    <div id="workspace-items" class="workspace-items"></div>
+    <div class="workspace-dock-tools"><button class="workspace-icon" id="workspace-arrange" title="Ordenar ventanas en mosaico" aria-label="Ordenar ventanas en mosaico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg></button></div>
+  </footer>
+</div>
+<dialog id="workspace-launcher-dialog" class="workspace-launcher" aria-labelledby="workspace-launcher-title">
+  <div class="workspace-launcher-head"><div><span class="workspace-eyebrow">TU WORKSPACE</span><h2 id="workspace-launcher-title">¿Qué necesitas abrir?</h2></div><button id="workspace-launcher-close" class="workspace-icon" aria-label="Cerrar herramientas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+  <input id="workspace-filter" type="search" class="input" placeholder="Buscar una herramienta…" aria-label="Filtrar herramientas" autocomplete="off">
+  <nav id="workspace-modules" aria-label="Herramientas del workspace">
+      <div class="workspace-group-title">Actividad</div>
+      <button id="tabbtn-status" aria-controls="tab-status" class="tab nav-item" data-tab="status">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+        Estado
+      </button>
+      <button id="tabbtn-running" aria-controls="tab-running" class="tab nav-item" data-tab="running">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2.5-7 4 14 2.5-7h5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        En curso
+        <span id="running-tab-badge" class="ml-auto hidden rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300"></span>
+      </button>
+      <button id="tabbtn-chat" aria-controls="tab-chat" class="tab nav-item" data-tab="chat">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M8 16v3.5L12.5 16" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Chat
+      </button>
+      <button id="tabbtn-gestion" aria-controls="tab-gestion" class="tab nav-item" data-tab="gestion">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="9.5" y="4" width="5" height="10" rx="1"/><rect x="16" y="4" width="5" height="13" rx="1"/></svg>
+        Gestión
+      </button>
+      <button id="tabbtn-voice" aria-controls="tab-voice" class="tab nav-item" data-tab="voice">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Voz
+      </button>
+      <button id="tabbtn-zombies" aria-controls="tab-zombies" class="tab nav-item" data-tab="zombies">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9" cy="11" r="5"/><path d="M3 19l4-2M14 19l-3-2M9 14v5" stroke-linecap="round"/><path d="M19 5l2-2M19 9l3-1" stroke-linecap="round"/></svg>
+        Zombies
+        <span id="zombies-tab-badge" class="ml-auto hidden rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-red-300"></span>
+      </button>
+      <div class="workspace-group-title">Informes</div>
+      <button id="tabbtn-report" aria-controls="tab-report" class="tab nav-item" data-tab="report">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 19.5V4.5M4 19.5h16" stroke-linecap="round"/><rect x="7" y="11" width="2.6" height="6" rx="0.8"/><rect x="11.5" y="7.5" width="2.6" height="9.5" rx="0.8"/><rect x="16" y="9.5" width="2.6" height="7.5" rx="0.8"/></svg>
+        Informe
+      </button>
+      <button id="tabbtn-metrics" aria-controls="tab-metrics" class="tab nav-item" data-tab="metrics">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><line x1="4" y1="20" x2="4" y2="4" stroke-linecap="round"/><polyline points="4,8 8,12 12,6 16,14 20,9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Métricas
+      </button>
+      <div class="workspace-group-title">Modo nocturno</div>
+      <button id="tabbtn-night-runs" aria-controls="tab-night-runs" class="tab nav-item" data-tab="night-runs">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" stroke-linejoin="round"/></svg>
+        Night Runs
+      </button>
+      <div class="workspace-group-title">Clientes</div>
+      <button id="tabbtn-crm" aria-controls="tab-crm" class="tab nav-item" data-tab="crm">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" stroke-linejoin="round"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" stroke-linejoin="round"/></svg>
+        CRM
+      </button>
+      <div class="workspace-group-title">Conocimiento</div>
+      <button id="tabbtn-projects" aria-controls="tab-projects" class="tab nav-item" data-tab="projects">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2h8A1.5 1.5 0 0 1 20.5 9v9a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V7z" stroke-linejoin="round"/></svg>
+        Proyectos
+      </button>
+      <button id="tabbtn-skills" aria-controls="tab-skills" class="tab nav-item" data-tab="skills">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5a5.5 5.5 0 0 1 3 10.1c-.6.4-1 1-1 1.7v.7h-4v-.7c0-.7-.4-1.3-1-1.7a5.5 5.5 0 0 1 3-10.1z" stroke-linejoin="round"/><path d="M10 18.5h4M10.8 21h2.4" stroke-linecap="round"/></svg>
+        Skills
+        <span id="skills-tab-badge" class="ml-auto hidden rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"></span>
+      </button>
+      <button id="tabbtn-orphans" aria-controls="tab-orphans" class="tab nav-item" data-tab="orphans">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="7" cy="7" r="3.5"/><circle cx="17" cy="17" r="3.5"/><path d="M9.8 9.8l4.4 4.4" stroke-dasharray="2 2.5" stroke-linecap="round"/></svg>
+        Huérfanos cbm
+      </button>
+      <button id="tabbtn-index" aria-controls="tab-index" class="tab nav-item" data-tab="index">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v13c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-13"/><path d="M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"/></svg>
+        Indexación
+      </button>
+      <button id="tabbtn-diagrams" aria-controls="tab-diagrams" class="tab nav-item" data-tab="diagrams">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><circle cx="6" cy="6" r="2.5"/></svg>
+        Diagramas
+      </button>
+      <div class="workspace-group-title">Sistema</div>
+      <button id="tabbtn-commands" aria-controls="tab-commands" class="tab nav-item" data-tab="commands">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M7.5 9l3 3-3 3M13 15h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Comandos
+      </button>
+      <button id="tabbtn-mcp" aria-controls="tab-mcp" class="tab nav-item" data-tab="mcp">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4" stroke-linecap="round"/><circle cx="12" cy="12" r="3.5"/></svg>
+        MCPs
+      </button>
+      <button id="tabbtn-models" aria-controls="tab-models" class="tab nav-item" data-tab="models">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7c0-1.4 3.6-2.5 8-2.5s8 1.1 8 2.5-3.6 2.5-8 2.5S4 8.4 4 7z"/><path d="M4 7v10c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5V7" stroke-linecap="round"/><path d="M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5" stroke-linecap="round"/></svg>
+        Modelos
+      </button>
+      <button id="tabbtn-config" aria-controls="tab-config" class="tab nav-item" data-tab="config">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8h9M17 8h3M4 16h3M11 16h9" stroke-linecap="round"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg>
+        Config
+      </button>
+      <button id="tabbtn-logs" aria-controls="tab-logs" class="tab nav-item" data-tab="logs">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5.5h14M5 9.5h10M5 13.5h14M5 17.5h7" stroke-linecap="round"/></svg>
+        Logs
+      </button>
+    </nav>
+  <p id="workspace-empty-filter" class="muted" hidden>No hay herramientas con ese nombre.</p>
+  <div id="workspace-recent"></div>
+  <p class="workspace-launcher-hint">También desde el chat: <code>/abrir proyectos</code> · Esc para cerrar</p>
+</dialog>
+<p id="workspace-announcement" class="sr-only" aria-live="polite"></p>
+
+<!-- ============ modales (a nivel body, NUNCA dentro de panels) ============ -->
+
+<!-- Modal: status detail (En curso) -->
+<div id="models-editor" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <strong id="models-ed-title" class="font-mono text-sm">Modelo</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <!-- Campos en .field: label -> control -> ayuda, el mismo orden que
+         Config y Comandos. Antes eran <label> pelados con la ayuda
+         inline en un <span class="muted">, que era la tercera forma
+         distinta de poner un label en la misma app. -->
+    <div class="modal-body">
+      <div class="field">
+        <label class="field-label" for="models-ed-spec">Spec<span class="req">*</span></label>
+        <input id="models-ed-spec" class="input w-full font-mono"
+               placeholder="deepseek:deepseek-chat">
+        <p class="field-hint"><code>provider:modelo</code> — es la clave primaria</p>
+      </div>
+      <div class="field mt-4">
+        <label class="field-label" for="models-ed-label">Nombre visible</label>
+        <input id="models-ed-label" class="input w-full">
+      </div>
+      <div class="field mt-4">
+        <label class="field-label" for="models-ed-url">Base URL</label>
+        <input id="models-ed-url" class="input w-full font-mono"
+               placeholder="https://api.deepseek.com/v1">
+      </div>
+      <div class="form-grid mt-4">
+        <div class="field">
+          <label class="field-label" for="models-ed-keyenv">Env var de la key</label>
+          <input id="models-ed-keyenv" class="input w-full font-mono"
+                 placeholder="DEEPSEEK_API_KEY">
+          <p class="field-hint">la key vive en el <code>.env</code></p>
+        </div>
+        <div class="field">
+          <label class="field-label" for="models-ed-key">API key</label>
+          <input id="models-ed-key" type="password" class="input w-full font-mono"
+                 autocomplete="new-password">
+          <p class="field-hint">se guarda en la tabla; en blanco no borra la que haya</p>
+        </div>
+      </div>
+      <div class="field mt-4">
+        <label class="field-label" for="models-ed-vision">Visión</label>
+        <select id="models-ed-vision" class="select w-full">
+          <option value="">sin medir (se deja pasar)</option>
+          <option value="1">ve imágenes</option>
+          <option value="0">NO ve — el relay corta si adjuntás una</option>
+        </select>
+        <p class="field-hint">se mide, no se deduce:
+          <code>python scripts/probe_vision.py &lt;spec&gt;</code></p>
+      </div>
+      <div class="form-grid mt-4">
+        <div class="field">
+          <label class="field-label" for="models-ed-cin">USD / millón in</label>
+          <input id="models-ed-cin" class="input w-full" inputmode="decimal">
+        </div>
+        <div class="field">
+          <label class="field-label" for="models-ed-cout">USD / millón out</label>
+          <input id="models-ed-cout" class="input w-full" inputmode="decimal">
+        </div>
+      </div>
+      <div class="field mt-4">
+        <label class="field-label" for="models-ed-ccache">USD / millón de caché</label>
+        <input id="models-ed-ccache" class="input w-full" inputmode="decimal">
+        <p class="field-hint">entrada que el proveedor sirve de su caché. En
+          blanco se cobra a la tarifa <code>in</code>, que en MiniMax infla
+          el total ~3,5x.</p>
+      </div>
+      <div class="form-grid mt-4">
+        <div class="field">
+          <label class="field-label" for="models-ed-ctx">Ventana (tokens)</label>
+          <input id="models-ed-ctx" class="input w-full" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label class="field-label" for="models-ed-ctxwarn">Avisar a los</label>
+          <input id="models-ed-ctxwarn" class="input w-full" inputmode="numeric">
+          <p class="field-hint">tokens medidos</p>
+        </div>
+      </div>
+      <div class="field mt-4">
+        <label class="field-label" for="models-ed-notes">Notas</label>
+        <input id="models-ed-notes" class="input w-full">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="models-ed-save" class="btn btn-primary">Guardar</button>
+      <button id="models-ed-cancel" class="btn">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<div id="status-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <strong id="status-modal-title" class="font-mono text-sm">Status</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="status-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="status-modal-cancel" class="btn danger"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> Cancelar run</button>
+      <button id="status-modal-md" class="btn">📄 Leer .md</button>
+      <button id="status-modal-logs" class="btn">📋 Ver logs</button>
+      <span id="status-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: system prompt (Sub-ola 2.3) -->
+<div id="prompt-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="prompt-modal-title" class="font-mono text-sm">System prompt</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="prompt-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="prompt-modal-copy" class="btn btn-primary">📋 Copiar assembled</button>
+      <span id="prompt-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: git diff (Sub-ola 2.7) -->
+<div id="diff-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="diff-modal-title" class="font-mono text-sm">Git diff</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="diff-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <span id="diff-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: digest de salud de clientes (silencio + issues abiertos).
+     `dry_run` primero (preview sin postear), botón separado para
+     mandarlo de verdad a Discord — dos pasos a propósito, no queremos
+     spamear el canal por un click de más. -->
+<div id="crm-digest-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong class="font-mono text-sm">Digest de clientes</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="crm-digest-body" class="modal-body">
+      <p class="muted">generando…</p>
+    </div>
+    <div class="modal-footer">
+      <span id="crm-digest-msg" class="muted"></span>
+      <div class="ml-auto flex items-center gap-2">
+        <button id="crm-digest-refresh" class="btn btn-xs">Actualizar preview</button>
+        <button id="crm-digest-send" class="btn btn-primary btn-xs"
+                >Enviar a Discord</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: modo nocturno (Iter 5, ADR-028) -->
+<div id="night-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="night-modal-title" class="font-mono text-sm">Modo nocturno</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="night-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <span id="night-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: detalle de una corrida nocturna (Iter 5.4 — bug fix 2026-07-13).
+     Antes era invisible para el usuario: el JS llamaba modalLoad({id:
+     "night-run-detail-modal",...}) pero el <div> con ese id no existía,
+     `$("#night-run-detail-modal-body")` devolvía null y el open fallaba
+     en silencio. Sin este modal el botón 📋 Detalle del listado parece
+     roto. -->
+<div id="night-run-detail-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="night-run-detail-modal-title" class="font-mono text-sm">Detalle corrida</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="night-run-detail-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <span id="night-run-detail-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: run report (lee el .md de state/morning-reports/) -->
+<div id="report-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="report-modal-title" class="font-mono text-sm">Reporte</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="report-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <span id="report-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: drilldown cbm (stats + reindex) -->
+<div id="cbm-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <strong id="cbm-modal-title" class="font-mono text-sm">cbm</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="cbm-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="cbm-reindex" class="btn btn-primary" title="re-mappear el repo en el grafo cbm"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Reindex</button>
+      <span id="cbm-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: seguimiento GitHub (issues + PRs + tablero Projects v2) -->
+<div id="github-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="github-modal-title" class="font-mono text-sm">Seguimiento</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="github-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="github-refresh" class="btn" title="volver a consultar GitHub (invalida el caché de 60s)"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+      <span id="github-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: nuevo proyecto (POST /admin/api/projects) -->
+<div id="new-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="new-modal-title" class="font-mono text-sm">Nuevo proyecto</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="new-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="new-save" class="btn btn-primary" title="POST a /admin/api/projects"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Crear</button>
+      <span id="new-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: editar proyecto (name/desc/repo/system_prompt/night_config) -->
+<div id="edit-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="edit-modal-title" class="font-mono text-sm">Editar</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="edit-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="edit-save" class="btn btn-primary" title="PATCH a /admin/api/projects/{slug}"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4.5h11l3 3V19.5H5z"/><path d="M8.5 4.5v5h6v-5M8.5 19.5v-6h7v6"/></svg> Guardar</button>
+      <span id="edit-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: experto (corre /experts/run con system_prompt prearmado) -->
+<div id="expert-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="expert-modal-title" class="font-mono text-sm">Experto</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="expert-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="expert-run" class="btn btn-primary" title="POST a /admin/api/projects/{slug}/expert-run" disabled>🧪 Correr experto</button>
+      <span id="expert-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: detalle de conversación (Sub-ola 2.4) -->
+<div id="conv-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="conv-modal-title" class="font-mono text-sm">Conversación</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="conv-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="conv-modal-close-conv" class="btn btn-primary">🔒 Cerrar + compactar</button>
+      <button id="conv-modal-md" class="btn">📄 Ver .md del último turno</button>
+      <span id="conv-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: transcript de voz (D-PEND-003, solo lectura) -->
+<div id="voice-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="voice-modal-title" class="font-mono text-sm">Transcript</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="voice-modal-body" class="modal-body"></div>
+  </div>
+</div>
+
+<!-- Modal: skill (borrador editable o instalada readonly) -->
+<div id="skill-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="skill-modal-title" class="font-mono text-sm">Skill</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="skill-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <button id="skill-modal-approve" class="btn btn-primary" hidden
+              title="guardar cambios y copiar a ~/.copilot/skills">✓ Aprobar → instalar</button>
+      <button id="skill-modal-save" class="btn" hidden
+              title="guardar cambios del borrador sin aprobar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4.5h11l3 3V19.5H5z"/><path d="M8.5 4.5v5h6v-5M8.5 19.5v-6h7v6"/></svg> Guardar borrador</button>
+      <button id="skill-modal-reject" class="btn danger" hidden><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> Rechazar</button>
+      <span id="skill-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: copilot-instructions.md (el "ponytail" que read_ponytail()
+     mete en el system prompt de CADA push). Guardar deja un .bak. -->
+<div id="instructions-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong class="font-mono text-sm">copilot-instructions.md</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="muted mb-3 text-xs">Va entero en el system prompt de cada
+        push. <code id="instructions-path" class="break-all"></code></p>
+      <textarea id="instructions-content" class="input w-full !min-h-[55vh] font-mono text-xs"
+                spellcheck="false"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button id="instructions-save" class="btn btn-primary"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4.5h11l3 3V19.5H5z"/><path d="M8.5 4.5v5h6v-5M8.5 19.5v-6h7v6"/></svg> Guardar</button>
+      <span id="instructions-tokens" class="muted"></span>
+      <span id="instructions-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: administración del proyecto (iter 4.7) — colapsa los 10
+     botones de la fila en un shell con tabs internos. Cada tab reusa
+     los renders que ya existían (renderEditForm, renderPromptBlocks,
+     renderCbmDetail, renderDiffDetail, renderNight, renderExpertForm).
+     El tab Workspace es nuevo (file CRUD + scaffold LLM). -->
+<div id="admin-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <strong id="admin-modal-title" class="font-mono text-sm">Administrar</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div id="admin-modal-body" class="modal-body"></div>
+    <div class="modal-footer">
+      <span id="admin-modal-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Panel lateral (UI 2026-07-20): variante del admin modal que mantiene
+     el contexto del tab visible. Se usa desde tab-projects.js cuando el
+     viewport es >= md; cae al admin-modal fullscreen en pantallas chicas.
+     Ancho fijo 520px desde la derecha. -->
+<div id="admin-sidepanel-backdrop"
+     class="hidden fixed inset-0 z-40 bg-black/40 transition-opacity"
+     data-sidepanel-close></div>
+<aside id="admin-sidepanel"
+       class="hidden fixed right-0 top-0 z-50 h-full w-[520px] max-w-[92vw] border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+       role="dialog" aria-modal="true" aria-label="Administrar proyecto">
+  <header class="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+    <strong id="admin-sidepanel-title" class="font-mono text-sm text-zinc-100">Administrar</strong>
+    <button id="admin-sidepanel-close" class="icon-btn" aria-label="cerrar" data-sidepanel-close><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  </header>
+  <div id="admin-sidepanel-body" class="h-[calc(100%-3.25rem)] overflow-y-auto"></div>
+</aside>
+
+<!-- Banner global de preguntas interactivas del modo nocturno (iter 9.7
+     + iter 9.8): aparece cuando hay night_questions abiertas, sin importar
+     en qué tab esté el operador. Se renderiza desde tab-night-questions-banner.js. -->
+<div id="night-questions-root"
+     class="pointer-events-none fixed left-1/2 top-3 z-[55] hidden w-[min(680px,calc(100vw-2rem))] -translate-x-1/2"></div>
+
+<!-- Modal: Buscador global (UI 2026-07-20). Atajo Ctrl+K. -->
+<div id="search-modal" class="modal" role="dialog" aria-modal="true"
+     aria-label="Buscar">
+  <div class="modal-card" style="max-width: 640px;">
+    <div class="modal-header">
+      <strong class="text-sm text-zinc-100">Buscar</strong>
+      <span class="text-xs text-zinc-400 ml-2">↑↓ navegar · Enter abrir · Esc cerrar</span>
+      <button id="search-close" class="icon-btn ml-auto" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="px-4 pt-3">
+      <input id="search-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="proyecto, chat, conversación…"
+             class="input w-full text-base" />
+    </div>
+    <div id="search-list" class="modal-body px-2 py-2 space-y-2"></div>
+  </div>
+</div>
+
+<!-- Toasts (reemplazan alert() para feedback no bloqueante) -->
+<div id="toast-root" class="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2"></div>
+
+<!-- Modal: Nota rápida (iter 9.8 — UI notes unificada con Chats). -->
+<div id="quick-note-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card max-w-lg">
+    <div class="modal-header">
+      <strong id="quick-note-title" class="text-sm text-zinc-100">📝 Nota rápida</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="muted mb-2 text-xs">Workspace <code>notes</code> · sin tools,
+        sin repo, sin git. La nota queda en el historial de chats (filtro
+        por proyecto = <code>notes</code>).</p>
+      <textarea id="quick-note-input" class="input h-40 w-full font-mono text-sm"
+                placeholder="idea, decisión, bitácora…"></textarea>
+      <div id="quick-note-msg" class="mt-2 text-xs text-zinc-400"></div>
+    </div>
+    <div class="modal-footer">
+      <button data-close class="btn">Cancelar</button>
+      <button id="quick-note-ok" class="btn btn-primary">Enviar <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg></button>
+    </div>
+  </div>
+</div>
+
+<!-- El "nuevo chat" ya no tiene modal: ➕ Nuevo abre el panel de burbujas
+     en modo borrador y el primer mensaje se escribe en el composer de
+     siempre (un click afuera del modal borraba el prompt tipeado). -->
+
+<!-- Modal: Vincular Discord (iter 10.0 — bridge Discord↔UI). -->
+<div id="link-discord-modal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card max-w-md">
+    <div class="modal-header">
+      <strong class="text-sm text-zinc-100">🔗 Vincular Discord</strong>
+      <button data-close class="icon-btn" aria-label="cerrar"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="muted mb-3 text-xs">Al vincular, el bot crea un hilo DM
+        en Discord. Desde ahí puedes seguir la conversación cuando no
+        estés en la PC. Ingresa tu Discord user ID (Settings → Advanced
+        → Developer Mode → click derecho sobre tu usuario → Copy User ID).</p>
+      <label class="label mb-1">Discord user ID</label>
+      <input id="link-discord-user-id" class="input w-full font-mono"
+             placeholder="123456789012345678">
+      <label class="label mt-3 mb-1">Display name (opcional)</label>
+      <input id="link-discord-author" class="input w-full"
+             placeholder="ej: usuario-demo">
+      <!-- Pre-flight: si el gateway de Discord está caído el DM no se puede
+           crear, así que se dice ANTES de apretar Vincular, no después. -->
+      <div id="link-discord-bot" class="mt-3 text-xs text-zinc-400"></div>
+      <div id="link-discord-msg" class="mt-2 text-xs text-zinc-400"></div>
+    </div>
+    <div class="modal-footer">
+      <button data-close class="btn">Cancelar</button>
+      <button id="link-discord-start-bot" class="btn" hidden><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg> Arrancar bot</button>
+      <button id="link-discord-ok" class="btn btn-primary">Vincular <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg></button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ modal genérico: confirm (reemplaza window.confirm) ============ -->
+<div id="confirm-modal" class="modal" role="alertdialog" aria-modal="true">
+  <div class="modal-card max-w-md">
+    <div class="modal-header">
+      <strong id="confirm-modal-title" class="text-sm text-zinc-100">¿Confirmar?</strong>
+    </div>
+    <div id="confirm-modal-body" class="modal-body text-sm leading-relaxed text-zinc-200"></div>
+    <!-- `justify-end` acá y no en `.modal-footer`: hay 21 footers y
+         algunos llevan texto a la izquierda. En un diálogo de confirmar
+         los botones van a la derecha y la acción manda al final, que es
+         donde el ojo la busca. -->
+    <div class="modal-footer justify-end">
+      <button id="confirm-modal-cancel" class="btn" data-close>Cancelar</button>
+      <button id="confirm-modal-ok" class="btn btn-primary">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ modal genérico: alert (reemplaza window.alert) ============ -->
+<div id="alert-modal" class="modal" role="alertdialog" aria-modal="true">
+  <div class="modal-card max-w-md">
+    <div class="modal-header">
+      <strong id="alert-modal-title" class="text-sm text-zinc-100">Aviso</strong>
+    </div>
+    <div id="alert-modal-body" class="modal-body text-sm leading-relaxed text-zinc-200"></div>
+    <div class="modal-footer">
+      <button id="alert-modal-ok" class="btn btn-primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- El server manda Cache-Control: no-store para .js/.css (admin.py),
+     así que no hace falta cache-buster: cada F5 trae lo último. -->
+<script type="module" src="/admin/static/main.js"></script>
+</body>
+</html>

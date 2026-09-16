@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kitchen sink — capa de componentes</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body class="bg-zinc-950 text-zinc-100 antialiased">
+<div id="toast-root" class="pointer-events-none fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+<main class="mx-auto max-w-5xl p-8">
+  <h1 class="panel-title">Capa de componentes — fase 0</h1>
+  <p class="panel-sub">Cada bloque usa el helper real, no una copia.</p>
+
+  <h2 class="section-title">Workspace · ventanas y objetos contextuales</h2>
+  <p class="panel-sub">La muestra ejecuta el workspace real: abrir herramientas,
+    mover, redimensionar, minimizar y recuperar. Usa los datos del relay y la
+    disposición guardada en este navegador. <a href="/admin/#/chat" target="_blank"
+    rel="noopener">Abrir a pantalla completa</a>.</p>
+  <iframe src="/admin/#/chat" title="Workspace interactivo del relay" loading="lazy"
+    style="width:100%;height:680px;border:1px solid #314139;margin-top:16px"></iframe>
+
+  <h2 class="section-title">1 · dataTable (orden + filtro + paginación)</h2>
+  <div id="tbl"></div>
+
+  <h2 class="section-title">2 · dataTable cargando (skeletonRows)</h2>
+  <div id="tbl-load"></div>
+
+  <h2 class="section-title">3 · emptyState</h2>
+  <div class="card" id="vacio"></div>
+
+  <h2 class="section-title">4 · formSection + field</h2>
+  <div id="form"></div>
+
+  <h2 class="section-title">5 · barChart — una serie</h2>
+  <div id="ch1" class="chart-wrap card p-4"></div>
+
+  <h2 class="section-title">6 · barChart — tres series apiladas (con legend)</h2>
+  <div id="ch3" class="chart-wrap card p-4"></div>
+
+  <h2 class="section-title">7 · barChart — sin datos</h2>
+  <div id="ch0" class="chart-wrap card p-4"></div>
+</main>
+
+<script type="module">
+import { emptyState, field, formSection } from "/admin/static/ui.js";
+import { dataTable } from "/admin/static/ui-table.js";
+import { barChart } from "/admin/static/ui-chart.js";
+
+const rows = Array.from({ length: 23 }, (_, i) => ({
+  slug: ["sample-app", "inventorydemo", "4bis-relay", "scheduler-demo", "billing-demo"][i % 5] + "-" + i,
+  runs: (i * 37) % 140,
+  estado: i % 3 === 0 ? "ok" : i % 3 === 1 ? "running" : "error",
+  ultimo: i % 7 === 0 ? "" : "2026-08-" + String(10 + (i % 20)).padStart(2, "0"),
+}));
+
+dataTable("#tbl", {
+  rows,
+  pageSize: 8,
+  searchPlaceholder: "filtrar proyectos…",
+  sort: { key: 1, dir: "desc" },
+  columns: [
+    { key: "slug", label: "Proyecto", render: (r) => `<code>${r.slug}</code>` },
+    { key: "runs", label: "Runs", className: "tabular-nums" },
+    { key: "estado", label: "Estado",
+      render: (r) => `<span class="badge ${r.estado === "ok" ? "ok"
+        : r.estado === "running" ? "warn" : "err"}">${r.estado}</span>` },
+    { key: "ultimo", label: "Último run", value: (r) => r.ultimo || null },
+  ],
+  toolbar: `<button class="btn btn-primary btn-xs">+ Nuevo</button>`,
+});
+
+dataTable("#tbl-load", {
+  rows: [], search: false,
+  columns: [{ key: "a", label: "Nombre" }, { key: "b", label: "Estado" },
+            { key: "c", label: "Último run" }],
+}).setLoading(true);
+
+document.querySelector("#vacio").innerHTML = emptyState({
+  title: "Todavía no hay proyectos indexados",
+  sub: "Un proyecto aparece acá cuando cbm terminó de indexarlo. La primera corrida sobre un repo grande puede tardar unos minutos.",
+  icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="h-8 w-8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke-linejoin="round"/></svg>`,
+  action: `<button class="btn btn-primary">Indexar un repo</button>`,
+});
+
+document.querySelector("#form").innerHTML = formSection({
+  title: "Red",
+  sub: `Persistido en SQLite (tabla <code>system_config</code>). La tabla manda sobre el <code>.env</code>.`,
+  body: `
+    ${field({ label: "Bind host", required: true,
+      control: `<select class="select"><option>127.0.0.1 — solo esta máquina</option><option>0.0.0.0</option></select>`,
+      hint: `<code>RELAY_HOST</code> · bind actual: 127.0.0.1` })}
+    ${field({ label: "Raíz de repos",
+      control: `<input class="input" placeholder="C:\\Users\\usuario\\source\\repos">`,
+      hint: `<code>FOURBIS_REPOS_ROOT</code> · la usa el file browser` })}
+    ${field({ label: "Puerto", control: `<input class="input" value="84131">`,
+      error: "fuera de rango (1024–65535)" })}
+    ${field({ label: "Timeout del experto",
+      control: `<input class="input" value="180">`, hint: "segundos" })}
+  `,
+  actions: `<button class="btn btn-primary">Guardar</button>
+            <button class="btn">Cancelar</button>
+            <button class="btn danger ml-auto">Reiniciar relay</button>`,
+});
+
+const dias = Array.from({ length: 30 }, (_, i) => ({
+  label: String((i % 28) + 1).padStart(2, "0"),
+  value: [0, 0, 3, 40, 88, 12, 60, 5, 0, 120][i % 10] * (1 + (i % 4)),
+}));
+barChart("#ch1", { points: dias, ariaLabel: "demo una serie" });
+
+barChart("#ch3", {
+  points: Array.from({ length: 14 }, (_, i) => ({
+    label: "d" + i,
+    values: [10 + (i * 7) % 40, 5 + (i * 3) % 20, (i * 11) % 15],
+  })),
+  series: [{ name: "minimax" }, { name: "deepseek" }, { name: "claude" }],
+  ariaLabel: "demo tres series apiladas",
+});
+
+barChart("#ch0", { points: [], onEmpty: "sin actividad en el rango" });
+</script>
+</body>
+</html>

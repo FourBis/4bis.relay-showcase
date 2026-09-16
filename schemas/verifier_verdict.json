@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4bis.local/schemas/verifier_verdict.json",
+  "title": "Verificador · veredicto extendido",
+  "description": "Contrato JSON que emite el Verificador al final de su turno. Lo consumen t5 (implementación del Verificador, emisor) y t6 (cableado del orquestador, parser). Convención de marcador: bloque JSON FENCED con tag VERIFIER_VERDICT (no el tag `json` genérico) — esto evita que el parser confunda el veredicto con cualquier otro bloque JSON que el verificador pueda emitir en su salida (por ejemplo, razonamiento). Regex sugerido: ```VERIFIER_VERDICT\\s*\\n([\\s\\S]+?)\\n``` . El parser debe pasar el bloque capturado por json.loads y validar contra este schema antes de aceptar el veredicto. El enum de verdict es EXACTO: complete | needs_more | off_plan. NO se permiten needs_human ni budget_exceeded: si el verificador los considera, los emite fuera del bloque (texto plano) y el orquestador los trata como casos especiales.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "feedback", "steps_completed"],
+  "properties": {
+    "verdict": {
+      "description": "Veredicto del Verificador. Exactamente uno de los tres valores; cualquier otro string hace fallar la validación.",
+      "type": "string",
+      "enum": ["complete", "needs_more", "off_plan"]
+    },
+    "feedback": {
+      "description": "Una línea (≤ 200 caracteres) en español neutro, visible al humano en la UI. Equivalente al campo FEEDBACK: del contrato anterior (texto plano). Es lo que el humano lee; NO es la corrección del plan (eso vive en plan_correction.feedback_to_executor).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "steps_completed": {
+      "description": "Ids de steps del plan activo que el Verificador da por cubiertos, aunque el Ejecutor no los haya marcado con plan_step_done. Lista vacía si el plan era trivial o ninguno quedó visiblemente cumplido. Equivalente al campo PASOS: del contrato anterior.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/StepId" },
+      "uniqueItems": true
+    },
+    "plan_correction": {
+      "description": "Corrección del plan. REQUERIDO para verdict = needs_more u off_plan; OPCIONAL/ausente para verdict = complete. Cuando está presente, REEMPLAZA el plan activo: el orquestador debe reconstruir el plan del Ejecutor a partir de revised_steps, dejando fuera remove_step_ids y respetando el orden de add_step_ids dentro de revised_steps.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revised_steps",
+        "feedback_to_executor",
+        "remove_step_ids",
+        "add_step_ids"
+      ],
+      "properties": {
+        "revised_steps": {
+          "description": "Nuevo plan activo: lista de Step objects que sustituye al plan previo. Debe incluir TODOS los steps que siguen vigentes (los originales no eliminados, posiblemente modificados, más los nuevos de add_step_ids). El orden del array es el orden de ejecución.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Step" }
+        },
+        "feedback_to_executor": {
+          "description": "Instrucciones precisas y accionables para el próximo turno del Ejecutor. Debe nombrar la desviación específica (off_plan) o el item faltante concreto (needs_more). Tono: ingeniero senior, sin relleno. Este string se inyecta en el system prompt del Ejecutor como 'feedback del verificador'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "remove_step_ids": {
+          "description": "Ids de steps del plan previo que ya no aplican. Útil cuando el Verificador detectó que un step era incorrecto o quedó obsoleto. Lista vacía si no se elimina ninguno.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/StepId" },
+          "uniqueItems": true
+        },
+        "add_step_ids": {
+          "description": "Ids de steps NUEVOS que aparecen en revised_steps y NO estaban en el plan previo. Sirve para que el orquestador pueda distinguir 'qué se metió de cero' de 'qué se modificó del plan original' sin re-parsear todo revised_steps. Lista vacía si no se agregó ninguno.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/StepId" },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "plan_correction es obligatorio para needs_more y off_plan.",
+      "if": {
+        "properties": { "verdict": { "enum": ["needs_more", "off_plan"] } },
+        "required": ["verdict"]
+      },
+      "then": { "required": ["plan_correction"] }
+    }
+  ],
+  "$defs": {
+    "StepId": {
+      "description": "Identificador de step. String (no int) para soportar tanto ids heredados del plan original ('3', '5') como ids nuevos inyectados por el Verificador ('nueva-1', 'plan-corr-2').",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.\\-]+$"
+    },
+    "Step": {
+      "description": "Forma de un step del plan. Misma shape que los steps del plan original emitido por el Planificador, más un campo status que el Verificador puede usar para reflejar el estado observado.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "expected_output", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StepId" },
+        "description": {
+          "description": "Qué tiene que hacer el Ejecutor en este step. ACCIÓN concreta (verbo + objeto + herramienta cuando aplique), no una idea.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "expected_output": {
+          "description": "Criterio de aceptación: qué tiene que ser cierto al terminar para considerar este step cumplido. Texto verificable, no aspiracional.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "status": {
+          "description": "Estado observado por el Verificador para este step. 'done' = cumplido aunque el Ejecutor no lo haya marcado con plan_step_done; 'in_progress' = empezó pero no terminó; 'pending' = no se intentó; 'failed' = se intentó y falló.",
+          "type": "string",
+          "enum": ["pending", "in_progress", "done", "failed"]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "verdict": "complete",
+      "feedback": "Plan cumplido: esquema migrado, parser actualizado, 12 tests verdes.",
+      "steps_completed": ["1", "2", "3"]
+    },
+    {
+      "verdict": "needs_more",
+      "feedback": "Faltan los tests de integración del paso 3.",
+      "steps_completed": ["1", "2"],
+      "plan_correction": {
+        "revised_steps": [
+          {
+            "id": "1",
+            "description": "Migrar el esquema verifier_verdict a la tabla plans.",
+            "expected_output": "Esquema persiste con plan_correction como objeto opcional.",
+            "status": "done"
+          },
+          {
+            "id": "2",
+            "description": "Actualizar el parser del orquestador para extraer plan_correction del bloque VERIFIER_VERDICT.",
+            "expected_output": "Parser pasa los tests de t6 con verdict=needs_more.",
+            "status": "done"
+          },
+          {
+            "id": "3",
+            "description": "Agregar tests de integración del parser con bloques VERIFIER_VERDICT bien y mal formados.",
+            "expected_output": "pytest tests/test_parser_verifier_verdict.py pasa con 8 casos.",
+            "status": "pending"
+          }
+        ],
+        "feedback_to_executor": "El paso 3 quedó sin tests de integración. Necesito que agregues tests con bloques VERIFIER_VERDICT válidos (verdict=complete, needs_more, off_plan), bloques malformados (JSON inválido, schema inválido) y bloques donde el tag no es VERIFIER_VERDICT. Mínimo 8 casos en tests/test_parser_verifier_verdict.py.",
+        "remove_step_ids": [],
+        "add_step_ids": []
+      }
+    },
+    {
+      "verdict": "off_plan",
+      "feedback": "El Ejecutor se fue a refactorizar el orquestador en vez de migrar el esquema.",
+      "steps_completed": ["1"],
+      "plan_correction": {
+        "revised_steps": [
+          {
+            "id": "1",
+            "description": "Migrar el esquema verifier_verdict a la tabla plans.",
+            "expected_output": "Esquema persiste con plan_correction como objeto opcional.",
+            "status": "done"
+          },
+          {
+            "id": "nueva-1",
+            "description": "Volver al scope original: dejar el refactor del orquestador fuera de este cambio. Revertir los archivos no relacionados al esquema.",
+            "expected_output": "git diff muestra SOLO cambios en schemas/ y mcp-server/src/relay/parser.py.",
+            "status": "pending"
+          },
+          {
+            "id": "2",
+            "description": "Actualizar el parser del orquestador para extraer plan_correction del bloque VERIFIER_VERDICT.",
+            "expected_output": "Parser pasa los tests de t6 con verdict=needs_more.",
+            "status": "pending"
+          }
+        ],
+        "feedback_to_executor": "Abandonaste el plan. El plan pedía migrar el esquema del veredicto y vos refactorizaste el orquestador. Paso nueva-1: revertí todo lo que no sea el paso 1 (git checkout -- mcp-server/src/relay/parser.py mcp-server/src/relay/server.py) y retomá el paso 2. NO toques más nada fuera del scope.",
+        "remove_step_ids": [],
+        "add_step_ids": ["nueva-1"]
+      }
+    }
+  ]
+}

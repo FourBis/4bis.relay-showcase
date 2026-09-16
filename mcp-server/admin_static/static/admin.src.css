@@ -1,0 +1,2727 @@
+/* Fuente unica de estilos del admin (compilar con ../build-css.ps1).
+   NO editar admin.css a mano: se regenera con Tailwind CLI v3.
+   Orden: utilities de Tailwind primero, reglas propias despues — asi
+   los overrides con !important del chat workspace siguen ganando igual
+   que cuando admin.css era un <link> separado. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- design system (antes <style type="text/tailwindcss"> inline) ---- */
+  /* Design system del admin (procesado por Tailwind CDN en runtime).
+     Los templates JS usan estas clases; si tocas algo acá, cambia toda
+     la UI de una. Cero build step. */
+  @layer base {
+    code { @apply rounded bg-zinc-800/70 px-1 py-0.5 font-mono text-[0.85em] text-sky-300; }
+    input[type="checkbox"] { @apply h-4 w-4 cursor-pointer accent-emerald-500; }
+  }
+  @layer components {
+    /* ---- navegación ---- */
+    .nav-group { @apply px-3 pb-1 pt-5 text-[11px] font-semibold uppercase tracking-wider text-zinc-400; }
+    .nav-item { @apply flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60; }
+    .nav-item[aria-selected="true"] { @apply bg-zinc-800/80 text-emerald-400; }
+    .nav-icon { @apply h-4 w-4 shrink-0; }
+
+    /* ---- layout ---- */
+    .card { @apply rounded-xl border border-zinc-800 bg-zinc-900; }
+    .panel-title { @apply text-xl font-semibold tracking-tight text-zinc-100; }
+    .panel-sub { @apply mt-1 max-w-3xl text-sm leading-relaxed text-zinc-400; }
+    .section-title { @apply mb-3 mt-8 text-xs font-semibold uppercase tracking-wider text-zinc-400; }
+    .muted { @apply text-sm text-zinc-400; }
+    .fail { @apply text-red-400; }
+
+    /* ---- controles ---- */
+    .btn { @apply inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-3 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 disabled:pointer-events-none disabled:opacity-40; }
+    .btn-primary { @apply border-emerald-700 bg-emerald-700 text-white hover:border-emerald-600 hover:bg-emerald-600 hover:text-white; }
+    .btn-xs { @apply h-6 gap-1 rounded px-2 text-xs; }
+    /* Rojo EN REPOSO, no solo en hover. Hasta el 24/8 todo el estilo de
+       peligro vivía en `hover:`, así que en un diálogo el botón que
+       borra y el que cancela eran idénticos hasta pasarles el mouse por
+       encima — y en "¿Cerrar conversación?" los dos decían casi lo
+       mismo ("Cerrar" / "Cancelar"). Un botón destructivo tiene que
+       verse destructivo antes de tocarlo. */
+    .btn.danger { @apply border-red-800/80 bg-red-950/50 text-red-300 hover:border-red-500/70 hover:bg-red-500/20 hover:text-red-200 focus-visible:ring-red-500/60; }
+    .icon-btn { @apply flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200; }
+    .icon-btn.danger { @apply hover:bg-red-500/10 hover:text-red-300; }
+    /* Acciones de fila icon-only: alineadas a la derecha y juntas, para
+       que la columna no compita con el contenido de la fila. */
+    .cell-actions { @apply whitespace-nowrap text-right; }
+    .cell-actions > div { @apply inline-flex items-center gap-0.5; }
+    .select-xs { @apply h-6 px-1.5 text-xs; }
+    /* El select de estado se pinta según el valor: verde = va al prompt,
+       ámbar = on-demand, gris = apagada. Se lee de un vistazo en la tabla. */
+    .select-state[data-state="auto"] { @apply border-emerald-600/40 text-emerald-300; }
+    .select-state[data-state="manual"] { @apply border-amber-600/40 text-amber-300; }
+    .select-state[data-state="off"] { @apply border-zinc-700 text-zinc-500; }
+    .input { @apply h-8 rounded-md border border-zinc-700 bg-zinc-950 px-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none; }
+    textarea.input { @apply h-auto min-h-[90px] py-2 font-mono text-xs leading-relaxed; }
+    .select { @apply h-8 cursor-pointer rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-100 focus:border-emerald-500 focus:outline-none; }
+    .label { @apply inline-flex items-center gap-2 text-sm text-zinc-400; }
+    .toolbar { @apply mb-4 flex flex-wrap items-center gap-2; }
+
+    /* ---- tablas ---- */
+    .table-wrap { @apply overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-900; }
+    .table-wrap table { @apply w-full border-collapse text-sm; }
+    .th { @apply whitespace-nowrap border-b border-zinc-800 px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-400; }
+    .table-wrap td { @apply border-t border-zinc-800/70 px-3 py-2 align-middle; }
+    .table-wrap tbody tr { @apply transition-colors hover:bg-zinc-800/40; }
+    .table-wrap td.path { @apply break-all font-mono text-xs text-zinc-300; }
+    .table-wrap tr.ok { @apply text-emerald-300; }
+    .table-wrap tr.fail { @apply text-red-300; }
+    .table-wrap tr.non-repo { @apply opacity-50; }
+    .row-actions { @apply flex flex-wrap items-center gap-1; }
+    /* Sub-grupos de acciones (Ver / Configurar / Peligrosas).
+       Gap mayor entre grupos que entre botones del mismo grupo,
+       para que se "lean" como clusters sin separador visible. */
+    .action-group { @apply inline-flex items-center gap-0.5; }
+    .action-group + .action-group { @apply ml-2 pl-2 border-l border-zinc-800; }
+    .empty { @apply px-3 py-10 text-center text-sm text-zinc-400; }
+    .idx-yes { @apply text-emerald-400; }
+    .idx-no { @apply text-zinc-500; }
+    .chat-row, .conv-row, .mem-row { @apply cursor-pointer; }
+    #commands-table pre { @apply my-1 max-h-28 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-snug text-zinc-300; }
+    #commands-table td { @apply align-top; }
+
+    /* ---- badges (con dot) ---- */
+    .badge { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset; }
+    .badge::before { content: ""; @apply h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-70; }
+    .badge.ok { @apply bg-emerald-500/10 text-emerald-300 ring-emerald-500/25; }
+    .badge.warn { @apply bg-amber-500/10 text-amber-300 ring-amber-500/25; }
+    .badge.err { @apply bg-red-500/10 text-red-300 ring-red-500/25; }
+    .badge.dim { @apply bg-zinc-500/10 text-zinc-400 ring-zinc-500/25; }
+
+    /* ---- estado vacio ----
+       `.empty` (una linea de texto en una celda) se queda para lo
+       trivial. Esto es la version de panel: titulo, causa y SALIDA. Un
+       vacio sin accion deja al usuario sin saber si esta roto o si le
+       falta hacer algo. */
+    .empty-state { @apply flex flex-col items-center justify-center gap-1 px-3 py-12 text-center; }
+    .empty-state-icon { @apply mb-2 h-8 w-8 text-zinc-600; }
+    .empty-state-title { @apply text-sm font-medium text-zinc-300; }
+    .empty-state-sub { @apply max-w-sm text-sm leading-relaxed text-zinc-500; }
+    .empty-state-action { @apply mt-3; }
+
+    /* ---- skeleton de carga ----
+       Una tabla muda no distingue "cargando" de "no hay nada" de
+       "colgado". `.skeleton-row` (la fila) ya existia mas abajo; esto es
+       la barra que va adentro. */
+    .skeleton { @apply block h-3 animate-pulse rounded bg-zinc-800/80; }
+
+    /* ---- formularios ----
+       Config apilaba filas sueltas, con el label a veces inline y a veces
+       arriba. `.form-section` agrupa en card; `.field` es siempre label ->
+       control -> hint/error, en ese orden. */
+    .form-section { @apply rounded-xl border border-zinc-800 bg-zinc-900 p-5; }
+    .form-section + .form-section { @apply mt-4; }
+    .form-section-head { @apply mb-4 border-b border-zinc-800 pb-3; }
+    .form-section-title { @apply text-sm font-semibold text-zinc-100; }
+    .form-section-sub { @apply mt-1 text-xs leading-relaxed text-zinc-400; }
+    .form-grid { @apply grid gap-4 sm:grid-cols-2; }
+    .form-grid > * { min-width: 0; }
+    .field { @apply flex min-w-0 flex-col gap-1.5; }
+    .field-label { @apply text-xs font-medium text-zinc-300; }
+    .field-label .req { @apply ml-0.5 text-red-400; }
+    .field-hint { @apply text-xs leading-relaxed text-zinc-500; }
+    .field-error { @apply text-xs text-red-400; }
+    .field.invalid .input, .field.invalid .select { @apply border-red-700 focus:border-red-500; }
+    .field-actions { @apply mt-4 flex items-center gap-2 border-t border-zinc-800 pt-4; }
+
+    /* ---- data table (orden + filtro + paginacion — ui-table.js) ----
+       El estado previo de Proyectos eran 53 filas planas sin ordenar ni
+       buscar. La flecha va en ::after y el estado real en aria-sort, asi
+       el lector de pantalla lee lo mismo que se ve. */
+    .dt-toolbar { @apply mb-3 flex flex-wrap items-center gap-2; }
+    .dt-count { @apply ml-auto shrink-0 text-xs tabular-nums text-zinc-500; }
+    .th-sort { @apply cursor-pointer select-none transition-colors hover:text-zinc-200; }
+    .th-sort::after { content: "\2195"; @apply ml-1 inline-block opacity-25; }
+    .th-sort[aria-sort="ascending"], .th-sort[aria-sort="descending"] { @apply text-emerald-400; }
+    .th-sort[aria-sort="ascending"]::after { content: "\2191"; @apply opacity-100; }
+    .th-sort[aria-sort="descending"]::after { content: "\2193"; @apply opacity-100; }
+    .dt-footer { @apply flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800 px-3 py-2 text-xs text-zinc-400; }
+    .dt-pages { @apply flex items-center gap-1; }
+
+    /* ---- stat cards ---- */
+    .stat { @apply rounded-xl border border-zinc-800 bg-zinc-900 p-4; }
+    .stat-v { @apply text-2xl font-semibold tabular-nums tracking-tight text-zinc-100; }
+    .stat-k { @apply mt-1 text-[11px] font-medium uppercase tracking-wider text-zinc-400; }
+
+    /* ---- tablero de gestión (ADR-036) ----
+       Kanban read-only: columnas que scrollean solas (un Done con 37
+       items no puede empujar la página) y tarjetas con repo + asignado.
+       Las clases viven acá y no como utilidades sueltas en el JS porque
+       el bundle se compila: una utilidad arbitraria en un innerHTML que
+       el scanner no vea sale sin estilo (pasó con la v1 de esta vista). */
+    .board-cols { @apply flex items-start gap-4 overflow-x-auto pb-2; }
+    .board-col { @apply flex w-72 shrink-0 flex-col rounded-xl border border-zinc-800 bg-zinc-900/60; }
+    .board-col-head { @apply flex items-center justify-between gap-2 border-b border-zinc-800 px-3 py-2.5; }
+    .board-col-count { @apply text-xs font-semibold tabular-nums text-zinc-500; }
+    .board-col-list { @apply flex max-h-[60vh] flex-col gap-2 overflow-y-auto p-2; }
+    .board-card { @apply rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 transition-colors hover:border-zinc-600; }
+    .board-card-title { @apply text-sm leading-snug text-zinc-100; }
+    .board-card-link { @apply hover:text-sky-300 hover:underline; }
+    .board-card-meta { @apply mt-2 flex flex-wrap items-center gap-1.5; }
+    .board-num { @apply font-mono text-[11px] text-zinc-500; }
+    .avatar { @apply inline-flex h-5 w-5 items-center justify-center rounded-full bg-sky-500/15 text-[10px] font-semibold text-sky-300 ring-1 ring-inset ring-sky-500/25; }
+    .badge.info { @apply bg-sky-500/10 text-sky-300 ring-sky-500/25; }
+    /* Pendientes de tablero: filas angostas y legibles. El nombre lleva
+       min-w-0 porque `truncate` NO trunca dentro de un flex sin eso — la
+       v1 sin min-w-0 (y con un <select> de 16 opciones adentro) dejaba el
+       nombre en 0px y el botón cortado. */
+    .pend-grid { @apply grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3; }
+    .pend-item { @apply flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-sm text-zinc-300; }
+    .pend-nombre { @apply min-w-0 flex-1 truncate font-mono text-xs text-zinc-200; }
+    .btn.devolver { @apply border-emerald-700/50 text-emerald-300 hover:border-emerald-500 hover:text-emerald-200; }
+    .progress { @apply h-1.5 w-full overflow-hidden rounded-full bg-zinc-800; }
+    .progress-fill { @apply h-full rounded-full bg-emerald-500 transition-all; }
+
+    /* ---- modales (display SOLO por .open; nunca [hidden]) ---- */
+    .modal { @apply fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4 backdrop-blur-sm; }
+    .modal.open { @apply flex; }
+    .modal-card { @apply flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl; }
+    .modal-card-wide { @apply max-h-[92vh] max-w-4xl; }
+    .modal-header { @apply flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3; }
+    .modal-body { @apply min-h-0 flex-1 overflow-y-auto p-4; }
+    .modal-body h4 { @apply mb-2 mt-5 text-xs font-semibold uppercase tracking-wider text-zinc-400 first:mt-0; }
+    .modal-footer { @apply flex flex-wrap items-center gap-2 border-t border-zinc-800 px-4 py-3; }
+
+    /* ---- panel lateral (mismo contrato que .modal: display por .open) ----
+       A diferencia del modal NO lleva backdrop: se abre a la derecha y la
+       lista de la izquierda sigue clickeable, así se salta de un registro
+       a otro sin cerrar. Cierra con Escape o con su botón. */
+    .side-panel { @apply fixed inset-y-0 right-0 z-40 hidden w-full max-w-2xl flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl; }
+    .side-panel.open { @apply flex; animation: side-panel-in .18s ease-out; }
+    .side-panel-header { @apply flex items-start justify-between gap-3 border-b border-zinc-800 px-5 py-4; }
+    .side-panel-body { @apply min-h-0 flex-1 overflow-y-auto px-5 py-4; }
+
+    /* ---- tabla clave/valor de los modales ---- */
+    .status-detail { @apply w-full text-sm; }
+    .status-detail th, .status-detail td { @apply border-t border-zinc-800/60 py-1.5 text-left align-top; }
+    .status-detail th { @apply w-44 pr-4 font-medium text-zinc-400; }
+    .status-detail tr:first-child th, .status-detail tr:first-child td { border-top: 0; }
+
+    /* ---- bloques pre ---- */
+    .chat-md { @apply max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-200; }
+
+    /* ---- bloques colapsables del system prompt ---- */
+    .prompt-block { @apply mb-2 overflow-hidden rounded-lg border border-zinc-800; }
+    .prompt-block-header { @apply flex cursor-pointer select-none items-center justify-between gap-3 bg-zinc-900 px-3 py-2 transition-colors hover:bg-zinc-800/70; }
+    .prompt-block-title { @apply text-sm font-medium text-zinc-200; }
+    .prompt-block-meta { @apply whitespace-nowrap font-mono text-[11px] text-zinc-400; }
+    .prompt-block-toggle { @apply mr-1.5 text-zinc-500; }
+    .prompt-block-body { @apply max-h-80 overflow-auto whitespace-pre-wrap break-words border-t border-zinc-800 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-300; }
+    .prompt-block.collapsed .prompt-block-body { display: none; }
+    .prompt-block-empty { @apply border-t border-zinc-800 px-3 py-2 text-sm italic text-zinc-400; }
+
+    /* ---- turnos de conversación ---- */
+    .conv-turns { @apply flex flex-col gap-2; }
+    .conv-turn { @apply rounded-lg border-l-4 p-3 text-sm leading-relaxed; }
+    .conv-turn-user { @apply border-sky-500 bg-sky-900/30; }
+    .conv-turn-assistant { @apply border-emerald-500 bg-emerald-900/30; }
+    .conv-turn-tool { @apply border-amber-500 bg-amber-900/30; }
+    .conv-turn-label { @apply mb-1 font-mono text-[11px] font-medium text-zinc-400; }
+    .conv-turn-content { @apply whitespace-pre-wrap break-words text-zinc-200; }
+
+    /* ---- chat SPA (Iter 9.1): vista full-screen tipo LLM ---- */
+    .chat-view { @apply flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/40; min-height: 560px; height: calc(100vh - 180px); }
+    .chat-header { @apply flex flex-wrap items-center gap-3 border-b border-zinc-800 px-4 py-3; }
+    .chat-header h3 { @apply text-sm font-semibold text-zinc-100; }
+    .chat-slug-input { @apply h-7 max-w-[180px] rounded-md border border-zinc-700 bg-zinc-950 px-2 font-mono text-xs text-zinc-200; }
+    .chat-slug-input:focus { @apply border-emerald-500 outline-none; }
+    .chat-proj-chip { @apply inline-flex items-center gap-2 rounded-full border border-emerald-600/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200; }
+    .chat-proj-chip .dot { @apply h-1.5 w-1.5 rounded-full bg-emerald-400; }
+    .chat-proj-chip button { @apply text-emerald-300/70 hover:text-emerald-200; }
+    .chat-proj-empty { @apply inline-flex items-center gap-2 rounded-full border border-dashed border-zinc-700 px-3 py-1 text-xs text-zinc-400; }
+    .chat-proj-empty button { @apply text-zinc-500 hover:text-zinc-200; }
+    .chat-proj-meta { @apply font-mono text-[11px] text-zinc-400; }
+    .chat-proj-meta code { @apply text-zinc-400; }
+    .chat-messages { @apply flex-1 overflow-y-auto p-5 space-y-4; }
+    .chat-msg { @apply flex flex-col gap-1.5 max-w-[85%]; }
+    .chat-msg-user { @apply self-end; }
+    .chat-msg-assistant { @apply self-start; }
+    .chat-msg-system { @apply self-center max-w-full text-center; }
+    .chat-bubble { @apply rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm; }
+    .chat-bubble-user { @apply rounded-tr-sm border border-sky-700/40 bg-sky-900/30 text-zinc-100; }
+    .chat-bubble-assistant { @apply rounded-tl-sm border border-emerald-700/40 bg-zinc-950 text-zinc-100; }
+    .chat-bubble-system { @apply rounded-md border border-amber-600/40 bg-amber-950/40 px-3 py-1.5 text-xs italic text-amber-200; }
+    .chat-meta { @apply font-mono text-[10px] text-zinc-400 px-1; }
+    .chat-meta-user { @apply text-right; }
+    .chat-meta-assistant { @apply text-left; }
+    .chat-bubble pre { @apply my-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-200; }
+    .chat-bubble code { @apply rounded bg-zinc-800/60 px-1 py-0.5 font-mono text-xs text-emerald-300; }
+    .chat-bubble pre code { @apply bg-transparent p-0 text-zinc-200; }
+    .chat-bubble a { @apply text-emerald-400 underline decoration-emerald-700/40 underline-offset-2 hover:text-emerald-300; }
+    .chat-bubble ul { @apply my-1 list-disc space-y-0.5 pl-5; }
+    .chat-bubble ol { @apply my-1 list-decimal space-y-0.5 pl-5; }
+    .chat-bubble blockquote { @apply my-2 border-l-2 border-zinc-700 pl-3 italic text-zinc-400; }
+    .chat-bubble h1, .chat-bubble h2, .chat-bubble h3 { @apply mt-3 mb-1 font-semibold text-zinc-100 first:mt-0; }
+    .chat-bubble h1 { @apply text-lg; }
+    .chat-bubble h2 { @apply text-base; }
+    .chat-bubble h3 { @apply text-sm; }
+    .chat-typing { @apply inline-flex items-center gap-1 text-zinc-500; }
+    .chat-typing span { @apply h-1.5 w-1.5 rounded-full bg-zinc-500; animation: chat-bounce 1.2s infinite; }
+    .chat-typing span:nth-child(2) { animation-delay: .15s; }
+    .chat-typing span:nth-child(3) { animation-delay: .3s; }
+    @keyframes chat-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-3px); opacity: 1; } }
+    .chat-input-area { @apply flex items-end gap-3 border-t border-zinc-800 px-4 py-3; }
+    .chat-textarea { @apply input flex-1 min-h-[64px] max-h-[260px] resize-y py-2 font-sans text-sm leading-relaxed; }
+    .chat-send-btn { @apply btn btn-primary h-10 px-5; }
+    .chat-toolbar { @apply flex flex-wrap items-center gap-2; }
+    .chat-stats { @apply font-mono text-[10px] text-zinc-400; }
+    .chat-empty { @apply flex h-full flex-col items-center justify-center gap-3 text-center text-zinc-400; }
+    .chat-empty-icon { @apply text-4xl text-zinc-700; }
+
+    /* ---- topbar global (UI 2026-07-20) ---- */
+    .topbar { @apply sticky top-0 z-40 flex items-center gap-1 border-b border-zinc-800/80 bg-zinc-950/85 px-8 py-2 backdrop-blur; }
+    .topbar-item { @apply flex items-center gap-2 rounded-md px-2.5 py-1 text-xs text-zinc-400; }
+    button.topbar-item { @apply cursor-pointer transition-colors hover:bg-zinc-800/60 hover:text-zinc-200; }
+    .topbar-k { @apply text-[10px] font-medium uppercase tracking-wider text-zinc-400; }
+    .topbar-v { @apply font-mono text-xs tabular-nums text-zinc-200; }
+    .topbar-sep { @apply mx-1 h-4 w-px bg-zinc-800; }
+    .topbar-dot { @apply h-2 w-2 rounded-full bg-zinc-600 transition-colors; }
+    .topbar-dot.busy { @apply bg-emerald-400; }
+    .topbar-dot.down { @apply bg-red-400; }
+    @media (prefers-reduced-motion: no-preference) {
+      .topbar-dot.busy { animation: pulse-dot 1.6s ease-in-out infinite; }
+      .panel:not([hidden]) { animation: panel-in .18s ease-out; }
+    }
+    @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    @keyframes panel-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    /* ---- charts (primitiva compartida — ui-chart.js) ------------------
+       Barras en HTML puro (divs con height %), cero libreria: una serie
+       o varias apiladas. Nacio como `.rep-*` dentro de Informe; se
+       generalizo para que Metricas y Night Runs no vuelvan a inventar su
+       propio chart.
+
+       PALETA. Una sola serie: #059669, el hue de marca ya validado.
+       Varias series: los 8 slots categoricos del skill dataviz (steps de
+       modo oscuro) en orden FIJO — nunca ciclado, el 9no se pliega en
+       "otros". Validados contra la superficie real donde se dibujan, que
+       es la card zinc-900 y no el fondo de pagina:
+         node scripts/validate_palette.js "#3987e5,#d95926,#199e70,#c98500,#d55181,#008300,#9085e9,#e66767" --mode dark --surface "#18181b"
+         -> ALL PASS (peor par adyacente: CVD dE 8.4, vision normal dE 19.3)
+       Si agregas, cambias o REORDENAS un slot, volve a correr eso: el
+       orden es el mecanismo de seguridad CVD, no decoracion. */
+    .chart { @apply relative;
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+      --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+      --series-7: #9085e9; --series-8: #e66767;
+      --series-solo: #059669; --series-solo-last: #34d399; }
+    .chart-wrap { min-height: 200px; }
+    .chart-bars { @apply flex h-44 items-end gap-[2px]; }
+    .chart-col { @apply relative flex h-full min-w-0 flex-1 cursor-default flex-col items-stretch justify-end; }
+    .chart-col:hover { @apply bg-zinc-800/40; }
+    .chart-bar { background: var(--series-solo); @apply rounded-t transition-[height] duration-200; }
+    .chart-bar.last { background: var(--series-solo-last); }
+    /* Apilada: los segmentos se separan con 2px de SUPERFICIE, no con un
+       borde. Un borde suma tinta que no es dato. */
+    .chart-stack { @apply flex w-full flex-col justify-end gap-[2px]; }
+    .chart-seg { @apply w-full shrink-0; }
+    .chart-seg:first-child { @apply rounded-t; }
+    .chart-x { @apply mt-1 overflow-hidden text-center font-mono text-[9px] leading-tight text-zinc-400; }
+    .chart-toplabel { @apply absolute -top-4 left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[10px] text-zinc-300; }
+    .chart-tooltip { @apply pointer-events-none absolute z-10 min-w-[130px] rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs leading-relaxed text-zinc-300 shadow-xl; }
+    /* Legend obligatoria con 2+ series; con UNA no va — el titulo ya dice
+       que se grafica y un swatch solo lo repite. El texto nunca se pinta
+       del color de la serie: el color lo lleva el swatch al lado. */
+    .chart-legend { @apply mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5; }
+    .chart-legend-item { @apply inline-flex items-center gap-1.5 text-[11px] text-zinc-400; }
+    .chart-swatch { @apply h-2 w-2 shrink-0 rounded-[2px]; }
+    .chart-none { @apply flex h-44 items-center justify-center text-sm text-zinc-500; }
+
+    /* ---- Logs ---- */
+    .log-box { @apply h-[62vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed; }
+    .log-line { @apply flex gap-2 whitespace-pre-wrap break-all border-b border-zinc-900/60 py-0.5; }
+    .log-ts { @apply shrink-0 text-zinc-400; }
+    .log-level { @apply shrink-0 font-semibold; }
+    .log-logger { @apply shrink-0 text-zinc-400; }
+    .log-chat { @apply shrink-0 cursor-pointer rounded bg-zinc-800 px-1 text-zinc-400 hover:bg-sky-900 hover:text-sky-200; }
+    .log-msg { @apply text-zinc-300; }
+
+    /* ---- Buscador global (UI 2026-07-20) ---- */
+    .search-section-title { @apply px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400; }
+    .search-row { @apply flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm text-zinc-200 transition-colors hover:bg-zinc-800/70; }
+    .search-row.active { @apply bg-emerald-600/15 ring-1 ring-inset ring-emerald-500/40 text-zinc-100; }
+    .search-row-icon { @apply shrink-0 text-lg text-zinc-500; }
+    .search-row-text { @apply flex min-w-0 flex-col gap-0.5 flex-1; }
+    .search-row-label { @apply font-medium text-zinc-100; }
+    .search-row-sub { @apply truncate font-mono text-[10px] text-zinc-400; }
+    .search-row-kind { @apply shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-zinc-400; }
+
+    /* ---- misc ---- */
+    /* 2026-08-16: `.banner`/`.banner-info` y `.skeleton-row` se usaban en
+       tab-status.js y tab-projects.js pero no existian en ningun lado, asi
+       que no hacian nada. Las define el bundle ahora — ver ADMIN_UI.md, el
+       sello `classes-sha256` esta para que esto no vuelva a pasar callado. */
+    .banner { @apply my-3 rounded-lg border px-4 py-3 text-sm leading-relaxed; }
+    .banner code { @apply rounded bg-black/30 px-1 font-mono text-xs; }
+    /* Informativo y no de alerta: el aviso de reinicio dice que algo SALIO
+       BIEN y que falta un paso manual. En ambar se lee como un error. */
+    .banner-info { @apply border-sky-500/40 bg-sky-500/10 text-zinc-200; }
+    .banner-info strong { @apply text-sky-300; }
+    /* Fila placeholder mientras carga la tabla. `pointer-events-none`
+       porque una fila que todavia no es nada no deberia poder clickearse:
+       el shimmer ya lo pone el span de adentro (animate-pulse). */
+    .skeleton-row { @apply pointer-events-none select-none; }
+    .warn-box { @apply my-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm leading-relaxed text-zinc-200; }
+    .warn-box strong { @apply text-amber-300; }
+    .bar { @apply h-2.5 overflow-hidden rounded-full border border-zinc-800 bg-zinc-950; }
+    #bulk-bar-fill { @apply block h-full w-0 rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400 transition-[width] duration-300; }
+    hr { @apply my-8 border-zinc-800; }
+
+    /* ---- sidebar colapsable (UI 2026-07-21) ----
+       Toggle persiste en localStorage. Los labels de nav-item se
+       envuelven en runtime (js/main.js) en <span class="nav-label">
+       para poder ocultarlos con display:none sin tocar cada botón.
+       Header en columna: logo arriba (centrado), toggle abajo a la izq,
+       así el toggle no "empuja" al logo ni se solapa cuando colapsa. */
+    #sidebar { transition: width 200ms ease-out; }
+    #sidebar.collapsed { width: 3.5rem; }
+    #sidebar.collapsed .sidebar-text,
+    #sidebar.collapsed .nav-label,
+    #sidebar.collapsed .nav-group { display: none; }
+    #sidebar.collapsed .nav-item { justify-content: center !important; gap: 0 !important; padding-left: 0.25rem !important; padding-right: 0.25rem !important; }
+    /* Header: columna para separar logo y botón sin que peleen por ancho */
+    .sidebar-header { display: flex; flex-direction: column; }
+    .sidebar-header-row { display: flex; align-items: center; gap: 0.5rem; padding: 0 1rem; }
+    .sidebar-header-row.logo { padding-top: 1.25rem; padding-bottom: 0.5rem; }
+    .sidebar-header-row.toggle-row { padding: 0 0.75rem 0.5rem; }
+    #sidebar.collapsed .sidebar-header-row.logo { justify-content: center; padding-left: 0; padding-right: 0; }
+    #sidebar.collapsed .sidebar-header-row.toggle-row { padding-left: 0.25rem; padding-right: 0.25rem; }
+    /* El toggle usa la MISMA caja que un nav-item (ancho completo, alto e
+       hover iguales): antes era un botón chico flotando en su fila y se
+       leía como algo suelto, desalineado con la columna de iconos. */
+    .sidebar-toggle {
+      display: flex; align-items: center; justify-content: flex-start;
+      width: 100%; height: 2rem; padding: 0 0.5rem;
+      border-radius: 0.5rem;
+      color: rgb(113 113 122); /* zinc-500: es chrome, no navegación */
+      background: transparent;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background-color 150ms ease-out, color 150ms ease-out;
+    }
+    .sidebar-toggle svg { transition: transform 200ms ease-out; }
+    .sidebar-toggle:hover { background: rgb(39 39 42); color: rgb(228 228 231); }
+    #sidebar.collapsed .sidebar-toggle { justify-content: center; padding: 0; }
+    #sidebar.collapsed .sidebar-toggle svg { transform: rotate(180deg); }
+    /* Badges (Zombies, Skills) con el rail colapsado: el `ml-auto` los
+       empujaba al borde y rompían el centrado del icono. Colapsado van
+       como pastilla chica sobre la esquina del icono. */
+    #sidebar.collapsed .nav-item { position: relative; }
+    #sidebar.collapsed .nav-item > span[id$="-tab-badge"] {
+      position: absolute; top: 0.15rem; right: 0.15rem; margin: 0;
+      min-width: 0.95rem; padding: 0 0.2rem;
+      font-size: 9px; line-height: 0.95rem; text-align: center;
+    }
+    /* Footer (status): también colapsado honesto, solo el dot */
+    #sidebar.collapsed .sidebar-footer-text { display: none; }
+    #sidebar.collapsed .sidebar-footer { justify-content: center !important; }
+  }
+
+/* ---- reglas propias (antes admin.css servido aparte) ---- */
+/* 4bis.relay admin UI — reset mínimo post-Tailwind.
+   El design system vive en index.html (<style type="text/tailwindcss">,
+   procesado por el CDN de Tailwind en runtime). Acá va solo lo que ese
+   bloque no cubre bien: guards, keyframes y scrollbars. */
+
+/* Guard: que NINGUNA regla vuelva a pisar [hidden] (bug modales 2026-07:
+   `.modal { display:flex }` ganaba sobre el [hidden] del user-agent y los
+   modales quedaban abiertos e imposibles de cerrar). Los modales nuevos ya
+   no usan [hidden] (usan la clase .open), pero los panels sí. */
+[hidden] { display: none !important; }
+
+/* Dot de estado del relay (footer del sidebar). El JS togglea .down. */
+#status-indicator { color: #34d399; }
+#status-indicator.down { color: #f87171; }
+
+/* Entrada suave del modal (display:none no transiciona; animamos el card). */
+.modal.open .modal-card { animation: modal-pop .16s ease-out; }
+@keyframes modal-pop {
+  from { transform: scale(.97) translateY(4px); opacity: .5; }
+}
+
+/* Entrada del panel lateral: entra desde el borde derecho. */
+@keyframes side-panel-in {
+  from { transform: translateX(16px); opacity: 0; }
+}
+
+/* Modo conversación full-screen (in-app): al abrir un chat, el panel
+   toma toda la ventana como pantalla dedicada en vez de quedar
+   incrustado y apretado sobre el índice de turnos. z-40 va por debajo
+   de los modales (z-50) para que Vincular Discord / confirmaciones
+   sigan apareciendo encima. Los selectores con id ganan a las utilities
+   de Tailwind (max-h-[520px], etc.) por especificidad. */
+#chat-panel.chat-full {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  margin: 0;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  background: #09090b; /* zinc-950 */
+}
+#chat-panel.chat-full > #chat-panel-messages {
+  flex: 1 1 auto;
+  max-height: none;
+}
+/* Columna centrada (legibilidad en pantallas anchas). Las burbujas y el
+   contenido del header/footer se alinean a un ancho máximo cómodo. */
+#chat-panel.chat-full > #chat-panel-messages > * {
+  max-width: 860px;
+  margin-left: auto;
+  margin-right: auto;
+}
+#chat-panel.chat-full > header,
+#chat-panel.chat-full > footer {
+  padding-left: max(1rem, calc((100% - 860px) / 2));
+  padding-right: max(1rem, calc((100% - 860px) / 2));
+}
+/* Bloquear el scroll del fondo mientras el chat está full-screen. */
+body.chat-full-open { overflow: hidden; }
+
+/* Scrollbars discretos (la UI corre en Chrome/Edge desktop). */
+* { scrollbar-width: thin; scrollbar-color: #3f3f46 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #3f3f46; border-radius: 5px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #52525b; }
+
+/* ============================================================
+   Chat workspace tipo VS Code (2026-07-20e).
+   Sidebar (lista de convs) + panel principal (hilo). Reemplaza
+   los tabs Chats + Conversaciones. Alturas fijas con áreas
+   scrolleables internas para que el input quede siempre a la vista.
+   ============================================================ */
+/* El tab Chat rompe el contenedor centrado (max-w-1200 + px-8 py-7) para
+   llenar el área — sin esto se ve como una card metida adentro con espacio
+   desperdiciado a los costados. :has() lo escopea solo a este tab (Chrome
+   desktop, la UI corre ahí). */
+body:not(.workspace-mode) main > div:has(> #tab-chat:not([hidden])) {
+  max-width: none;
+  padding: 0;
+}
+.chat-workspace {
+  display: flex;
+  /* Ancla del panel del grafo, que en <900px se pone `absolute; inset:0`
+     para tapar el hilo en vez de comerle 320px de ancho. */
+  position: relative;
+  height: calc(100vh - 3.25rem);  /* topbar */
+  min-height: 460px;
+  border-top: 1px solid #27272a;   /* solo la línea que separa del topbar */
+  overflow: hidden;
+  background: #09090b;          /* zinc-950 */
+}
+
+/* Una acción que ahora mismo no conviene: se ve apagada pero sigue
+   clickeable, porque el que explica por qué es el modal. */
+.ocupado { opacity: 0.45; }
+.ocupado:hover { opacity: 0.7; }
+
+/* Aviso de plan corriendo, pegado al composer. Ámbar y no rojo: no es
+   un error, es "esperá antes de escribir". El punto late para que el
+   ojo lo agarre incluso si el número no se está mirando. */
+.chat-grafo-aviso {
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  margin: 0 0.75rem 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 0.6875rem; line-height: 1.45; color: #fcd34d;
+}
+.chat-grafo-aviso[hidden] { display: none; }
+.chat-grafo-aviso b {
+  color: #fde68a; font-weight: 600;
+  font-variant-numeric: tabular-nums;   /* el reloj no baila al tickear */
+}
+.gav-punto {
+  flex: 0 0 auto; width: 7px; height: 7px; margin-top: 0.35rem;
+  border-radius: 999px; background: #f59e0b;
+  animation: gavlatido 1.6s ease-in-out infinite;
+}
+@keyframes gavlatido {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gav-punto { animation: none; }
+}
+/* El cronómetro de cada tarea, en la lista y en el detalle. */
+.gres-nota [data-desde],
+.chat-grafo-detalle [data-desde] { font-variant-numeric: tabular-nums; }
+
+/* Tiradores entre paneles. 5px de ancho real con un `::after` de 1px
+   pintado al medio: un borde de 1px es imposible de agarrar con el
+   mouse, y uno de 5px visible parte el layout en dos. */
+.chat-resizer {
+  flex: 0 0 5px;
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 5;
+}
+.chat-resizer[hidden] { display: none; }
+.chat-resizer::after {
+  content: ""; position: absolute; inset: 0 2px;
+  background: #27272a;
+  transition: background 120ms ease;
+}
+.chat-resizer:hover::after,
+.chat-resizer:focus-visible::after,
+.chat-resizer.arrastrando::after { background: #60a5fa; }
+.chat-resizer:focus-visible { outline: none; }
+/* Mientras se arrastra: sin selección de texto y el cursor no cambia al
+   pasar por encima de otros elementos. */
+body.resizeando { cursor: col-resize; user-select: none; }
+/* Y sin transición: los paneles animan su ancho 180ms para que el
+   collapse no salte, pero durante un drag esa misma animación hace que
+   el borde persiga al mouse con retraso — se siente elástico y roto. */
+body.resizeando .chat-sidebar,
+body.resizeando .chat-grafo { transition: none; }
+
+/* --- sidebar --- */
+.chat-sidebar {
+  flex: 0 0 288px;
+  width: 288px;
+  display: flex;
+  flex-direction: column;
+  /* `min-width: 0` y no `auto`: con `auto` el contenido pone el piso y
+     la lista no cedía ni un pixel, así que en una ventana angosta el
+     hilo se comía el sobrante y quedaba aplastado contra el panel del
+     plan (medido: 288 + 354 + 512 en un workspace de 642). */
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid #27272a;
+  background: #0b0b0d;
+}
+.chat-sidebar-head {
+  flex: 0 0 auto;
+  padding: 0.75rem;
+  border-bottom: 1px solid #27272a;
+}
+/* El tirador baja la lista hasta 180px y ahi el encabezado no entraba:
+   chevron 24 + "Conversaciones" 99 + boton 74 = 213 contra 156 utiles, y
+   como `.btn` es `shrink-0` el que se salia era el boton — 45px pintados
+   ENCIMA del hilo (medido 2026-08-31 con la lista y el plan en los topes).
+   Cede el rotulo, que es lo unico prescindible: el chevron y el ➕ son
+   acciones. `min-width: 0` en la fila porque sin eso el contenido le pone
+   piso y el `text-overflow` del h2 no llega a aplicarse nunca. */
+.chat-sidebar-head > div { min-width: 0; }
+.chat-sidebar-head h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Collapse de la lista (mismo gesto que el rail de la izquierda): queda
+   una columna de 3rem con el chevron y el ➕, para darle todo el ancho
+   al hilo cuando estás leyendo. Persiste en localStorage. */
+.chat-sidebar { transition: flex-basis 180ms ease-out, width 180ms ease-out; }
+.chat-collapse-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; flex: 0 0 auto;
+  border-radius: 0.375rem;
+  color: #71717a;                  /* zinc-500 */
+  background: transparent; border: 0; cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.chat-collapse-btn:hover { background: #27272a; color: #e4e4e7; }
+.chat-collapse-btn svg { transition: transform 180ms ease-out; }
+.chat-sidebar.collapsed { flex-basis: 3rem; width: 3rem; }
+.chat-sidebar.collapsed .chat-collapse-btn svg { transform: rotate(180deg); }
+.chat-sidebar.collapsed .chat-sidebar-label,
+.chat-sidebar.collapsed .chat-sidebar-tools,
+.chat-sidebar.collapsed #chat-search,
+.chat-sidebar.collapsed .chat-conv-list { display: none; }
+.chat-sidebar.collapsed .chat-sidebar-head { padding: 0.5rem 0.25rem; }
+
+/* El rail: lo único que se ve con la columna colapsada. Solo ahí. */
+.chat-rail { display: none; }
+.chat-sidebar.collapsed .chat-rail {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 0.6rem;
+  flex: 1 1 auto; min-height: 0;
+  padding-top: 0.75rem;
+  overflow: hidden;
+}
+.chat-rail-count {
+  font-size: 0.6875rem; font-weight: 600;
+  color: #a1a1aa; background: #27272a;
+  border-radius: 999px; padding: 0.1rem 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.chat-rail-label {
+  writing-mode: vertical-rl;
+  font-size: 0.625rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: #52525b;
+  user-select: none; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.chat-sidebar.collapsed .chat-sidebar-head > div {
+  flex-direction: column; gap: 0.5rem;
+}
+.chat-sidebar.collapsed #chat-new { margin-left: 0; padding: 0.25rem 0.4rem; }
+.chat-conv-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.4rem;
+}
+.chat-conv-group {
+  padding: 0.6rem 0.5rem 0.25rem;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #71717a;             /* zinc-500 */
+}
+.chat-conv-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 2px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background .1s ease;
+}
+.chat-conv-item:hover { background: #18181b; }       /* zinc-900 */
+.chat-conv-item.active {
+  background: #1c1c20;
+  border-color: #3f3f46;                              /* zinc-700 */
+}
+.chat-conv-item .cci-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 12px;
+}
+.chat-conv-item .cci-dot {
+  flex: 0 0 auto;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #52525b;
+}
+.chat-conv-item .cci-dot.open { background: #34d399; }   /* emerald */
+.chat-conv-item .cci-dot.closed { background: #71717a; }
+.chat-conv-item .cci-proj {
+  font-weight: 600;
+  color: #e4e4e7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-conv-item .cci-when {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: #71717a;
+}
+.chat-conv-item .cci-preview {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #a1a1aa;                                     /* zinc-400 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Iter 10.3: chip de rama local en la sidebar. Solo aparece en
+   conversaciones cerradas — la rama es la activa en abiertas. font-mono
+   para que nombres largos como "user-2026-07-22" no rompan layout. */
+.chat-conv-item .cci-branch {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #a5d6a7;                                     /* green-200 */
+  background: rgba(16, 185, 129, 0.08);              /* emerald-500 @8% */
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- panel principal --- */
+.chat-main {
+  /* Ancho de la columna de conversación. Antes 820px dejaba media pantalla
+     vacía en monitores anchos; 1180 aprovecha el espacio sin que las líneas
+     se vuelvan incómodas de leer. Tunealo acá: lo usan burbujas, banner,
+     grupos de tools y la barra de input. */
+  --chat-col: 1180px;
+  /* Superficies del hilo (2026-08-12). La jerarquía la lleva el COLOR de
+     fondo, NO el borde: antes cada pieza traía su marco de 1px y el hilo
+     era una grilla de cajas. Cada escalón sube un paso sobre el fondo
+     (#09090b), y el orden de luminosidad ES el orden de importancia:
+     proceso < tools < RESPUESTA. `sunk` va para lo embebido dentro de la
+     respuesta (código, tool returns), que baja en vez de subir. */
+  --chat-sunk: #0c0c0e;
+  --chat-surf-1: #141417;
+  --chat-surf-2: #1b1b1f;
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-convo {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-convo-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid #27272a;
+  /* Wrappea SIEMPRE, no solo en movil (2026-08-31). Lo que aprieta al
+     header es el ancho del PANEL, no el de la ventana: con los tiradores
+     en los topes (lista 180, plan 900) el hilo queda en 220px en una
+     ventana de 1366 — o sea, con el @media de 640px sin disparar. Medido
+     ahi: 1121px de acciones dentro de una caja de 220, y como `.btn` es
+     `shrink-0` no se encogen, se salen: "🔒 Cerrar" terminaba en x=1362
+     pintado encima del panel del plan. Con ancho de sobra esto no hace
+     nada (flex-wrap solo actua cuando no entra). */
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+}
+/* El titulo es lo unico que puede ceder ancho — el resto son acciones.
+   Sin `min-width: 0` el `truncate` no tiene contra que truncar. */
+#chat-panel-title { flex: 1 1 auto; min-width: 0; }
+.chat-summary {
+  flex: 0 0 auto;
+  max-height: 32%;
+  overflow-y: auto;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid #27272a;
+  background: #0b0b0d;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #a1a1aa;
+  white-space: pre-wrap;
+}
+.chat-messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+/* columna centrada legible (como el chat de VS Code) */
+.chat-messages > * { width: 100%; max-width: var(--chat-col); margin-left: auto; margin-right: auto; }
+.chat-input-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem max(0.75rem, calc((100% - var(--chat-col)) / 2));
+  border-top: 1px solid #27272a;
+  background: rgba(24,24,27,0.6);
+}
+/* Columnas de acciones del composer (2026-08-27).
+
+   Antes todo iba en una fila: 📎 🧠 [textarea] Enviar Corregir Parar. El
+   textarea es lo unico que crece, asi que cada boton en fila le sacaba
+   ancho — y con el run corriendo aparecian DOS mas (Corregir y Parar)
+   justo cuando mas falta escribir. Apilados, ocupan alto que el composer
+   ya tiene reservado por el `min-height` del textarea, y el ancho queda
+   entero para escribir.
+
+   `align-items: stretch` para que Corregir y Parar queden del mismo
+   ancho: son dos acciones hermanas y una mas angosta que la otra se lee
+   como si fuera menos importante. */
+.chat-input-col {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+/* Los botones de accion traen padding de .btn y no deben encogerse. */
+.chat-input-col-acciones > .btn { white-space: nowrap; }
+
+/* En movil el alto es el recurso escaso, no el ancho: ahi vuelven a fila
+   y se reparten el ancho completo debajo del textarea. */
+@media (max-width: 640px) {
+  .chat-input-bar { flex-wrap: wrap; }
+  .chat-input-col { flex-direction: row; }
+  .chat-input-col-acciones { width: 100%; }
+  .chat-input-col-acciones > .btn { flex: 1 1 0; }
+}
+
+.chat-readonly-note {
+  flex: 0 0 auto;
+  padding: 0.7rem 0.9rem;
+  border-top: 1px solid #27272a;
+  background: #0b0b0d;
+  font-size: 12px;
+  color: #a1a1aa;
+}
+.chat-memoria {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+/* raw .md viewer: overlay dentro del panel principal */
+.chat-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: #09090b;
+}
+.chat-viewer > pre { flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; }
+
+/* --- botones-icono del workspace (emoji solo, cuadrados) ---
+   Sin esto los `btn btn-xs` con un emoji quedaban de anchos distintos y
+   apretados contra el select del sidebar. */
+/* `button.` para ganarle en especificidad al padding/min-height del .btn
+   de Tailwind (que se inyecta después de este stylesheet). */
+button.chat-icon-btn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 7px;
+}
+.chat-proj-select {
+  flex: 1 1 auto;
+  min-width: 0;   /* deja que se achique en vez de empujar los botones */
+}
+
+/* --- banner de run cortado (error / budget / timeout) ---
+   Compacto y legible: título humano + qué hacer, y el volcado crudo del
+   provider escondido en un <details> (antes salía el JSON entero en
+   monoespaciado ocupando media pantalla). */
+/* --- sugerencias de continuación (chips arriba del composer) ---
+   El texto del chip ES el prompt que se manda: un tap continúa el hilo
+   sin escribir. Se llenan al terminar el run y se limpian al mandar. */
+.chat-suggestions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  width: 100%;
+  max-width: var(--chat-col);
+  margin: 0 auto;
+  padding: .5rem .75rem 0;
+}
+.chat-suggestion {
+  padding: .35rem .7rem;
+  border: 1px solid rgba(56, 189, 248, .35);      /* sky-400/35 */
+  border-radius: 999px;
+  background: rgba(8, 47, 73, .35);               /* sky-950/35 */
+  color: #bae6fd;                                  /* sky-200 */
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  text-align: left;
+}
+.chat-suggestion:hover {
+  border-color: rgba(56, 189, 248, .7);
+  background: rgba(8, 47, 73, .6);
+  color: #e0f2fe;
+}
+.chat-banner {
+  width: 100%;
+  max-width: var(--chat-col);
+  margin: .25rem auto 0;
+  padding: .7rem .85rem;
+  border: 1px solid rgba(180, 83, 9, .5);      /* amber-700/50 */
+  background: rgba(69, 26, 3, .35);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.chat-banner-title { font-weight: 600; color: #fcd34d; }   /* amber-300 */
+.chat-banner-hint {
+  margin-top: .25rem;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(253, 230, 138, .82);                          /* amber-200 */
+}
+.chat-banner-hint code {
+  padding: 0 .25rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .3);
+  font-size: 11px;
+}
+.chat-banner-raw { margin-top: .5rem; }
+.chat-banner-raw > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: rgba(253, 230, 138, .55);
+}
+.chat-banner-raw > summary::-webkit-details-marker { display: none; }
+.chat-banner-raw > summary:hover { color: #fcd34d; }
+.chat-banner-raw pre {
+  margin: .4rem 0 0;
+  padding: .5rem .6rem;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .38);
+  font-size: 11px;
+  line-height: 1.45;
+  color: #d4d4d8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --- bloque de tools agrupadas ---
+   Las tool calls consecutivas de un tramo colapsan en un solo bloque: la
+   narración del experto queda como separador y no hay scroll infinito de
+   tarjetas. Colapsado por defecto; en ámbar si adentro hubo ediciones. */
+.chat-tool-group { width: 100%; max-width: var(--chat-col); margin: 0 auto; }
+.chat-tool-group > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .42rem .65rem;
+  border-radius: 8px;
+  background: var(--chat-surf-1, rgba(24, 24, 27, .5));
+  font-size: 11.5px;
+  color: #a1a1aa;
+  user-select: none;
+}
+.chat-tool-group > summary::-webkit-details-marker { display: none; }
+.chat-tool-group > summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: #71717a;
+  transition: transform .12s ease;
+}
+.chat-tool-group[open] > summary::before { transform: rotate(90deg); }
+.chat-tool-group > summary:hover {
+  color: #e4e4e7;
+  background: rgba(39, 39, 42, .65);
+}
+.chat-tool-group[open] > summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+/* "acá adentro hay diffs": el aviso lo da el fondo ámbar, no un marco. */
+.chat-tool-group.has-edits > summary {
+  background: rgba(120, 53, 15, .32);                         /* amber-900 */
+  color: #fcd34d;
+}
+.chat-tool-group.has-edits > summary:hover { background: rgba(120, 53, 15, .5); }
+.chat-tool-group .ctg-body {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  padding: .5rem;
+  border-radius: 0 0 8px 8px;
+  background: var(--chat-sunk, #0b0b0d);
+}
+/* adentro del grupo las tarjetas no vuelven a centrarse ni a limitarse */
+.chat-tool-group .ctg-body .chat-tool-card { max-width: none; margin: 0; }
+
+/* --- jerarquía del hilo (2026-08-12) ---
+   Tres pesos distintos, de menor a mayor: el bloque "proceso" (colapsado,
+   gris, casi una nota al pie) → la pregunta (burbuja chica a la derecha)
+   → la RESPUESTA, que es el ancla visual. Antes los tres pesaban igual y
+   el hilo se leía como una ensalada. */
+.chat-answer {
+  padding: .85rem 1rem .95rem;
+  border-radius: 12px;
+  background: var(--chat-surf-2);      /* sin borde: el escalón de color YA separa */
+  color: #e7e7ea;
+}
+.chat-answer-tag {
+  margin-bottom: .5rem;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: #6ee7b7;                                             /* emerald-300 */
+}
+
+/* Proceso del run: el razonamiento + las tools, colapsado por defecto.
+   Pegado a la respuesta que le sigue (margin-bottom negativo contra el
+   gap del hilo) para que se lea como SU proceso y no como un ítem suelto. */
+.chat-think { width: 100%; max-width: var(--chat-col); margin: 0 auto -.45rem; }
+.chat-think > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .3rem .55rem;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: #71717a;                                             /* zinc-500 */
+  user-select: none;
+}
+.chat-think > summary::-webkit-details-marker { display: none; }
+.chat-think > summary::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform .12s ease;
+}
+.chat-think[open] > summary::before { transform: rotate(90deg); }
+.chat-think > summary:hover { background: rgba(39, 39, 42, .5); color: #a1a1aa; }
+.chat-think[open] > summary { color: #a1a1aa; }
+.chat-think .ct-body {
+  margin: .25rem 0 .55rem;
+  padding: .55rem .7rem;
+  border-radius: 10px;
+  background: rgba(20, 20, 23, .75);   /* surf-1 translúcido: queda por debajo
+                                          de la respuesta sin marcarse */
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+/* El razonamiento va en markdown (el experto escribe con backticks y
+   listas también acá) pero un punto más chico y gris que la respuesta:
+   es contexto, no conclusión. */
+.chat-think .ct-say .md-body { font-size: 12.5px; color: #a1a1aa; }
+.chat-think .ct-say .md-body h1,
+.chat-think .ct-say .md-body h2,
+.chat-think .ct-say .md-body h3 { font-size: 12.5px; border-top: 0; padding-top: 0; }
+.chat-think .ct-steer {
+  padding: .3rem .6rem;
+  border-radius: 8px;
+  background: rgba(12, 74, 110, .45);                         /* sky-900 */
+  font-size: 12px;
+  color: #bae6fd;                                             /* sky-200 */
+}
+.chat-think .chat-tool-card { max-width: none; margin: 0; }
+
+/* --- markdown de la respuesta del experto (2026-08-12) ---
+   El experto responde en markdown; antes se pintaba escapado y las tablas
+   quedaban como sopa de pipes. Tipografía propia y no `prose` de Tailwind:
+   el plugin no está instalado y esto son ~60 líneas. Escala corta a
+   propósito (h1..h3 casi iguales): dentro de una burbuja lo que importa es
+   separar bloques, no una jerarquía de documento. */
+.md-body { font-size: 13.5px; line-height: 1.62; color: #d4d4d8; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child  { margin-bottom: 0; }
+.md-body p { margin: .6rem 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+  margin: 1.15rem 0 .5rem;
+  font-weight: 650;
+  line-height: 1.3;
+  color: #fafafa;
+}
+.md-body h1 { font-size: 16px; }
+.md-body h2 { font-size: 15px; }
+.md-body h3, .md-body h4 { font-size: 13.5px; color: #e4e4e7; }
+/* El h2 es el separador de secciones del experto ("## Plan", "## Riesgos").
+   El escaneo lo hace el color (blanco puro contra el cuerpo gris) + el aire
+   de arriba, no una regla: una línea por sección volvía a llenar la
+   respuesta de marcos. */
+.md-body h2 { margin-top: 1.5rem; color: #fff; }
+.md-body ul, .md-body ol { margin: .55rem 0; padding-left: 1.35rem; }
+.md-body li { margin: .22rem 0; }
+.md-body li > ul, .md-body li > ol { margin: .22rem 0; }
+.md-body ul { list-style: disc; }
+.md-body ol { list-style: decimal; }
+.md-body strong { color: #fafafa; font-weight: 640; }
+.md-body a { color: #7dd3fc; text-decoration: underline; }
+/* El `---` del experto: un degradado que se apaga en los extremos en vez de
+   una regla de punta a punta. Separa sin cortar. */
+.md-body hr {
+  height: 1px;
+  margin: 1.25rem 0;
+  border: 0;
+  background: linear-gradient(90deg, transparent, #3f3f46 25%, #3f3f46 75%, transparent);
+}
+.md-body blockquote {
+  margin: .7rem 0;
+  padding: .45rem .8rem;
+  border-radius: 8px;
+  background: rgba(63, 63, 70, .25);
+  color: #a1a1aa;
+}
+.md-body code {
+  padding: .1rem .3rem;
+  border-radius: 4px;
+  background: rgba(63, 63, 70, .45);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #fcd34d;                                             /* amber-300 */
+}
+/* El bloque de código BAJA en vez de enmarcarse: sobre la respuesta
+   (surf-2) un fondo más oscuro lee como hundido, y el marco sobra. */
+.md-body pre {
+  margin: .65rem 0;
+  padding: .65rem .8rem;
+  overflow-x: auto;                    /* código largo NO ensancha la burbuja */
+  border-radius: 8px;
+  background: var(--chat-sunk);
+  line-height: 1.5;
+}
+.md-body pre code {
+  padding: 0; background: none; color: #e4e4e7; font-size: 12px;
+}
+/* display:block + overflow para que una tabla ancha scrollee dentro de la
+   burbuja en vez de romper la columna del hilo. */
+.md-body table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: .7rem 0;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+/* Sin grilla: la separación de filas la hace el zebra y la de la cabecera
+   su propio fondo. Una tabla de 6 columnas con marco en cada celda es la
+   pieza que más "ensalada" aportaba. */
+.md-body th, .md-body td {
+  padding: .42rem .7rem;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body thead th {
+  background: var(--chat-sunk);
+  color: #fafafa;
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.md-body tbody tr:nth-child(odd) { background: rgba(255, 255, 255, .035); }
+/* La primera columna suele ser el "qué" (archivo, clave, lugar): en blanco
+   se escanea la tabla por ahí sin leerla entera. */
+.md-body tbody td:first-child { color: #e7e7ea; }
+.md-body img { max-width: 100%; border-radius: 6px; }
+
+/* --- pasos en vivo: el POR QUÉ y las correcciones (2026-07-25) ---
+   Deliberadamente MÁS livianos que una burbuja: son efímeros (al terminar
+   el run, loadMessages() re-renderiza el hilo persistido y desaparecen). */
+.chat-live-say, .chat-live-steer {
+  width: 100%;
+  max-width: var(--chat-col);
+  margin: .15rem auto;
+  padding: .3rem .6rem;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.chat-live-say { color: #a1a1aa; font-style: italic; }        /* zinc-400 */
+.chat-live-steer {
+  color: #bae6fd;                                             /* sky-200 */
+  background: rgba(12, 74, 110, .45);                         /* sky-900 */
+  border-radius: 8px;
+}
+
+/* --- tarjeta de tool call inline (Fase 2) --- */
+.chat-tool-card { width: 100%; max-width: var(--chat-col); margin: 0 auto; }
+.chat-tool-card > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  background: var(--chat-surf-1, rgba(24,24,27,0.5));
+  font-size: 11px;
+  color: #a1a1aa;
+}
+/* Tool sin cuerpo: misma superficie que la colapsable pero sin flecha —
+   antes traía el borde inline en el JS. */
+.chat-tool-card .ctc-flat {
+  padding: .35rem .6rem;
+  border-radius: 8px;
+  background: var(--chat-surf-1, rgba(24, 24, 27, .5));
+  font-size: 11px;
+  color: #a1a1aa;
+}
+.chat-tool-card > summary::-webkit-details-marker { display: none; }
+.chat-tool-card > summary:hover { color: #d4d4d8; }
+.chat-tool-card[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.chat-tool-card .ctc-body {
+  border-radius: 0 0 8px 8px;
+  padding: 0.5rem 0.6rem;
+  background: var(--chat-sunk, #0b0b0d);
+  font-size: 11px;
+  max-height: 320px;
+  overflow: auto;
+}
+/* Diff coloreado: sin scope a .chat-tool-card — el mismo markup lo usa el
+   modal de diff de la rama (📄 Diff del header del chat). */
+pre.ctc-diff {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre;
+  background: #0b0b0d;
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+}
+.chat-tool-card pre.ctc-diff { max-height: none; padding: 0; background: none; }
+.diff-add { color: #4ade80; }
+.diff-del { color: #f87171; }
+.diff-meta { color: #71717a; }
+
+/* Presupuesto de tokens del system prompt (tab Skills). Barra apilada:
+   cada segmento es un componente (ponytail / skills / fallback) y la
+   marca vertical es el umbral. Sin librería de charts — son 3 divs. */
+.budget-bar {
+  position: relative;
+  display: flex;
+  height: 26px;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  background: #0b0b0d;
+}
+.budget-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: #09090b;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.budget-seg-ponytail { background: #38bdf8; }
+.budget-seg-skills   { background: #4ade80; }
+.budget-seg-fallback { background: #a78bfa; }
+.budget-seg-free     { background: transparent; }
+.budget-over .budget-seg-skills { background: #f87171; }
+/* Marca del umbral: línea punteada sobre la barra. */
+.budget-threshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px dashed #fbbf24;
+  pointer-events: none;
+}
+.budget-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+/* Skip link (#8): oculto hasta que recibe foco por teclado. */
+.skip-link { position: absolute; left: 8px; top: -48px; z-index: 100; padding: 8px 14px; border-radius: 8px; background: #047857; color: #fff; font-size: 14px; font-weight: 500; transition: top .15s ease-out; }
+.skip-link:focus { top: 8px; }
+
+/* Sidebar mobile (#11): en <md el sidebar es overlay con backdrop. */
+#sidebar-backdrop { display: none; }
+@media (max-width: 767px) {
+  #sidebar { position: fixed; inset-block: 0; left: 0; z-index: 40; transform: translateX(-100%); transition: transform .18s ease-out; background: rgb(9 9 11); }
+  #sidebar.mobile-open { transform: translateX(0); }
+  #sidebar.mobile-open ~ #sidebar-backdrop { display: block; position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .6); }
+  #sidebar-toggle { display: none; }  /* el collapse desktop no aplica en overlay */
+  #menu-btn { display: inline-flex !important; }
+  .topbar { padding-inline: 0.5rem; gap: 0; }
+  .topbar-item { padding-inline: 0.4rem; min-height: 44px; }
+  .topbar-sep, #search-trigger .topbar-k, #search-trigger .topbar-v { display: none; }
+  #search-trigger { min-width: 44px; justify-content: center; }
+}
+
+/* Bandeja de adjuntos del composer (2026-07-31): chips con el nombre y
+   qué va a hacer el experto con cada uno (verlo / leerlo / solo el
+   nombre). Decirlo ANTES del run evita el "no puedo ver ese archivo"
+   como respuesta después de esperar el turno entero. */
+.chat-attach-tray {
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
+  padding: 0.5rem 0.9rem 0;
+}
+/* Modelo por rol del composer (2026-08-26). Era un <select> suelto en
+   la barra —angosto pero igual robando ancho al textarea, y solo para
+   el ejecutor—; ahora es un botón que abre un popover con las cuatro
+   etapas. Se abre por clase .open, como los modales. */
+.chat-model-wrap { position: relative; flex: 0 0 auto; }
+.chat-model-pop {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 30;
+  min-width: 17rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #3f3f46;              /* zinc-700 */
+  border-radius: 0.5rem;
+  background: #18181b;                     /* zinc-900 */
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+.chat-model-wrap.open .chat-model-pop { display: block; }
+.chat-model-pop-title {
+  font-size: 0.75rem; font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.chat-model-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  margin-bottom: 0.35rem;
+}
+.chat-model-row select { max-width: 10.5rem; flex: 0 0 auto; }
+.chat-model-pop-note {
+  font-size: 0.68rem;
+  color: #a1a1aa;                          /* zinc-400 */
+  margin-top: 0.5rem;
+}
+/* El botón avisa que hay overrides sin abrir el popover: si no, la
+   única forma de saber con qué va a correr el mensaje es abrirlo. */
+.chat-model-wrap.tiene-override #chat-model-btn::after {
+  content: "";
+  position: absolute; top: 0.15rem; right: 0.15rem;
+  width: 0.4rem; height: 0.4rem; border-radius: 50%;
+  background: #10b981;                     /* emerald-500 */
+}
+#chat-model-btn { position: relative; }
+
+.chat-attach-chip {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  border: 1px solid #27272a; border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  background: #18181b; color: #e4e4e7; font-size: 0.7rem;
+}
+.chat-attach-chip em { color: #a1a1aa; font-style: normal; }
+.chat-attach-x {
+  border: 0; background: transparent; color: #71717a; cursor: pointer;
+  padding: 0 0.15rem; line-height: 1;
+}
+.chat-attach-x:hover { color: #f87171; }
+/* Feedback de arrastre sobre el composer. */
+.chat-input-bar.dragging { outline: 2px dashed #047857; outline-offset: -4px; }
+
+/* Miniatura del adjunto dentro de la burbuja del usuario. Click = abrir
+   el original en una pestaña. */
+.chat-attach-thumb {
+  display: block; max-width: min(320px, 100%); max-height: 220px;
+  margin: 0.4rem 0; border-radius: 0.5rem; border: 1px solid #27272a;
+}
+
+/* ---------------------------------------------------------------------
+   Chats en móvil (2026-07-31)
+   Medido a 375px ANTES de esto: la lista se llevaba 288px fijos y le
+   dejaba 87px al hilo — ilegible. Acá la lista pasa a drawer (mismo
+   gesto que el rail global) y el hilo se queda con el ancho completo.
+
+   Todo el bloque toca SOLO `#chat-*` / `.chat-*` a propósito: el resto
+   del admin se sigue administrando desde la compu y no queremos
+   re-probar seis tabs por un cambio que es del chat.
+   --------------------------------------------------------------------- */
+#chat-drawer-backdrop { display: none; }
+/* `button.` y no `.chat-drawer-btn` a secas: `button.chat-icon-btn` ya
+   declara display:inline-flex y con (0,1,0) contra (0,1,1) el botón se
+   colaba visible en desktop. Verificado en el navegador, no a ojo. */
+button.chat-drawer-btn { display: none; }   /* en desktop la lista ya está al lado */
+
+/* =====================================================================
+   Panel del grafo (F3, 2026-08-23)
+   =====================================================================
+   El plan mientras corre, al lado del hilo. Columna fija a la derecha
+   del .chat-main, hermana de .chat-sidebar: la conversación queda en el
+   medio y el plan al costado, que es la forma de mirar las dos cosas a
+   la vez sin cambiar de pantalla.
+
+   El dibujo es un SVG inline armado a mano, sin librería de grafos: las
+   posiciones salen de `capas` (que las calcula el servidor) y el DAG que
+   dibujamos tiene doce nodos, no mil. Meter una dependencia de layout
+   para esto sería pagar 200kB por un for anidado. */
+.chat-grafo {
+  /* 360 y no 320: con tres nodos por fila el dibujo mide ~360 unidades,
+     así que a este ancho el SVG casi no se achica y la letra queda del
+     tamaño que pide el CSS. A 320 se encogía a 7px. */
+  flex: 0 0 360px;
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid #27272a;
+  background: #0b0b0d;
+}
+.chat-grafo[hidden] { display: none; }
+/* Panel ancho (⤢). El dibujo de un grafo de siete nodos por fila mide
+   ~832 unidades: a 360px se achica al 41% y la letra queda en 4.5px.
+
+   Dentro del media query a propósito: abajo de 900px el panel ya es un
+   overlay a pantalla completa (ver el `@media` de más abajo), y como
+   `.chat-grafo.ancho` tiene MÁS especificidad que `.chat-grafo`, sin
+   este guard le pisaba el `position: absolute` y volvía a ser una
+   columna de 58vw — que en una ventana de 882px dejaba el hilo en
+   354px. El overlay ya usa todo el ancho: ahí no hay nada que ensanchar. */
+@media (min-width: 901px) {
+  .chat-grafo.ancho { flex: 0 0 min(760px, 58vw); width: min(760px, 58vw); }
+}
+
+/* Pestañas: dos vistas del mismo plan, no dos lugares. */
+.chat-grafo-tabs {
+  flex: 0 0 auto;
+  display: flex; gap: 0.25rem;
+  padding: 0.4rem 0.75rem 0;
+  border-bottom: 1px solid #27272a;
+}
+.chat-grafo-tabs[hidden] { display: none; }
+.chat-grafo-tab {
+  appearance: none; background: none; border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.35rem 0.6rem; margin-bottom: -1px;
+  font-size: 0.75rem; color: #71717a; cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.chat-grafo-tab:hover { color: #a1a1aa; }
+.chat-grafo-tab.activa { color: #e4e4e7; border-bottom-color: #60a5fa; }
+
+/* Zoom. El paneo lo da el `overflow: auto` del lienzo. */
+.chat-grafo-zoom {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 0.3rem;
+  padding: 0.4rem 0.75rem 0;
+}
+.chat-grafo-zoom[hidden] { display: none; }
+.chat-grafo-zoom-nivel {
+  min-width: 3.1rem; text-align: center;
+  font-size: 0.6875rem; color: #a1a1aa;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Resumen: el plan por capas, en texto. Para el panel angosto y para
+   leer de un vistazo qué falta sin descifrar el dibujo. */
+.chat-grafo-resumen {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+  padding: 0.6rem 0.75rem;
+}
+.chat-grafo-resumen[hidden] { display: none; }
+.gres-capa { margin-bottom: 0.85rem; }
+.gres-capa h6 {
+  margin: 0 0 0.35rem;
+  font-size: 0.6875rem; font-weight: 600;
+  color: #71717a; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.gres-capa ul { list-style: none; margin: 0; padding: 0; }
+.gres-capa li { margin-bottom: 0.2rem; }
+.gres-item {
+  display: flex; align-items: baseline; gap: 0.45rem;
+  width: 100%; text-align: left;
+  appearance: none; cursor: pointer;
+  background: #141417; border: 1px solid #27272a;
+  border-left-width: 3px; border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.75rem; color: #a1a1aa; line-height: 1.3;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.gres-item:hover { background: #1a1a1f; border-color: #3f3f46; }
+.gres-item.sel { border-color: #e4e4e7; }
+.gres-n { flex: 0 0 auto; color: #52525b; font-variant-numeric: tabular-nums; }
+.gres-txt { flex: 1 1 auto; }
+.gres-nota { color: #71717a; }
+.gres-est {
+  flex: 0 0 auto; font-size: 0.625rem; color: #71717a;
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+/* Mismo código de color que los nodos, en el borde izquierdo. */
+.gres-item.hecho { border-left-color: #22c55e; color: #86efac; }
+.gres-item.corriendo { border-left-color: #60a5fa; color: #bfdbfe; }
+.gres-item.fallado { border-left-color: #ef4444; color: #fca5a5; }
+.gres-item.bloqueado { border-left-color: #52525b; }
+.gres-item.esperando_humano { border-left-color: #eab308; color: #fde68a; }
+.gres-item.pendiente { border-left-color: #3f3f46; }
+.gres-item.g-presupuesto { border-left-color: #f97316; color: #fdba74; }
+.chat-grafo-head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid #27272a;
+}
+.chat-grafo-titulo { font-size: 0.8125rem; color: #d4d4d8; }
+
+/* Progreso: la barra dice cuánto falta y el conteo dice de qué tipo es
+   lo que queda. Los dos, porque "80%" con una tarea fallada adentro no
+   es lo mismo que 80% limpio. */
+.chat-grafo-progreso {
+  flex: 0 0 auto;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid #27272a;
+}
+.chat-grafo-barra {
+  display: flex;
+  height: 0.375rem; border-radius: 999px;
+  background: #27272a; overflow: hidden;
+}
+.chat-grafo-barra > i {
+  display: block; height: 100%; width: 0%;
+  transition: width 300ms ease-out;
+}
+.chat-grafo-barra > i.gbien { background: #22c55e; }   /* green-500 */
+.chat-grafo-barra > i.gmal  { background: #ef4444; }   /* red-500 */
+.chat-grafo-conteo {
+  display: block; margin-top: 0.4rem;
+  font-size: 0.6875rem; color: #a1a1aa;
+}
+
+/* Veredicto de la verificación de cierre del grafo. Una sola línea con
+   el badge y el feedback: es UN dato por grafo y no puede competir con
+   el dibujo por el espacio del panel. El color lo pone el veredicto —
+   verde aprueba, ámbar objeta, rojo pide un humano — porque eso es lo
+   único que decide qué hace el que lo lee. */
+.chat-grafo-veredicto {
+  display: flex; align-items: flex-start; gap: 0.45rem;
+  margin: 0.5rem 0.75rem 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #3f3f46; border-radius: 8px;
+  background: rgba(63, 63, 70, 0.25);
+  font-size: 0.6875rem; line-height: 1.45; color: #d4d4d8;
+}
+.chat-grafo-veredicto[hidden] { display: none; }
+.chat-grafo-veredicto.vok {
+  border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.08);
+}
+.chat-grafo-veredicto.vwarn {
+  border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08);
+}
+.chat-grafo-veredicto.verr {
+  border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.08);
+}
+.cgv-txt { min-width: 0; }
+/* El modelo y los tokens de la etapa, en su propia línea: "cuánto cuesta
+   esto" se contesta mirando, sin instrumentar de nuevo. */
+.cgv-txt small { display: block; margin-top: 0.15rem; color: #71717a; }
+
+.chat-grafo-lienzo {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+  padding: 0.75rem 0.5rem;
+}
+.chat-grafo-lienzo svg { display: block; margin: 0 auto; }
+
+/* Los nodos. El estado se lee por color de borde y de relleno; el
+   `corriendo` además late, que es lo único que distingue "está pasando
+   algo" de una captura de pantalla. */
+.gnodo { cursor: pointer; }
+.gnodo rect {
+  fill: #141417; stroke: #3f3f46; stroke-width: 1;
+  transition: fill 150ms ease, stroke 150ms ease;
+}
+.gnodo text { font-size: 11px; fill: #a1a1aa; pointer-events: none; }
+.gnodo:hover rect { stroke: #71717a; }
+.gnodo.sel rect { stroke: #e4e4e7; stroke-width: 1.5; }
+
+.gnodo.hecho rect { fill: #14311f; stroke: #22c55e; }
+.gnodo.hecho text { fill: #86efac; }
+.gnodo.corriendo rect { fill: #1e2a3d; stroke: #60a5fa; }
+.gnodo.corriendo text { fill: #bfdbfe; }
+.gnodo.fallado rect { fill: #3b1518; stroke: #ef4444; }
+.gnodo.fallado text { fill: #fca5a5; }
+.gnodo.bloqueado rect { fill: #18181b; stroke: #52525b; stroke-dasharray: 3 2; }
+.gnodo.bloqueado text { fill: #71717a; }
+.gnodo.esperando_humano rect { fill: #3a2d0e; stroke: #eab308; }
+.gnodo.esperando_humano text { fill: #fde68a; }
+/* Cortó por agotar presupuesto, no por un bug (6/9/26): mismo `fallado`
+   por debajo pero un color distinto, para no confundir "hay que
+   debuggear" con "hay que subir un número o partir la tarea". */
+.gnodo.g-presupuesto rect { fill: #3a220b; stroke: #f97316; }
+.gnodo.g-presupuesto text { fill: #fdba74; }
+
+@keyframes gpulso { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.gnodo.corriendo rect { animation: gpulso 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .gnodo.corriendo rect { animation: none; }
+}
+
+/* Las aristas. Grises y finas a propósito: lo que se mira son los
+   nodos; las flechas solo tienen que dejar seguir el orden. La de una
+   dependencia ya cumplida se prende, así se ve por dónde pasó. */
+.garista { stroke: #3f3f46; stroke-width: 1; fill: none; }
+.garista.lista { stroke: #22c55e; opacity: 0.55; }
+
+/* "El plan todavía no tiene tareas." Sale en el panel del grafo cuando
+   `tasks` viene vacío. La clase se queda aunque `pintarLineal` se haya
+   ido (Etapa A): hoy es un solo nodo en `pintar()` y mañana podría ser
+   un grafo sintético con cero turnos. */
+.chat-plan-vacio {
+  padding: 1.5rem 0.75rem; text-align: center;
+  font-size: 0.75rem; color: #71717a;
+}
+
+/* Detalle del nodo elegido. Sale de abajo y no en un modal: un modal
+   tapa el hilo, que es justo lo que estabas leyendo cuando hiciste
+   click. */
+.chat-grafo-detalle {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow: auto;
+  padding: 0.6rem 0.75rem;
+  border-top: 1px solid #27272a;
+  background: #0c0c0e;
+  font-size: 0.6875rem; color: #a1a1aa;
+}
+.chat-grafo-detalle h5 {
+  font-size: 0.75rem; color: #e4e4e7; margin-bottom: 0.25rem;
+}
+.chat-grafo-detalle p { margin: 0.35rem 0; white-space: pre-wrap; }
+.chat-grafo-detalle .gerror { color: #fca5a5; }
+.chat-grafo-detalle .gres-presupuesto-aviso { color: #fdba74; }
+.chat-grafo-pie {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid #27272a;
+}
+
+/* En pantallas angostas el panel se lleva la conversación puesta: 320px
+   de plan sobre 375px de viewport no deja hilo. Pasa a ocupar todo y se
+   abre desde el 🕸 del header, como el drawer de conversaciones. */
+@media (max-width: 900px) {
+  .chat-grafo {
+    position: absolute; inset: 0; z-index: 20;
+    flex-basis: auto; width: auto;
+    border-left: 0;
+  }
+  /* Acá la lista es un drawer y el plan un overlay: no hay dos columnas
+     que repartir, así que un tirador no movería nada. */
+  .chat-resizer { display: none; }
+}
+/* Colapsada no hay ancho que ajustar, y dejar el tirador ahí invita a
+   arrastrar una columna de 48px que no se puede agrandar así. */
+.chat-sidebar.collapsed + .chat-resizer[data-resize="sidebar"] {
+  display: none;
+}
+/* Colapsada, la barra entera es el botón de volver. El chevron sigue
+   estando, pero un blanco de 24px en una columna de 48 es todo lo que
+   había para recuperar 98 conversaciones que dejaron de verse. */
+.chat-sidebar.collapsed { cursor: e-resize; }
+.chat-sidebar.collapsed:hover { background: #101013; }
+
+@media (max-width: 767px) {
+  /* dvh y no vh: con el teclado abierto, 100vh deja el composer tapado
+     abajo (vh mide el viewport SIN barra de URL ni teclado). */
+  .chat-workspace { height: calc(100dvh - 3.25rem); position: relative; }
+
+  /* La lista: overlay por encima del hilo, no una columna.
+     El ancho se declara UNA sola vez para los dos selectores: repetir
+     el mismo valor en `.chat-sidebar` y en `.chat-sidebar.collapsed`
+     hacía que el minificador de Tailwind fusionara las declaraciones y
+     dejara el width SOLO en `.collapsed` — la sidebar sin esa clase
+     quedaba en 1px y el drawer se abría vacío. */
+  .chat-sidebar,
+  .chat-sidebar.collapsed {
+    width: min(85vw, 320px);
+    flex: 0 0 auto;
+  }
+  .chat-sidebar {
+    position: absolute; inset-block: 0; left: 0; z-index: 25;
+    transform: translateX(-100%);
+    box-shadow: 0 0 24px rgb(0 0 0 / .5);
+  }
+  .chat-sidebar.mobile-open { transform: translateX(0); }
+  .chat-sidebar.mobile-open ~ #chat-drawer-backdrop {
+    display: block; position: absolute; inset: 0; z-index: 20;
+    background: rgb(0 0 0 / .6);
+  }
+  /* El collapse a 3rem es un gesto de desktop: en overlay no aplica y
+     dejaría la lista abierta pero vacía. */
+  .chat-sidebar.collapsed .chat-sidebar-label,
+  .chat-sidebar.collapsed .chat-sidebar-tools,
+  .chat-sidebar.collapsed #chat-search,
+  .chat-sidebar.collapsed .chat-conv-list { display: revert; }
+  #chat-sidebar-toggle { display: none; }
+
+  button.chat-drawer-btn { display: inline-flex; }
+  .chat-main { width: 100%; min-width: 0; }
+
+  /* Burbujas al ancho completo: el 90% de 375px es angosto para código. */
+  .chat-messages > div > div { max-width: 100% !important; }
+
+  /* Composer pegado abajo, respetando el notch/gesture bar del teléfono. */
+  .chat-input-bar {
+    position: sticky; bottom: 0; z-index: 10;
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+    background: #09090b;
+  }
+
+  /* Sugerencias: una fila que scrollea (son frases largas; apiladas se
+     comen media pantalla). El HEADER no: sus botones son acciones
+     puntuales —🐙, 🔗, diff, compactar, cerrar— y en una fila con
+     scroll oculto quedaban fuera de vista sin ninguna pista de que
+     estaban ahí. Wrappea, como antes: se paga alto, no funciones. */
+  #chat-suggestions {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+  }
+  #chat-suggestions::-webkit-scrollbar { display: none; }
+  #chat-suggestions > * { flex: 0 0 auto; }
+
+  /* El wrap del header y el min-width del titulo son globales ahora
+     (ver `.chat-convo-head`): el problema aparece igual en desktop con
+     los paneles en los topes. */
+
+  /* VS Code abre el repo en el escritorio: desde el teléfono no hace
+     nada. Es el único que sobra; el resto sí se usa en móvil. */
+  #chat-panel-vscode { display: none !important; }
+  /* `ml-auto` empujaba el meta y todo lo que sigue contra el borde. */
+  #chat-panel-meta { margin-left: 0; }
+
+  /* Touch targets: 44px es el mínimo cómodo con el pulgar. Los botones
+     van con `button.` porque `button.chat-icon-btn` ya fija la altura y
+     con (0,1,0) esta regla no aplicaba (computed min-height: 0px). */
+  button.chat-icon-btn, .chat-conv-item, #chat-panel-send, #chat-panel-input {
+    min-height: 44px;
+  }
+  button.chat-drawer-btn { min-width: 44px; justify-content: center; }
+}
+
+/* =====================================================================
+   Workspace shell
+   ---------------------------------------------------------------------
+   El admin conserva sus componentes de datos; el shell los presenta como
+   hojas flotantes sobre una superficie de trabajo. Todo queda scopeado a
+   `.workspace-mode` para que las vistas legacy sigan teniendo su layout.
+   ===================================================================== */
+body.workspace-mode {
+  --ws-bg: #101314;
+  --ws-surface: #151919;
+  --ws-surface-raised: #1a1f1e;
+  --ws-surface-sunk: #0d1010;
+  --ws-line: #2a3230;
+  --ws-line-strong: #3a4642;
+  --ws-text: #edf4f0;
+  --ws-muted: #a4b2ab;
+  --ws-quiet: #708078;
+  --ws-mint: #8be3c1;
+  --ws-mint-strong: #b7f3da;
+  --ws-danger: #f7a5a5;
+  --ws-amber: #f4cf8b;
+  min-width: 320px;
+  min-height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  background: var(--ws-bg);
+  color: var(--ws-text);
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+body.workspace-mode #sidebar,
+body.workspace-mode #sidebar-backdrop,
+body.workspace-mode > .sidebar,
+body.workspace-mode .legacy-sidebar {
+  display: none;
+}
+
+body.workspace-mode button,
+body.workspace-mode input,
+body.workspace-mode select,
+body.workspace-mode textarea {
+  font: inherit;
+}
+
+body.workspace-mode button,
+body.workspace-mode a,
+body.workspace-mode summary,
+body.workspace-mode input,
+body.workspace-mode select,
+body.workspace-mode textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body.workspace-mode :where(button, a, summary, input, select, textarea):focus-visible {
+  outline: 2px solid var(--ws-mint);
+  outline-offset: 2px;
+}
+
+.workspace-shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100dvh;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  isolation: isolate;
+  background: var(--ws-bg);
+}
+
+.workspace-bar {
+  position: relative;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  min-height: 3.6rem;
+  min-width: 0;
+  padding: .65rem 1.1rem;
+  border-bottom: 1px solid var(--ws-line);
+  background: #121615;
+}
+
+.workspace-brand,
+.workspace-brand a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--ws-text);
+  text-decoration: none;
+}
+
+.workspace-brand {
+  gap: .65rem;
+  margin-right: .35rem;
+  font-size: .9rem;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.workspace-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid #527e6d;
+  border-radius: .45rem;
+  color: var(--ws-mint);
+  font-size: .7rem;
+  font-weight: 750;
+  letter-spacing: .06em;
+}
+.workspace-brand-sub { color: var(--ws-quiet); font-size: .7rem; font-weight: 500; }
+
+.workspace-brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid #527e6d;
+  border-radius: .45rem;
+  color: var(--ws-mint);
+  font-size: .7rem;
+  font-weight: 750;
+  letter-spacing: .06em;
+}
+
+.workspace-brand-kicker {
+  color: var(--ws-quiet);
+  font-size: .68rem;
+  font-weight: 650;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.workspace-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  min-width: 0;
+}
+
+#workspace-launcher,
+#search-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .45rem;
+  min-height: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid var(--ws-line);
+  border-radius: .45rem;
+  background: transparent;
+  color: var(--ws-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .15s ease, background-color .15s ease, color .15s ease;
+}
+
+#workspace-launcher svg { width: 1rem; height: 1rem; flex: 0 0 1rem; }
+#workspace-launcher kbd {
+  padding: .12rem .3rem;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: .25rem;
+  color: var(--ws-muted);
+  font-size: .64rem;
+  line-height: 1.1;
+}
+
+#workspace-launcher {
+  padding: 0 .75rem;
+  color: var(--ws-text);
+}
+
+#search-trigger {
+  min-width: 2.2rem;
+  padding: 0 .6rem;
+}
+
+#workspace-launcher:hover,
+#search-trigger:hover {
+  border-color: var(--ws-line-strong);
+  background: var(--ws-surface-raised);
+  color: var(--ws-mint-strong);
+}
+
+.workspace-bar-spacer { flex: 1 1 auto; min-width: .25rem; }
+
+.workspace-vitals {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  min-width: 0;
+  color: var(--ws-quiet);
+  font-size: .68rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.workspace-vitals .topbar-item {
+  min-height: 2.2rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ws-muted);
+}
+.workspace-vitals .topbar-item:hover { border-color: var(--ws-line); background: var(--ws-surface-raised); color: var(--ws-text); }
+
+.workspace-vital {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+}
+
+.workspace-vital strong { color: var(--ws-muted); font-weight: 600; }
+
+.workspace-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ws-bg);
+}
+
+.workspace-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 1px solid rgba(139, 227, 193, .035);
+}
+
+#workspace-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .7rem;
+  padding: 3rem 1.25rem;
+  text-align: center;
+  pointer-events: none;
+}
+
+#workspace-welcome[hidden] { display: none; }
+#workspace-welcome > * { max-width: 31rem; }
+#workspace-welcome :where(button, a),
+#workspace-welcome .workspace-welcome-actions { pointer-events: auto; }
+#workspace-welcome .workspace-welcome-label {
+  color: var(--ws-mint);
+  font-size: .67rem;
+  font-weight: 700;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}
+#workspace-welcome h1 {
+  margin: 0;
+  color: var(--ws-text);
+  font-size: clamp(1.65rem, 3vw, 2.6rem);
+  font-weight: 650;
+  letter-spacing: -.045em;
+}
+#workspace-welcome p {
+  margin: 0;
+  color: var(--ws-muted);
+  font-size: .9rem;
+  line-height: 1.65;
+}
+#workspace-welcome .workspace-eyebrow,
+.workspace-eyebrow {
+  color: var(--ws-mint);
+  font-size: .67rem;
+  font-weight: 700;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}
+.workspace-welcome-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; margin-top: .65rem; }
+.workspace-chat-welcome { width: min(100% - 2rem, 36rem); margin: auto; text-align: center; }
+.workspace-chat-welcome h2 { margin: .55rem 0 .45rem; color: var(--ws-text); font-size: clamp(1.45rem, 2.7vw, 2.15rem); font-weight: 650; letter-spacing: -.04em; }
+.workspace-chat-welcome p { margin: 0; color: var(--ws-muted); font-size: .88rem; line-height: 1.65; }
+.workspace-chat-welcome .workspace-welcome-actions { margin-top: 1.1rem; }
+.workspace-mode .workspace-chat-welcome p.workspace-chat-hint { margin-top: 2rem; color: var(--ws-quiet); font-size: .72rem; }
+#workspace-welcome kbd {
+  display: inline-block;
+  margin-inline: .1rem;
+  padding: .12rem .34rem;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: .3rem;
+  background: var(--ws-surface-raised);
+  color: var(--ws-text);
+  font-size: .7rem;
+}
+
+#workspace-windows {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.workspace-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  top: 1.5rem;
+  left: 1.5rem;
+  width: min(850px, calc(100% - 3rem));
+  height: min(650px, calc(100% - 3rem));
+  min-width: 420px;
+  min-height: 300px;
+  overflow: hidden;
+  pointer-events: auto;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: .65rem;
+  background: var(--ws-surface);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, .28), 0 2px 8px rgba(0, 0, 0, .18);
+  color: var(--ws-text);
+  resize: none;
+  animation: workspace-window-in .16s ease-out;
+}
+
+.workspace-window:not(.is-active) { box-shadow: 0 10px 24px rgba(0, 0, 0, .22); }
+.workspace-window.is-active { z-index: 20; border-color: #50645b; }
+.workspace-window.is-maximized { inset: .7rem; width: auto; height: auto; }
+.workspace-window.is-minimized { min-height: 2.75rem; height: 2.75rem; }
+.workspace-window.is-minimized .workspace-window-body,
+.workspace-window.is-minimized .workspace-resize { display: none; }
+
+@keyframes workspace-window-in {
+  from { opacity: 0; transform: translateY(5px) scale(.992); }
+  to { opacity: 1; transform: none; }
+}
+
+.workspace-window-head {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  min-height: 2.85rem;
+  padding: .45rem .55rem .45rem .8rem;
+  border-bottom: 1px solid var(--ws-line);
+  background: #171c1b;
+  cursor: grab;
+  user-select: none;
+}
+.workspace-window-head:active { cursor: grabbing; }
+.workspace-window-head:focus-visible {
+  outline: 1px solid rgba(139, 227, 193, .42);
+  outline-offset: -1px;
+}
+.workspace-window-heading { display: flex; flex: 1; align-items: baseline; gap: .55rem; min-width: 0; }
+.workspace-window-kind {
+  flex: 0 1 45%;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--ws-mint);
+  font-size: .62rem;
+  font-weight: 700;
+  letter-spacing: .11em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.workspace-window-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ws-text);
+  font-size: .84rem;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-window-actions { display: flex; align-items: center; gap: .15rem; margin-left: auto; }
+.workspace-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: .35rem;
+  background: transparent;
+  color: var(--ws-quiet);
+  cursor: pointer;
+}
+.workspace-icon:hover { background: #222a27; color: var(--ws-text); }
+.workspace-icon svg { width: 1rem; height: 1rem; }
+.workspace-window-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--ws-surface);
+}
+.workspace-window-body > .panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  border-radius: 0;
+  border-color: transparent;
+  background: transparent;
+}
+.workspace-window-body > #tab-chat > .chat-workspace {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.workspace-object-content {
+  min-width: 0;
+  padding: 1.4rem clamp(1.35rem, 3vw, 1.75rem);
+  overflow: auto;
+}
+.workspace-object-content .table-wrap { min-width: 0; overflow-x: auto; }
+.workspace-object-content table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.workspace-object-content th,
+.workspace-object-content td {
+  padding: .7rem .8rem;
+  border-bottom: 1px solid var(--ws-line);
+  text-align: left;
+  vertical-align: top;
+}
+.workspace-object-content th { color: var(--ws-muted); font-size: .68rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.workspace-object-content td { color: var(--ws-text); font-size: .78rem; }
+.workspace-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: .9rem;
+  height: .9rem;
+  cursor: nwse-resize;
+}
+.workspace-resize::after {
+  content: "";
+  position: absolute;
+  right: .25rem;
+  bottom: .25rem;
+  width: .32rem;
+  height: .32rem;
+  border-right: 1px solid var(--ws-quiet);
+  border-bottom: 1px solid var(--ws-quiet);
+}
+
+.workspace-dock {
+  position: relative;
+  min-width: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-height: 3.15rem;
+  padding: .45rem .8rem;
+  border-top: 1px solid var(--ws-line);
+  background: #121615;
+}
+#workspace-items {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#workspace-items::-webkit-scrollbar { display: none; }
+.workspace-dock-item,
+.workspace-dock-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  min-height: 2.15rem;
+  border: 1px solid var(--ws-line);
+  border-radius: .4rem;
+  background: transparent;
+  color: var(--ws-muted);
+  cursor: pointer;
+  font-size: .72rem;
+  white-space: nowrap;
+}
+.workspace-dock-item { max-width: 13rem; padding: 0 .65rem; }
+.workspace-dock-item:hover,
+.workspace-dock-tools:hover { border-color: var(--ws-line-strong); color: var(--ws-text); }
+.workspace-dock-item[aria-pressed="true"] { border-color: #587667; background: #1d2925; color: var(--ws-mint-strong); }
+.workspace-dock-item span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-dock-tools { margin-left: auto; padding: 0 .7rem; }
+
+dialog.workspace-launcher {
+  width: min(42rem, calc(100vw - 2rem));
+  max-height: min(80dvh, 44rem);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: .7rem;
+  background: #151a19;
+  color: var(--ws-text);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .52);
+}
+dialog.workspace-launcher::backdrop { background: rgba(5, 8, 8, .72); }
+.workspace-launcher-head { display: flex; align-items: center; gap: .7rem; padding: .85rem; border-bottom: 1px solid var(--ws-line); }
+#workspace-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 2.5rem;
+  border: 1px solid var(--ws-line);
+  border-radius: .45rem;
+  background: var(--ws-surface-sunk);
+  color: var(--ws-text);
+  padding: 0 .75rem;
+  margin: .8rem .85rem 0;
+  width: calc(100% - 1.7rem);
+}
+.workspace-launcher-close { flex: 0 0 auto; }
+#workspace-modules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+  overflow: auto;
+}
+.workspace-launcher-head h2 { margin: .25rem 0 0; color: var(--ws-text); font-size: 1rem; font-weight: 650; }
+.workspace-launcher-hint { margin: 0; padding: 0 1rem 1rem; color: var(--ws-quiet); font-size: .7rem; }
+.workspace-launcher-hint code { color: var(--ws-mint); }
+.workspace-group-title {
+  grid-column: 1 / -1;
+  margin-top: .25rem;
+  color: var(--ws-quiet);
+  font-size: .63rem;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.workspace-group-title:not(:first-child) { margin-top: .65rem; }
+.workspace-group-title + .tab.nav-item { margin-top: -.45rem; }
+.workspace-module-group + .workspace-module-group { margin-top: .65rem; }
+.workspace-module-group { min-width: 0; }
+.workspace-module-group h3 {
+  margin: 0 0 .4rem;
+  color: var(--ws-quiet);
+  font-size: .63rem;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.workspace-module-group .tab.nav-item {
+  align-items: flex-start;
+  gap: .65rem;
+  min-height: 3.6rem;
+  padding: .65rem .7rem;
+  border: 1px solid transparent;
+  border-radius: .45rem;
+  background: transparent;
+  color: var(--ws-muted);
+}
+.workspace-module-group .tab.nav-item:hover,
+.workspace-module-group .tab.nav-item[aria-selected="true"] {
+  border-color: var(--ws-line);
+  background: #1b2220;
+  color: var(--ws-text);
+}
+.workspace-mode #workspace-modules > .tab.nav-item {
+  align-items: flex-start;
+  gap: .65rem;
+  min-height: 3.45rem;
+  padding: .65rem .7rem;
+  border: 1px solid transparent;
+  border-radius: .45rem;
+  background: transparent;
+  color: var(--ws-muted);
+}
+.workspace-mode #workspace-modules > .tab.nav-item:hover,
+.workspace-mode #workspace-modules > .tab.nav-item[aria-selected="true"] {
+  border-color: var(--ws-line);
+  background: #1b2220;
+  color: var(--ws-text);
+}
+.workspace-module-description { display: block; margin-top: .2rem; color: var(--ws-quiet); font-size: .69rem; line-height: 1.4; }
+#workspace-empty-filter { padding: 1.6rem 1rem; color: var(--ws-muted); text-align: center; font-size: .8rem; }
+#workspace-recent { padding: 0 1rem 1rem; color: var(--ws-quiet); font-size: .7rem; }
+#workspace-recent .workspace-group-title { margin: .8rem 0 .35rem; }
+.workspace-recent-item {
+  display: inline-flex;
+  max-width: 100%;
+  margin: .2rem .25rem 0 0;
+  padding: .3rem .5rem;
+  overflow: hidden;
+  border: 1px solid var(--ws-line);
+  border-radius: .35rem;
+  background: transparent;
+  color: var(--ws-muted);
+  cursor: pointer;
+  font-size: .68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-recent-item:hover { border-color: var(--ws-line-strong); color: var(--ws-text); }
+
+.workspace-status.sr-only,
+.workspace-mode .workspace-status[aria-live] { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+
+/* Datos: una jerarquía calma y filas cómodas dentro de una hoja. */
+.workspace-window .panel-title { margin-bottom: .35rem; color: var(--ws-text); font-size: 1.25rem; }
+.workspace-window .panel-sub { color: var(--ws-muted); }
+.workspace-window .table-wrap {
+  border-color: var(--ws-line);
+  border-radius: .45rem;
+  background: transparent;
+}
+.workspace-window .table-wrap th,
+.workspace-window .table-wrap td { padding: .7rem .8rem; }
+.workspace-window .table-wrap tbody tr { min-height: 2.75rem; height: 2.75rem; }
+.workspace-window .table-wrap tbody tr:hover { background: #1b2220; }
+.workspace-window .table-wrap td { border-color: var(--ws-line); }
+.workspace-window .form-section,
+.workspace-window .card,
+.workspace-window .stat {
+  border-color: var(--ws-line);
+  border-radius: .45rem;
+  background: transparent;
+}
+.workspace-window .workspace-object-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-bottom: .9rem;
+  padding-bottom: .65rem;
+  border-bottom: 1px solid var(--ws-line);
+}
+.workspace-object-tools .input { min-width: 12rem; background: var(--ws-surface-sunk); }
+.workspace-inspector { border-top: 1px solid var(--ws-line); }
+.workspace-inspector summary { padding: .8rem 0; color: var(--ws-text); cursor: pointer; font-size: .78rem; font-weight: 650; }
+.workspace-inspector-body { padding: 0 0 1rem; color: var(--ws-muted); }
+
+/* Chat: la conversación conserva todo su contenido, pero la navegación y
+   el grafo viven en overlays dentro de la ventana. */
+body.workspace-mode .chat-workspace {
+  position: relative;
+  container-type: inline-size;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  border-top: 0;
+  background: var(--ws-surface-sunk);
+}
+body.workspace-mode .chat-main { width: 100%; min-width: 0; }
+body.workspace-mode .chat-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+body.workspace-mode .chat-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+body.workspace-mode .chat-sidebar:not(.mobile-open) { display: none; }
+body.workspace-mode .chat-sidebar.mobile-open {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 30;
+  display: flex;
+  width: min(20rem, 86%);
+  flex-basis: min(20rem, 86%);
+  border-right: 1px solid var(--ws-line-strong);
+  background: #151a19;
+  box-shadow: 18px 0 34px rgba(0, 0, 0, .32);
+}
+body.workspace-mode .chat-sidebar.mobile-open.collapsed { width: min(20rem, 86%); flex-basis: min(20rem, 86%); }
+body.workspace-mode .chat-resizer { display: none; }
+body.workspace-mode #chat-drawer-backdrop {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  background: rgba(4, 7, 7, .56);
+}
+body.workspace-mode .chat-sidebar.mobile-open ~ #chat-drawer-backdrop { display: block; }
+body.workspace-mode button.chat-drawer-btn { display: inline-flex; }
+body.workspace-mode .chat-grafo {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 22;
+  width: min(31rem, 88%);
+  flex: none;
+  border-left: 1px solid var(--ws-line-strong);
+  background: #141918;
+  box-shadow: -18px 0 34px rgba(0, 0, 0, .26);
+}
+body.workspace-mode .chat-grafo[hidden] { display: none; }
+body.workspace-mode .chat-viewer { background: var(--ws-surface-sunk); }
+body.workspace-mode .chat-input-bar { background: #151a19; border-color: var(--ws-line); }
+body.workspace-mode .chat-convo-head { border-color: var(--ws-line); }
+body.workspace-mode .chat-messages { padding: 1.2rem clamp(1rem, 4vw, 3rem); }
+body.workspace-mode .chat-answer { background: #1b2421; }
+body.workspace-mode .chat-bubble-user { background: #1e2b28; border-color: #3d6253; }
+body.workspace-mode .chat-bubble-assistant { background: #171d1c; border-color: var(--ws-line); }
+body.workspace-mode .chat-convo-head .chat-drawer-btn { order: -1; }
+body.workspace-mode .chat-drawer-btn-empty { order: 0; }
+
+@container (max-width: 700px) {
+  .workspace-window .chat-grafo { width: min(88%, 25rem); }
+  .workspace-window .chat-messages { padding-inline: 1rem; }
+}
+
+@media (max-width: 760px) {
+  body.workspace-mode { overflow: hidden; }
+  .workspace-bar { min-height: 3.15rem; padding: .45rem .65rem; }
+  .workspace-brand-sub,
+  .workspace-brand-kicker,
+  .workspace-vital strong,
+  .workspace-vitals #tokens,
+  #topbar-tokens-wrap,
+  #topbar-chats-wrap,
+  #topbar-runs { display: none; }
+  #workspace-launcher kbd { display: none; }
+  #topbar-status { min-width: 1.75rem; padding-inline: .35rem; }
+  .workspace-brand,
+  .workspace-bar-actions,
+  .workspace-vitals { flex: 0 1 auto; min-width: 0; }
+  .workspace-vitals { gap: .45rem; }
+  .workspace-stage { overflow: hidden; }
+  .workspace-window {
+    inset: 0;
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .workspace-window:not(.is-active) { display: none; }
+  .workspace-window-head { min-height: 2.6rem; padding-inline: .6rem; }
+  .workspace-window-kind { display: none; }
+  .workspace-resize { display: none; }
+  .workspace-dock { min-height: 3rem; padding-inline: .55rem; }
+  #workspace-items { flex: 1 1 auto; }
+  .workspace-dock-tools { margin-left: 0; }
+  dialog.workspace-launcher { width: calc(100vw - 1rem); }
+  #workspace-modules { grid-template-columns: 1fr; gap: .35rem; padding: .7rem; }
+  .workspace-module-group h3 { margin-top: .45rem; }
+  body.workspace-mode .chat-grafo { width: 100%; border-left: 0; }
+  body.workspace-mode .chat-sidebar.mobile-open { width: min(88%, 20rem); }
+  body.workspace-mode .chat-input-bar { padding-bottom: calc(.55rem + env(safe-area-inset-bottom)); }
+  #workspace-welcome { padding-inline: 1rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-window,
+  .workspace-window * { animation-duration: .01ms; transition-duration: .01ms; }
+}
+
+/* Composición de módulos dentro de una hoja: el contenido vuelve a tener
+   margen propio aunque el shell ya no use el padding del layout legacy. */
+.workspace-window-body {
+  container-type: inline-size;
+  container-name: workspace-window;
+}
+.workspace-window-body > .panel:not(#tab-chat) {
+  display: block;
+  flex: none;
+  min-height: 100%;
+  padding: 1.4rem clamp(1.35rem, 3vw, 1.75rem);
+}
+
+/* Configuración: el inspector es una secuencia editorial, no una grilla de
+   cards dentro de otra card. */
+.workspace-window-body > #tab-config .form-grid { display: block; }
+.workspace-window-body > #tab-config .form-section:has(> .workspace-inspector) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.workspace-window-body > #tab-config .form-section:has(> .workspace-inspector) + .form-section {
+  margin-top: 1rem;
+}
+.workspace-window-body > #tab-config .workspace-inspector {
+  border-top: 1px solid var(--ws-line);
+}
+.workspace-window-body > #tab-config .workspace-inspector summary {
+  display: block;
+  list-style: none;
+  padding: .9rem 0 .8rem;
+  color: var(--ws-text);
+  cursor: pointer;
+  font-weight: 650;
+}
+.workspace-window-body > #tab-config .workspace-inspector summary::-webkit-details-marker { display: none; }
+.workspace-window-body > #tab-config .workspace-inspector summary::before {
+  content: "›";
+  display: inline-block;
+  width: 1rem;
+  color: var(--ws-muted);
+  font-size: 1.15rem;
+  line-height: .7;
+  transform: translateY(1px);
+  transition: transform .15s ease;
+}
+.workspace-window-body > #tab-config .workspace-inspector[open] summary::before { transform: rotate(90deg) translateX(-1px); }
+.workspace-window-body > #tab-config .workspace-inspector summary .form-section-title {
+  display: inline;
+  font-size: .86rem;
+}
+.workspace-window-body > #tab-config .workspace-inspector summary .form-section-sub {
+  display: block;
+  margin: .28rem 0 0 1rem;
+  color: var(--ws-muted);
+  font-size: .76rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+.workspace-window-body > #tab-config .workspace-inspector-body { padding: .25rem 0 1.1rem 1rem; }
+
+/* Launcher: cada categoría posee una lista compacta de dos columnas; el
+   diálogo puede desplazar todo el contenido para alcanzar los módulos bajos. */
+dialog.workspace-launcher[open] {
+  display: flex;
+  flex-direction: column;
+}
+.workspace-launcher-head,
+#workspace-filter,
+#workspace-recent,
+.workspace-launcher-hint { flex: 0 0 auto; }
+.workspace-launcher-head > div:first-child { min-width: 0; }
+.workspace-launcher-head > button { margin-left: auto; }
+#workspace-modules {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(58dvh, 31rem);
+  overflow-y: auto;
+}
+.workspace-module-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .25rem .55rem;
+  min-width: 0;
+}
+.workspace-module-group + .workspace-module-group { margin-top: .85rem; }
+.workspace-module-group h3 { grid-column: 1 / -1; margin: 0 0 .1rem; }
+.workspace-module-group .tab.nav-item,
+.workspace-mode #workspace-modules > .tab.nav-item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 3.2rem;
+  align-items: flex-start;
+  text-align: left;
+}
+.workspace-module-group .workspace-module-label { min-width: 0; flex: 1 1 auto; text-align: left; }
+.workspace-module-group .nav-icon { flex: 0 0 1rem; }
+
+/* Métricas: las primarias respiran como una línea; el resto queda en un
+   bloque secundario que puede colapsar sin perder datos. */
+.workspace-window .workspace-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0;
+  min-width: 0;
+}
+.workspace-window .workspace-metric-grid > .stat {
+  min-width: 0;
+  padding: 1rem 1rem 1rem 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.workspace-window .workspace-metric-grid > .stat + .stat {
+  padding-left: 1rem;
+  border-left: 1px solid var(--ws-line);
+}
+.workspace-window .workspace-metric-grid .stat-v { font-size: clamp(1.35rem, 2.5cqi, 1.85rem); }
+.workspace-window #metrics-secondary { margin-top: 1rem; }
+.workspace-window .workspace-filters {
+  margin-top: 1rem;
+  border-top: 1px solid var(--ws-line);
+}
+.workspace-window .workspace-filters > summary {
+  display: block;
+  list-style: none;
+  padding: .8rem 0;
+  color: var(--ws-text);
+  cursor: pointer;
+  font-size: .78rem;
+  font-weight: 650;
+}
+.workspace-window .workspace-filters > summary::-webkit-details-marker { display: none; }
+.workspace-window .workspace-filters > summary::before {
+  content: "›";
+  display: inline-block;
+  width: 1rem;
+  color: var(--ws-muted);
+  font-size: 1.1rem;
+  line-height: .7;
+  transform: translateY(1px);
+  transition: transform .15s ease;
+}
+.workspace-window .workspace-filters[open] > summary::before { transform: rotate(90deg) translateX(-1px); }
+.workspace-window .workspace-filters > .toolbar { margin-bottom: 0; padding-bottom: .85rem; }
+.workspace-window .chart-wrap.card {
+  border-color: var(--ws-line);
+  background: transparent;
+  box-shadow: none;
+}
+
+@container workspace-window (max-width: 640px) {
+  .workspace-window-body > .panel:not(#tab-chat) { padding: 1rem; }
+  .workspace-object-content { padding: 1rem; }
+  .workspace-module-group { grid-template-columns: 1fr; }
+  .workspace-module-group h3 { grid-column: 1; }
+  .workspace-window .workspace-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workspace-window .workspace-metric-grid > .stat + .stat { border-left: 0; }
+  .workspace-window .workspace-metric-grid > .stat:nth-child(even) { padding-left: 1rem; border-left: 1px solid var(--ws-line); }
+}

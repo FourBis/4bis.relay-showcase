@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4bis.cl/schemas/executor_interruption.json",
+  "title": "Executor Interruption Signal",
+  "description": "Signal emitted by the Executor phase to the Planner when the active plan is discovered to be infeasible during field work. Consumed by t2 (interruption handler) and t3 (planner input). The Executor MUST emit the payload as a fenced JSON block whose opening fence carries the marker token EXECUTOR_INTERRUPTION (see `marker_convention` below); the JSON inside that block MUST validate against this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason", "affected_step_id", "error_context", "partial_progress", "timestamp"],
+  "properties": {
+    "reason": {
+      "type": "string",
+      "enum": ["compile_fail", "type_mismatch", "file_read_error", "wrong_assumption", "other"],
+      "description": "Classification of why the plan became inviable. `wrong_assumption` covers architectural assumptions; `other` requires a non-empty `error_context` explaining the category."
+    },
+    "affected_step_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Id of the plan step whose execution surfaced the inconsistency. The Planner uses this to anchor the revision."
+    },
+    "error_context": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Raw error output, violated assumption, or concise failure description. Truncated to the first ~4 KB by the Executor before emission."
+    },
+    "partial_progress": {
+      "type": "object",
+      "description": "Map of step_id -> brief result marker for steps already completed before the interruption. Values are short status strings (max 200 chars); not a free-form log.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 instant (RFC 3339) at which the interruption was emitted, e.g. `2025-01-15T10:30:00Z`. The `pattern` is a portable fallback for validators that skip `format` checks."
+    },
+    "marker_convention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Wire convention the orchestrator uses to locate and extract the payload.",
+      "required": ["emission"],
+      "properties": {
+        "emission": {
+          "type": "string",
+          "const": "fenced_json_block",
+          "description": "Canonical form. The Executor emits the JSON wrapped in a fenced block whose opening fence token is `EXECUTOR_INTERRUPTION`, e.g.:\n\n```EXECUTOR_INTERRUPTION\n{\"reason\":\"compile_fail\",...}\n```\nThe orchestrator extracts the JSON by matching the opening fence `` ```EXECUTOR_INTERRUPTION `` and the matching closing `` ``` ``, then parses the body."
+        },
+        "fallback_regex": {
+          "type": "string",
+          "description": "Single-line fallback used only when the Executor cannot emit a fenced block (e.g. one-line logs, scraped output). The orchestrator extracts the JSON via the regex below; everything outside `(\\{.*\\})` is discarded.",
+          "pattern": "^<<INTERRUPT:EXECUTOR>>\\s*(\\{.*\\})\\s*$"
+        }
+      }
+    }
+  }
+}
