@@ -6,7 +6,6 @@
 // - Sin feature flags / sin project_id en la query. Single-operator, sirve.
 // - El polling se detiene solo cuando no quedan abiertas (no siempre 5s).
 // - El backend ya cerró el endpoint existente con ?only_open=1. No tocamos server.py.
-// - Si quieres free-text o notificaciones Discord: ver /memories/repo/iter-9-7-night-questions.md.
 
 import { $, $$, api, escape, _dbg } from "./api.js";
 import { toast } from "./ui.js";

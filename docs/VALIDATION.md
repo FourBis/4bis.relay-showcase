@@ -8,7 +8,8 @@ preparación para un servicio público multiusuario.
 ## Publicación y privacidad
 
 - Copia independiente con historial nuevo, sin heredar el repositorio privado.
-- Sin remoto configurado, push ni cambio de visibilidad.
+- Copia alojada en el repositorio privado `FourBis/4bis.relay-showcase`,
+  con `develop` como rama principal. No se ha hecho público.
 - Configuraciones locales, respaldos, bases de datos, conversaciones, cachés,
   claves y apuntes internos excluidos. Ejemplos y captura usan datos ficticios.
 - Atribución pública intencional: FourBis y Jeremías Badilla. Los commits usan
