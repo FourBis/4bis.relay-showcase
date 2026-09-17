@@ -13,6 +13,11 @@ de herramientas y la vista del prompt efectivo requieren el rol `owner`.
 Las URLs Git mostradas por la API omiten credenciales, parámetros y fragmentos;
 el archivo local de configuración Git conserva su valor original.
 
+Las trazas y la captura de contenido están desactivadas por defecto. Activar las
+trazas no habilita por sí solo el envío de prompts o respuestas: esa captura
+requiere una opción adicional explícita. El envío a Logfire requiere un token
+guardado en la configuración de Relay; un token ambiental no lo activa.
+
 La API rechaza orígenes web ajenos y, para peticiones al socket local, los hosts
 distintos de `localhost`, `127.0.0.1` o `[::1]` requieren un JWT de Cloudflare
 Access verificado. Un proxy debe conservar el `Host` público; reescribirlo a

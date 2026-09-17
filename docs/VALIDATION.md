@@ -1,6 +1,6 @@
 # Validación de la versión de portafolio
 
-Revisión local del 16 de septiembre de 2026. Relay se presenta como proyecto
+Revisión local del 16 y 17 de septiembre de 2026. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.
@@ -40,6 +40,14 @@ privado ni publiques una rama de preparación que todavía lo conserve.
   números no finitos sin modificar el valor anterior.
 - Fixtures anteriores adaptados a la configuración runtime/SQLite. No se
   reintrodujo lectura de secretos desde variables de entorno para satisfacerlos.
+- El listado y detalle de proyectos entregan solo metadatos al rol `member`.
+  La configuración MCP, sus variables, rutas y defaults quedan reservados al
+  propietario; la vista del prompt efectivo también requiere `owner`.
+- Las URLs Git de la API omiten userinfo, query y fragmento, conservando el
+  archivo Git original. Se comprobaron también los enlaces HTTPS/SSH del chat.
+- Logfire recibe una decisión explícita de exportación y el token del panel.
+  Un token del entorno no activa el envío al cloud. La captura de contenido
+  requiere opt-in para cualquier destino; las pruebas unitarias no exportan.
 
 ## Anonimización para la publicación
 
@@ -56,11 +64,9 @@ los commits anteriores con ejemplos internos no forman parte de sus ramas.
 Los defaults de ejemplo ahora usan `#equipo-demo`, `RelayDemoBot` y
 `<repos_root>/crm`; las configuraciones explícitas siguen teniendo prioridad.
 
-Validación de estos cambios: dos grupos con **93 passed** y **91 passed**;
-comprobación adicional del default/override de la ruta CRM; formulario de voz
-y configuración comprobados en Chrome con datos temporales y sin errores de
-consola. Se corrigieron las expectativas de orden al renombrar los fixtures.
-No se volvió a ejecutar la suite general completa.
+Se revisaron nuevamente ejemplos, captura, defaults, configuraciones y avisos
+de terceros con subagentes independientes. Las pruebas de Gmail usan el
+remitente ficticio actual y fuerzan el modo simulado para evitar datos reales.
 
 ## Instalación y dependencias
 
@@ -72,9 +78,9 @@ Consulta de avisos conocidos al 16 de septiembre de 2026:
 
 - 101 paquetes Python de la instalación nueva, incluido pip: sin avisos activos
   devueltos por la API de PyPI. El paquete local Relay se revisa como código.
-- 81 coordenadas npm del JavaScript distribuido y sus inputs de build: sin avisos
+- 82 coordenadas npm (81 componentes JavaScript más Tailwind CSS): sin avisos
   devueltos por OSV. Inventario obtenido de 33 sourcemaps anidados y dos metafiles
-  de esbuild; el CSS de Tailwind se documenta por separado.
+  de esbuild, además de la procedencia del CSS de Tailwind.
 - El workspace de compilación upstream contiene otros paquetes/herramientas con
   avisos. Ese workspace y sus `node_modules` no se distribuyen con Relay.
 
@@ -83,24 +89,31 @@ instalación y las bases de avisos pueden cambiar.
 
 ## Pruebas y límites
 
-La revalidación de la revisión MIT y de seguridad, previa a la anonimización,
-del subconjunto de CI y los cinco archivos con
-fixtures reparados produjo **414 passed, 1 skipped, 6 subtests passed** en
-208,68 segundos. Incluye identidad, límites HTTP, configuración, timeouts y
-contratos de interfaz. La construcción de un modelo OpenAI con credencial de
-catálogo se verifica sin llamar al proveedor.
+Las correcciones de esta revisión se validaron con grupos de **171 passed,
+1 skipped**, **69 passed** y **57 passed**. Se preservaron las assertions de
+las pruebas: configuración operativa en SQLite/runtime, modelos simulados y
+servidores HTTP locales para evitar proveedores reales.
 
-Los tres recorridos reales de navegador pasaron con los vendors definitivos:
+Los tres recorridos reales de navegador volvieron a pasar con los vendors definitivos
+en Chrome (**3 passed**, 27,65 segundos):
 workspace y objetos flotantes; estados del chat y adjuntos; render Mermaid de
 flujo, secuencia, clases y frontmatter, más sanitización de HTML malicioso.
 También pasaron JavaScript, sintaxis y los sellos del CSS recompilado.
 
-La corrida general se detuvo a los diez fallos: **1288 passed, 4 skipped,
-12 subtests passed**. Encontró el reset del timeout, fixtures desactualizados y
-un fallo de Git que no se reprodujo al ejecutar sus 29 pruebas aisladamente.
-Se corrigieron los casos identificados y se revalidaron por grupos. **No se ha
-obtenido una corrida general completa en verde**; no se presenta el subconjunto
-de CI como certificación de todo el producto.
+La primera corrida completa del clon limpio produjo **2224 passed, 26 failed,
+14 skipped, 18 subtests passed**. Identificó fixtures anteriores a la configuración
+persistida, un remitente ficticio desactualizado y pruebas unitarias dependientes
+de Logfire opcional. Se corrigieron y revalidaron sin habilitar llamadas reales.
+La repetición completa del commit `722b6da`, desde el clon y venv nuevos,
+terminó con **2269 passed, 14 skipped, 18 subtests passed**, sin fallos, en
+791,90 segundos. Las omisiones corresponden a integraciones opt-in, herramientas
+opcionales, comandos POSIX y servicios no iniciados. Las tres pruebas de Chrome
+omitidas en esa corrida se ejecutaron por separado y pasaron.
+
+El [CI de Windows del commit 722b6da](https://github.com/FourBis/4bis.relay-showcase/actions/runs/35175834672)
+terminó correctamente: **252 passed, 1 skipped, 6 subtests passed**, en 174,61
+segundos. Incluye las nuevas regresiones de privacidad y trazas. Este subconjunto
+no se presenta como certificación de toda la aplicación.
 
 El CI ejecuta los checks explícitos de
 [checks.yml](../.github/workflows/checks.yml). Los recorridos de navegador son
