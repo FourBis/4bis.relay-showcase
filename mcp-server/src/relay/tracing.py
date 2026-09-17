@@ -36,10 +36,9 @@ rinde solo: el run NO se ve afectado (verificado contra un puerto muerto).
 
 CONTENIDO — leer esto antes de prender el cloud. Los spans pueden llevar el
 prompt y la respuesta COMPLETOS. Esa es justo la parte útil para el
-post-mortem, y también es el código del repo del cliente. Con destino local
-van siempre; a Logfire cloud NO van salvo que pidas
-`FOURBIS_TRACING_CONTENT=1` explícito. No mandamos código de terceros afuera
-por default.
+post-mortem, y también es el código del repo del cliente. El contenido está
+apagado por defecto para cualquier destino; requiere activar
+`FOURBIS_TRACING_CONTENT=1` explícitamente en la configuración del relay.
 
 Best-effort, como `skills.py`: cualquier falla acá loggea y sigue. Un
 exporter roto no puede tumbar el relay.
@@ -95,7 +94,7 @@ def setup_tracing() -> bool:
     # Destino remoto = Logfire cloud SIN collector propio. Si hay OTLP, el
     # destino lo elegiste vos y el contenido no sale de donde lo mandes.
     remoto = bool(token) and not otlp
-    incluir_contenido = _flag("FOURBIS_TRACING_CONTENT", default=not remoto)
+    incluir_contenido = _flag("FOURBIS_TRACING_CONTENT", default=False)
 
     try:
         logfire.configure(

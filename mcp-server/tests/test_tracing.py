@@ -119,17 +119,18 @@ def _contenido_con(monkeypatch, _capturado=None, _runtime=None, **env) -> bool:
     return capturado["content"]
 
 
-def test_contenido_va_cuando_el_destino_es_local(monkeypatch):
-    """Sin token no sale nada de la máquina: el contenido es gratis."""
-    assert _contenido_con(monkeypatch) is True
+def test_contenido_local_requiere_opt_in(monkeypatch):
+    """El default apagado del panel también protege las trazas locales."""
+    assert _contenido_con(monkeypatch) is False
+    assert _contenido_con(monkeypatch, FOURBIS_TRACING_CONTENT="1") is True
 
 
-def test_contenido_va_con_collector_propio(monkeypatch):
-    """Con OTLP el destino lo elegiste vos, aunque haya token."""
+def test_contenido_con_collector_propio_requiere_opt_in(monkeypatch):
+    """Elegir un collector no activa la captura del contenido."""
     assert _contenido_con(
         monkeypatch,
         LOGFIRE_TOKEN="pylf_v1_xx",
-        OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is True
+        OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is False
 
 
 def test_contenido_NO_va_al_cloud_por_default(monkeypatch):
@@ -147,7 +148,7 @@ def test_token_ambiental_no_activa_exportacion(monkeypatch):
     """Las variables operativas solo cuentan si están en runtime/SQLite."""
     capturado = {}
     monkeypatch.setenv("LOGFIRE_TOKEN", "synthetic-ambient-token")
-    assert _contenido_con(monkeypatch, _capturado=capturado, _runtime={}) is True
+    assert _contenido_con(monkeypatch, _capturado=capturado, _runtime={}) is False
     assert capturado["send_to_logfire"] is False
     assert capturado["token"] is None
 
@@ -168,7 +169,7 @@ def test_token_con_otlp_no_activa_logfire_cloud(monkeypatch):
         monkeypatch,
         _capturado=capturado,
         LOGFIRE_TOKEN="synthetic-explicit-token",
-        OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is True
+        OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is False
     assert capturado["send_to_logfire"] is False
     assert capturado["token"] == "synthetic-explicit-token"
 
