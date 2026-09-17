@@ -4,7 +4,7 @@ FourBis Relay se publica como proyecto de portafolio. Las contribuciones deben c
 
 ## Flujo
 
-1. Parte de `develop` y crea una rama descriptiva con prefijo `codex/` cuando corresponda.
+1. Parte de `develop` y crea una rama descriptiva con prefijo `feature/` cuando corresponda.
 2. Mantén los cambios acotados al problema que motivó el pull request.
 3. Actualiza la documentación afectada y explica cualquier cambio de comportamiento.
 4. Ejecuta las verificaciones relevantes desde la raíz y reporta el comando y su resultado real.
