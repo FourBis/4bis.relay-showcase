@@ -594,6 +594,7 @@ async def test_git_remote_vincula_y_cambia_origin(cli):
     r2 = await cli.put("/admin/api/projects/demo/git-remote",
                        json={"url": "git@github.com:AuroraDemo/otro.git"})
     assert r2.status == 200
+    assert (await r2.json())["url"] == "ssh://github.com/AuroraDemo/otro.git"
     if _git_reescribe_urls():
         # El git de este entorno reescribe SSH→HTTPS al guardar. Lo que
         # este test verifica —que `set-url` pise el origin existente en

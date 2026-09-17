@@ -30,9 +30,9 @@ class TestGmailMock(unittest.IsolatedAsyncioTestCase):
 
     async def test_query_filters(self) -> None:
         tool = GmailReadTool()
-        out = await tool.call({"query": "example-client", "max_results": 10})
+        out = await tool.call({"query": "client@example.com", "max_results": 10})
         self.assertTrue(out["ok"])
-        self.assertTrue(any("example-client" in m["from"] for m in out["messages"]))
+        self.assertEqual([m["from"] for m in out["messages"]], ["client@example.com"])
 
 
 class TestMcpEndpoint(unittest.IsolatedAsyncioTestCase):
@@ -49,7 +49,7 @@ class TestMcpEndpoint(unittest.IsolatedAsyncioTestCase):
 
             r = await client.post("/mcp", json={
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "gmail_read", "arguments": {"query": "example-client"}},
+                "params": {"name": "gmail_read", "arguments": {"query": "client@example.com"}},
             })
             body = await r.json()
             self.assertIn("result", body)

@@ -63,7 +63,8 @@ SHA-256 of the committed vendor files:
 
 ## Advisory review, 2026-09-16
 
-The 81 JavaScript package/version combinations in the distributed artifacts
+The 82 package/version combinations in the distributed artifacts (81 JavaScript
+components plus Tailwind CSS)
 returned no known advisories from [OSV](https://osv.dev/) on the review date.
 This is a component scan, not a proof that the application has no vulnerabilities.
 The upstream build workspace still reports advisories in other tooling/package

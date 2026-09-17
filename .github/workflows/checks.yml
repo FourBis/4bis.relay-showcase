@@ -36,6 +36,8 @@ jobs:
           mcp-server/tests/test_conversations_ui.py
           mcp-server/tests/test_memories_ui.py
           mcp-server/tests/test_identity.py
+          mcp-server/tests/test_project_privacy.py
+          mcp-server/tests/test_tracing.py
           mcp-server/tests/test_browser_boundary.py
           mcp-server/tests/test_system_config.py
           mcp-server/tests/test_expert_timeout_endpoint.py

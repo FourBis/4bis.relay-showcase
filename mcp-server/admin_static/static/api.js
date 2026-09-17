@@ -182,11 +182,28 @@ export function fmtNum(n) {
 //   https://github.com/Org/repo.git → https://github.com/Org/repo
 export function gitWebUrl(remote) {
   if (!remote) return null;
-  let u = remote.trim();
-  const ssh = u.match(/^(?:ssh:\/\/)?git@([^:/]+)[:/](.+)$/);
-  if (ssh) u = `https://${ssh[1]}/${ssh[2]}`;
-  if (!/^https?:\/\//.test(u)) return null;
-  return u.replace(/\.git$/, "");
+  const raw = String(remote).trim();
+  if (!raw || /[\u0000-\u001f\u007f\s]/.test(raw)) return null;
+
+  let u;
+  if (!raw.includes("://")) {
+    if (/^[a-z][a-z\d+.-]*:/i.test(raw)) return null;
+    const scp = raw.match(/^(?:[^@/:]+@)?([^/:]+):(.+)$/);
+    if (!scp) return null;
+    try { u = new URL(`ssh://${scp[1]}/${scp[2]}`); } catch { return null; }
+  } else {
+    try { u = new URL(raw); } catch { return null; }
+  }
+  if (!new Set(["http:", "https:", "ssh:"]).has(u.protocol)
+      || u.password || u.search || u.hash || !u.hostname
+      || (u.protocol === "ssh:" && u.port)) {
+    return null;
+  }
+  const path = u.pathname.replace(/\.git$/, "");
+  if (!path || path === "/") return null;
+  const scheme = u.protocol === "ssh:" ? "https:" : u.protocol;
+  const host = u.protocol === "ssh:" ? u.hostname : u.host;
+  return `${scheme}//${host}${path}`;
 }
 
 // Duración en ms → "1,2s" / "45s" / "3m 10s" / "2h 49m".

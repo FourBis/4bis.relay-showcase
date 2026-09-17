@@ -77,6 +77,7 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
     monkeypatch.setenv("FOURBIS_ATTACHMENTS_DIR", str(_fourbis_tmp / "attachments"))
     monkeypatch.setenv("STATE_DIR", str(_fourbis_tmp / "state"))
     os.environ["FOURBIS_MODEL"] = "test"  # TestModel: sin red, sin tokens
+    monkeypatch.setenv("GOOGLE_REAL", "0")  # Las pruebas optan por Google real explícitamente.
     # El warmup es independiente del watcher y antes iniciaba el CBM real
     # desde cada TestServer, aun con CBM_AUTO_WATCH=0.
     from relay import config, server

@@ -142,6 +142,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
 
         self.db = Database()
         await self.db.init_schema()
+        await self.db.set_config("FOURBIS_MODEL", "test")
         await self.db.upsert_project({
             "slug": "demo", "name": "Demo",
             "repo_path": str(self.repo),

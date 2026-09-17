@@ -102,6 +102,7 @@ class TestChatsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
         _tmp_env(base)
         db = Database()
         await db.init_schema()
+        await db.set_config("FOURBIS_MODEL", "test")
         await db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name,
             "defaults_json": {"model": "test"},

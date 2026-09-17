@@ -1,0 +1,201 @@
+"""Regresiones de privacidad para remotes y proyectos.
+
+Los fixtures usan valores sintéticos. No se conectan a proveedores ni leen la
+configuración real del usuario.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from relay import admin, identity
+from relay.db import Database
+
+
+def _repo_with_remote(tmp_path: Path, remote: str) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    git = repo / ".git"
+    git.mkdir(parents=True)
+    config = git / "config"
+    config.write_text(
+        f'[remote "origin"]\n\turl = {remote}\n', encoding="utf-8"
+    )
+    return repo, config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        (
+            "https://fixture-user:FAKE_SECRET@github.example/org/repo.git?x=1#frag",
+            "https://github.example/org/repo.git",
+        ),
+        (
+            "https://github.example/org/repo.git",
+            "https://github.example/org/repo.git",
+        ),
+        (
+            "ssh://git@github.example/org/repo.git?x=1#frag",
+            "ssh://github.example/org/repo.git",
+        ),
+        (
+            "git://fixture-user:FAKE_SECRET@github.example/org/repo.git?x=1#frag",
+            "git://github.example/org/repo.git",
+        ),
+        (
+            "http://fixture-user:FAKE_SECRET@github.example/org/repo.git?x=1#frag",
+            "http://github.example/org/repo.git",
+        ),
+        (
+            "git@github.example:org/repo.git",
+            "ssh://github.example/org/repo.git",
+        ),
+    ],
+)
+def test_git_remote_public_shape(tmp_path: Path, remote: str, expected: str) -> None:
+    repo, before = _repo_with_remote(tmp_path, remote)
+    admin._remote_url_cache.pop(str(repo), None)
+
+    assert admin._git_remote_url(str(repo)) == expected
+    assert admin._git_remote_url(str(repo)) == expected
+    assert (repo / ".git" / "config").read_text(encoding="utf-8") == before
+    assert "FAKE_SECRET" not in (admin._git_remote_url(str(repo)) or "")
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "C:/local/repo",
+        "file:///C:/local/repo",
+        "javascript:alert(1)",
+        "gopher://github.example/org/repo.git",
+        "https://",
+        "ssh://",
+        "not a URL",
+    ],
+)
+def test_git_remote_local_unknown_or_malformed_is_hidden(
+    tmp_path: Path, remote: str
+) -> None:
+    repo, _ = _repo_with_remote(tmp_path, remote)
+    admin._remote_url_cache.pop(str(repo), None)
+    assert admin._git_remote_url(str(repo)) is None
+
+
+async def _make_client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Database, object]:
+    db_path = tmp_path / "relay.db"
+    # create_app reads these paths during startup; keep every artifact inside
+    # pytest's temporary directory.
+    monkeypatch.setenv("FOURBIS_DB_PATH", str(db_path))
+    monkeypatch.setenv("FOURBIS_CHATS_DIR", str(tmp_path / "chats"))
+    monkeypatch.setenv("FOURBIS_JSONL_DIR", str(tmp_path / "jsonl"))
+    monkeypatch.setenv("FOURBIS_LOG_DIR", str(tmp_path / "logs"))
+
+    db = Database()
+    await db.init_schema()
+    repo = tmp_path / "workspace"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.example/org/repo.git\n',
+        encoding="utf-8",
+    )
+    await db.upsert_project(
+        {
+            "slug": "fixture",
+            "name": "Fixture",
+            "repo_path": str(repo),
+            "description": "SYNTHETIC_DESCRIPTION",
+            "system_prompt": "SYNTHETIC_PRIVATE_PROMPT",
+            "mcp_servers": [{"name": "fixture", "env": {"TOKEN": "SYNTHETIC_MCP_VALUE"}}],
+            "defaults_json": {"rutas_extra": ["SYNTHETIC_PRIVATE_PATH"]},
+            "native_tools": ["SYNTHETIC_NATIVE_TOOL"],
+            "enabled": True,
+        }
+    )
+    await db.set_config("DISCORD_GUILD_ID", "SYNTHETIC_GUILD")
+
+    from relay.server import create_app
+
+    app = create_app()
+    identity.load_roles([])
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client, db, app
+
+
+@pytest.mark.asyncio
+async def test_member_payload_is_allowlisted_owner_keeps_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client, _db, _app = await _make_client(tmp_path, monkeypatch)
+    try:
+        member_headers = {"Cf-Access-Jwt-Assertion": "fixture-jwt"}
+        with patch("relay.identity.verify", return_value="member@example.test"):
+            list_response = await client.get(
+                "/admin/api/projects", headers=member_headers
+            )
+            detail_response = await client.get(
+                "/admin/api/projects/fixture", headers=member_headers
+            )
+        assert list_response.status == 200
+        assert detail_response.status == 200
+
+        allowed = {
+            "slug",
+            "name",
+            "description",
+            "enabled",
+            "indexed",
+            "index_stats",
+            "has_git",
+            "git_remote_url",
+        }
+        listed = next(
+            project
+            for project in (await list_response.json())["projects"]
+            if project["slug"] == "fixture"
+        )
+        detailed = (await detail_response.json())["project"]
+        assert set(listed) == allowed
+        assert set(detailed) == allowed - {"indexed", "index_stats"}
+        assert listed["git_remote_url"] == "https://github.example/org/repo.git"
+        assert detailed["git_remote_url"] == listed["git_remote_url"]
+        assert (await list_response.json()).get("discord_guild_id") != "SYNTHETIC_GUILD"
+
+        # Local owner behavior remains available without Access identity.
+        owner_response = await client.get("/admin/api/projects/fixture")
+        assert owner_response.status == 200
+        owner_project = (await owner_response.json())["project"]
+        assert owner_project["system_prompt"] == "SYNTHETIC_PRIVATE_PROMPT"
+        assert owner_project["mcp_servers"][0]["env"]["TOKEN"] == "SYNTHETIC_MCP_VALUE"
+        assert owner_project["defaults_json"]["rutas_extra"] == [
+            "SYNTHETIC_PRIVATE_PATH"
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_read_effective_system_prompt_owner_can(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client, _db, _app = await _make_client(tmp_path, monkeypatch)
+    try:
+        with patch("relay.identity.verify", return_value="member@example.test"):
+            member_response = await client.get(
+                "/admin/api/projects/fixture/system-prompt",
+                headers={"Cf-Access-Jwt-Assertion": "fixture-jwt"},
+            )
+        assert member_response.status == 403
+
+        owner_response = await client.get(
+            "/admin/api/projects/fixture/system-prompt"
+        )
+        assert owner_response.status == 200
+        owner_body = await owner_response.json()
+        assert owner_body["blocks"]["system_prompt"] == "SYNTHETIC_PRIVATE_PROMPT"
+    finally:
+        await client.close()

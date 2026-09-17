@@ -129,18 +129,20 @@ def test_run_verifier_model_unavailable_still_propagates():
 # ---------- config: cascada de las etapas ----------
 
 
-# OJO: aquí se usa setenv("") y NO delenv(). `config.load_dotenv()`
-# rellena las variables que falten leyendo el .env del repo, así que un
-# delenv se deshace solo y el test terminaría comprobando la config del
-# desarrollador en lugar de la cascada. Una cadena vacía sí está en
-# os.environ, load_dotenv la respeta, y el código la trata como ausente.
+# La configuración operativa se escribe en el catálogo runtime/SQLite. Las
+# cadenas vacías siguen siendo útiles para probar el fallback entre etapas.
 
 
 def test_planner_model_spec_falls_back_to_model_spec(monkeypatch):
-    monkeypatch.setenv("FOURBIS_PLANNER_MODEL", "")
-    monkeypatch.setenv("FOURBIS_COMPACTOR_MODEL", "")
-    monkeypatch.setenv("FOURBIS_MODEL", "anthropic:claude-x")
-    assert experts.config.planner_model_spec() == "anthropic:claude-x"
+    experts.config.set_runtime_config({
+        "FOURBIS_PLANNER_MODEL": "",
+        "FOURBIS_COMPACTOR_MODEL": "",
+        "FOURBIS_MODEL": "anthropic:claude-x",
+    })
+    try:
+        assert experts.config.planner_model_spec() == "anthropic:claude-x"
+    finally:
+        experts.config.set_runtime_config({})
 
 
 def test_model_spec_prefiere_system_config_al_entorno(monkeypatch):
@@ -155,24 +157,39 @@ def test_model_spec_prefiere_system_config_al_entorno(monkeypatch):
 
 
 def test_verifier_model_spec_falls_back_to_compactor(monkeypatch):
-    monkeypatch.setenv("FOURBIS_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_VERIFIER_MODEL", "")
-    monkeypatch.setenv("FOURBIS_COMPACTOR_MODEL", "minimax:MiniMax-M2.7")
-    assert experts.config.verifier_model_spec() == "minimax:MiniMax-M2.7"
+    experts.config.set_runtime_config({
+        "FOURBIS_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_VERIFIER_MODEL": "",
+        "FOURBIS_COMPACTOR_MODEL": "minimax:MiniMax-M2.7",
+    })
+    try:
+        assert experts.config.verifier_model_spec() == "minimax:MiniMax-M2.7"
+    finally:
+        experts.config.set_runtime_config({})
 
 
-def test_documenter_model_spec_env_wins(monkeypatch):
-    monkeypatch.setenv("FOURBIS_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_DOCUMENTER_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_COMPACTOR_MODEL", "otro:modelo")
-    assert experts.config.documenter_model_spec() == "minimax:MiniMax-M3"
+def test_documenter_model_spec_runtime_override():
+    experts.config.set_runtime_config({
+        "FOURBIS_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_DOCUMENTER_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_COMPACTOR_MODEL": "otro:modelo",
+    })
+    try:
+        assert experts.config.documenter_model_spec() == "minimax:MiniMax-M3"
+    finally:
+        experts.config.set_runtime_config({})
 
 
 def test_documenter_model_spec_falls_back_to_compactor(monkeypatch):
-    monkeypatch.setenv("FOURBIS_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_DOCUMENTER_MODEL", "")
-    monkeypatch.setenv("FOURBIS_COMPACTOR_MODEL", "minimax:MiniMax-M2.7")
-    assert experts.config.documenter_model_spec() == "minimax:MiniMax-M2.7"
+    experts.config.set_runtime_config({
+        "FOURBIS_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_DOCUMENTER_MODEL": "",
+        "FOURBIS_COMPACTOR_MODEL": "minimax:MiniMax-M2.7",
+    })
+    try:
+        assert experts.config.documenter_model_spec() == "minimax:MiniMax-M2.7"
+    finally:
+        experts.config.set_runtime_config({})
 
 
 def test_staged_specs_follow_test_sentinel(monkeypatch):
@@ -181,13 +198,18 @@ def test_staged_specs_follow_test_sentinel(monkeypatch):
     Es la salvaguarda que evita que la suite facture tokens cuando el
     .env define FOURBIS_PLANNER_MODEL apuntando a MiniMax.
     """
-    monkeypatch.setenv("FOURBIS_MODEL", "test")
-    monkeypatch.setenv("FOURBIS_PLANNER_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_VERIFIER_MODEL", "minimax:MiniMax-M3")
-    monkeypatch.setenv("FOURBIS_DOCUMENTER_MODEL", "minimax:MiniMax-M3")
-    assert experts.config.planner_model_spec() == "test"
-    assert experts.config.verifier_model_spec() == "test"
-    assert experts.config.documenter_model_spec() == "test"
+    experts.config.set_runtime_config({
+        "FOURBIS_MODEL": "test",
+        "FOURBIS_PLANNER_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_VERIFIER_MODEL": "minimax:MiniMax-M3",
+        "FOURBIS_DOCUMENTER_MODEL": "minimax:MiniMax-M3",
+    })
+    try:
+        assert experts.config.planner_model_spec() == "test"
+        assert experts.config.verifier_model_spec() == "test"
+        assert experts.config.documenter_model_spec() == "test"
+    finally:
+        experts.config.set_runtime_config({})
 
 
 # ---------- run_expert_staged: opt-out + flujo ----------
@@ -1141,6 +1163,7 @@ async def env():
         with patch.dict(os.environ, env_vars, clear=False):
             db = Database(path=Path(tmp) / "relay.db")
             await db.init_schema()
+            await db.set_config("FOURBIS_MODEL", "test")
             await db.upsert_project({
                 "slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
                 "system_prompt": "experto demo", "mcp_servers": [],

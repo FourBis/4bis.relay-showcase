@@ -25,6 +25,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay.db import Database
+from relay import config as relay_config
 from relay.notify import NotifyClient
 from relay import skills as skills_mod
 
@@ -133,6 +134,7 @@ class TestSkillDraftsDb(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         _clear_env()
+        relay_config.set_runtime_config({})
         self._tmp.cleanup()
 
     async def test_crud_and_pending_count(self) -> None:
@@ -393,6 +395,8 @@ class TestSkillsManual(unittest.IsolatedAsyncioTestCase):
         _tmp_env(Path(self._tmp.name))
         self.db = Database()
         await self.db.init_schema()
+        await self.db.set_config("FOURBIS_MODEL", "test")
+        relay_config.set_runtime_config(await self.db.all_config())
         self.skills_dir = Path(os.environ["FOURBIS_SKILLS_DIR"])
         self.draft_id = await self.db.add_skill_draft(
             name="create-github-issue-from-transcript",
@@ -402,6 +406,7 @@ class TestSkillsManual(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         _clear_env()
+        relay_config.set_runtime_config({})
         self._tmp.cleanup()
 
     def _client(self):
@@ -502,29 +507,26 @@ class TestSkillsManual(unittest.IsolatedAsyncioTestCase):
         }
         await voice_mod.persist_transcript(rec)
 
-        # usar TestModel para no gastar red
-        os.environ["FOURBIS_MODEL"] = "test"
-        try:
-            async with self._client() as client:
-                r = await client.post(
-                    "/admin/api/skills/create-github-issue-from-transcript"
-                    "/apply-to-transcript",
-                    json={"transcript_id": trx_id, "mode": "issue",
-                          "repo": "ORG/repo"})
-                self.assertEqual(r.status, 200, await r.text())
-                body = await r.json()
-                self.assertEqual(body["transcript_id"], trx_id)
-                self.assertEqual(body["mode"], "issue")
-                self.assertEqual(body["repo"], "ORG/repo")
-                self.assertTrue(body["output"], "output vacío")
-                # Con TestModel el content es un placeholder
-                # ("success (no tool calls)"). Lo importante acá es que el
-                # endpoint enruta correctamente: 200 + output no vacío.
-                # El shape real se valida en el smoke manual con el LLM real.
-                self.assertIn("tool calls", body["output"].lower(),
-                    "TestModel debería devolver su placeholder canónico")
-        finally:
-            os.environ.pop("FOURBIS_MODEL", None)
+        # El TestModel queda en system_config/SQLite: la configuración
+        # operativa ya no se lee de variables de entorno.
+        async with self._client() as client:
+            r = await client.post(
+                "/admin/api/skills/create-github-issue-from-transcript"
+                "/apply-to-transcript",
+                json={"transcript_id": trx_id, "mode": "issue",
+                      "repo": "ORG/repo"})
+            self.assertEqual(r.status, 200, await r.text())
+            body = await r.json()
+            self.assertEqual(body["transcript_id"], trx_id)
+            self.assertEqual(body["mode"], "issue")
+            self.assertEqual(body["repo"], "ORG/repo")
+            self.assertTrue(body["output"], "output vacío")
+            # Con TestModel el content es un placeholder
+            # ("success (no tool calls)"). Lo importante acá es que el
+            # endpoint enruta correctamente: 200 + output no vacío.
+            # El shape real se valida en el smoke manual con el LLM real.
+            self.assertIn("tool calls", body["output"].lower(),
+                "TestModel debería devolver su placeholder canónico")
 
     async def test_apply_skill_errors(self) -> None:
         # 400 si falta transcript_id

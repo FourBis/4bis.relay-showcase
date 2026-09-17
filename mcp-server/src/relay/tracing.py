@@ -101,9 +101,10 @@ def setup_tracing() -> bool:
         logfire.configure(
             service_name=SERVICE_NAME,
             environment=config.get("FOURBIS_ENV"),
-            # 'if-token-present' es literal de logfire: manda al cloud solo
-            # si hay LOGFIRE_TOKEN. Sin token no sale nada de la máquina.
-            send_to_logfire="if-token-present",
+            # La decisión y el token deben usar la misma configuración que
+            # include_content; un token ambiente no puede activar otro destino.
+            send_to_logfire=remoto,
+            token=token or None,
             # Consola solo cuando no hay a dónde exportar; si no, cada span
             # duplicaría el stdout que ya llena `relay.log`.
             console=False if (token or otlp) else None,

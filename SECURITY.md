@@ -8,6 +8,11 @@ No expongas el puerto directamente a Internet. Las credenciales de proveedores, 
 
 La integración opcional con controles externos de identidad requiere configuración adicional y no constituye una garantía de aislamiento para código o usuarios no confiables. La versión de portafolio no incluye una auditoría integral ni una promesa de seguridad para despliegues públicos.
 
+El rol `member` recibe únicamente metadatos de los proyectos. La configuración
+de herramientas y la vista del prompt efectivo requieren el rol `owner`.
+Las URLs Git mostradas por la API omiten credenciales, parámetros y fragmentos;
+el archivo local de configuración Git conserva su valor original.
+
 La API rechaza orígenes web ajenos y, para peticiones al socket local, los hosts
 distintos de `localhost`, `127.0.0.1` o `[::1]` requieren un JWT de Cloudflare
 Access verificado. Un proxy debe conservar el `Host` público; reescribirlo a

@@ -21,9 +21,11 @@ import aiohttp.web
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay import voice
+from relay import config as relay_config
+from relay.db import Database
 from relay.server import create_app
 
-_ENV_KEYS = ("VOICE_AUDIO_DIR", "VOICE_TRANSCRIPTS_DIR",
+_ENV_KEYS = ("FOURBIS_DB_PATH", "VOICE_AUDIO_DIR", "VOICE_TRANSCRIPTS_DIR",
              "VOICE_MAX_AUDIO_BYTES")
 
 
@@ -57,9 +59,15 @@ class TestVoiceEndpoints(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
         self._env_backup = {k: os.environ.get(k) for k in _ENV_KEYS}
+        os.environ["FOURBIS_DB_PATH"] = str(base / "relay.db")
         os.environ["VOICE_AUDIO_DIR"] = str(base / "audio")
         os.environ["VOICE_TRANSCRIPTS_DIR"] = str(base / "transcripts")
         os.environ.pop("VOICE_MAX_AUDIO_BYTES", None)
+        self._db = Database()
+        await self._db.init_schema()
+        await self._db.set_config("VOICE_AUDIO_DIR", str(base / "audio"))
+        await self._db.set_config("VOICE_TRANSCRIPTS_DIR", str(base / "transcripts"))
+        relay_config.set_runtime_config(await self._db.all_config())
 
     async def asyncTearDown(self) -> None:
         for k, v in self._env_backup.items():
@@ -67,6 +75,7 @@ class TestVoiceEndpoints(unittest.IsolatedAsyncioTestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        relay_config.set_runtime_config({})
         self._tmp.cleanup()
 
     async def test_transcribe_happy_path_and_get(self) -> None:
@@ -127,7 +136,8 @@ class TestVoiceEndpoints(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("formato", (await r.json())["error"])
 
     async def test_oversize_413(self) -> None:
-        os.environ["VOICE_MAX_AUDIO_BYTES"] = "100"
+        await self._db.set_config("VOICE_MAX_AUDIO_BYTES", "100")
+        relay_config.set_runtime_config(await self._db.all_config())
         with patch.object(voice, "transcribe_minimax", _fake_stt):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
@@ -239,6 +249,7 @@ class TestTranscribeMinimaxProvider(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._env_backup = {
             k: os.environ.get(k) for k in (
+                "FOURBIS_DB_PATH",
                 "MINIMAX_STT_URL", "MINIMAX_API_KEY", "VOICE_STT_API_KEY",
                 "MINIMAX_STT_MODEL", "MINIMAX_STT_LANGUAGE")}
         self._seen_auth: list[str] = []
@@ -255,11 +266,16 @@ class TestTranscribeMinimaxProvider(unittest.IsolatedAsyncioTestCase):
         self._server = TestServer(app)
         await self._server.start_server()
         base = f"http://{self._server.host}:{self._server.port}"
-        os.environ["MINIMAX_STT_URL"] = f"{base}/v1/audio/transcriptions"
-        os.environ["VOICE_STT_API_KEY"] = "gsk_test_key"
-        os.environ["MINIMAX_API_KEY"] = "sk-should-not-be-used"
-        os.environ["MINIMAX_STT_MODEL"] = "whisper-large-v3-turbo"
-        os.environ["MINIMAX_STT_LANGUAGE"] = "es"
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["FOURBIS_DB_PATH"] = str(Path(self._tmp.name) / "relay.db")
+        self._db = Database()
+        await self._db.init_schema()
+        await self._db.set_config("MINIMAX_STT_URL", f"{base}/v1/audio/transcriptions")
+        await self._db.set_config("secret:VOICE_STT_API_KEY", "gsk_test_key")
+        await self._db.set_config("secret:MINIMAX_API_KEY", "sk-should-not-be-used")
+        await self._db.set_config("MINIMAX_STT_MODEL", "whisper-large-v3-turbo")
+        await self._db.set_config("MINIMAX_STT_LANGUAGE", "es")
+        relay_config.set_runtime_config(await self._db.all_config())
 
     async def asyncTearDown(self) -> None:
         await self._server.close()
@@ -268,6 +284,8 @@ class TestTranscribeMinimaxProvider(unittest.IsolatedAsyncioTestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        relay_config.set_runtime_config({})
+        self._tmp.cleanup()
 
     async def test_uses_voice_stt_api_key_and_derives_provider(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:

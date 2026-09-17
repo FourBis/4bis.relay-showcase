@@ -173,7 +173,6 @@ MEMBER_ALLOWED = frozenset({
     ("GET", "/health"), ("GET", "/system/active"), ("GET", "/stats"),
     # elegir proyecto (solo leer: el alta y el borrado son del owner)
     ("GET", "/admin/api/projects"), ("GET", "/admin/api/projects/{slug}"),
-    ("GET", "/admin/api/projects/{slug}/system-prompt"),
     ("GET", "/admin/api/search"),
     # correr expertos, y poder frenarlos o corregirlos
     ("POST", "/experts/run"),

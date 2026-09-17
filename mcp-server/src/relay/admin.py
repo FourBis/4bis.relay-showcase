@@ -465,6 +465,30 @@ def _resolve_git_config(repo_path: str) -> Optional[Path]:
     return None
 
 
+def _safe_git_remote_url(url: str) -> Optional[str]:
+    """Remote para mostrar: nunca credenciales, query ni fragmento del config."""
+    if not url or any(c.isspace() or ord(c) < 32 for c in url):
+        return None
+    if "://" not in url:
+        # La sintaxis scp usual; las rutas locales no son enlaces públicos.
+        scp = re.fullmatch(r"[^/@:\s]+@(\[[^\]]+\]|[^/:\s]+):(.+)", url)
+        if not scp:
+            return None
+        url = f"ssh://{scp[1]}/{scp[2]}"
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"https", "http", "ssh", "git"} or not parsed.hostname:
+            return None
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host += f":{parsed.port}"
+        return parsed._replace(netloc=host, params="", query="", fragment="").geturl()
+    except ValueError:
+        return None
+
+
 def _git_remote_url(repo_path: str) -> Optional[str]:
     cfg = _resolve_git_config(repo_path)
     if cfg is None:
@@ -486,7 +510,7 @@ def _git_remote_url(repo_path: str) -> Optional[str]:
                 in_origin = s.replace(" ", "") == '[remote"origin"]'
             elif in_origin and s.startswith("url"):
                 _, _, v = s.partition("=")
-                url = v.strip() or None
+                url = _safe_git_remote_url(v.strip())
                 break
     except OSError:
         url = None
@@ -1100,12 +1124,22 @@ async def api_projects(request: web.Request) -> web.Response:
             "github_project_skip": bool(
                 (p.get("defaults_json") or {}).get("github_project_skip")),
         })
+    owner = identity.role_of(request) == identity.OWNER_ROLE
+    if not owner:
+        out = [_member_project_metadata(p) for p in out]
     # discord_guild_id (system_config): el front lo usa para linkear el
     # canal de cada fila. Va una vez a nivel top, no por proyecto.
     return web.json_response({
         "projects": _serialize(out),
-        "discord_guild_id": relay_config.discord_guild_id(),
+        "discord_guild_id": relay_config.discord_guild_id() if owner else None,
     })
+
+
+def _member_project_metadata(project: Mapping[str, Any]) -> dict:
+    # Allowlist: nuevos campos de configuración no se publican por accidente.
+    fields = {"slug", "name", "description", "enabled", "indexed", "index_stats",
+              "has_git", "git_remote_url"}
+    return {key: value for key, value in project.items() if key in fields}
 
 
 async def api_projects_slug(request: web.Request) -> web.Response:
@@ -1122,6 +1156,8 @@ async def api_projects_slug(request: web.Request) -> web.Response:
     # el panel de admin no sabía si el repo era git → la sección de remoto
     # caía en "no es repo git" aunque lo fuera.
     data["has_git"] = _has_git(Path(rp)) if rp else False
+    if identity.role_of(request) != identity.OWNER_ROLE:
+        data = _member_project_metadata(data)
     return web.json_response({"project": _serialize(data)})
 
 
@@ -1164,7 +1200,7 @@ async def api_project_git_remote(request: web.Request) -> web.Response:
     # Invalidar el cache del read-path (mtime del .git/config puede no
     # cambiar de forma perceptible entre lecturas rápidas).
     _remote_url_cache.pop(repo_path, None)
-    return web.json_response({"ok": True, "url": url, "repo": repo})
+    return web.json_response({"ok": True, "url": _safe_git_remote_url(url), "repo": repo})
 
 
 async def api_project_system_prompt(request: web.Request) -> web.Response:

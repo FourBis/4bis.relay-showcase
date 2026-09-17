@@ -358,7 +358,7 @@ class MaybeAskBlockDecisionTests(unittest.IsolatedAsyncioTestCase):
     def _orch(self, *, interactive: bool = True) -> NightOrchestrator:
         project = {
             "slug": "demo", "repo_path": ".",
-            "defaults_json": {}, "night_config": {},
+            "defaults_json": {"planner_model": "test"}, "night_config": {},
             "interactive_mode": 1 if interactive else 0,
         }
         db = MagicMock()
