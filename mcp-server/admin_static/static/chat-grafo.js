@@ -731,10 +731,12 @@ export function wireGrafoPanel() {
   $("#chat-grafo-cerrar")?.addEventListener("click", () => {
     if (panel) { panel.hidden = true; panel.dataset.cerrado = "1"; }
     verTiradorGrafo(false);
+    $("#chat-panel-grafo")?.focus();
   });
   $("#chat-panel-grafo")?.addEventListener("click", () => {
     if (panel) { panel.hidden = false; panel.dataset.cerrado = "0"; }
     verTiradorGrafo(true);
+    $("#chat-grafo-cerrar")?.focus();
   });
   $("#chat-grafo-parar")?.addEventListener("click", pararElPlan);
   $("#chat-grafo-seguir")?.addEventListener("click", retomarElPlan);

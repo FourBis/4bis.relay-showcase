@@ -2442,8 +2442,7 @@ dialog.workspace-launcher::backdrop { background: rgba(5, 8, 8, .72); }
 .workspace-inspector summary { padding: .8rem 0; color: var(--ws-text); cursor: pointer; font-size: .78rem; font-weight: 650; }
 .workspace-inspector-body { padding: 0 0 1rem; color: var(--ws-muted); }
 
-/* Chat: la conversación conserva todo su contenido, pero la navegación y
-   el grafo viven en overlays dentro de la ventana. */
+/* Chat: navegación contextual y plan al lado, sin cubrir la conversación. */
 body.workspace-mode .chat-workspace {
   position: relative;
   container-type: inline-size;
@@ -2488,16 +2487,18 @@ body.workspace-mode #chat-drawer-backdrop {
 body.workspace-mode .chat-sidebar.mobile-open ~ #chat-drawer-backdrop { display: block; }
 body.workspace-mode button.chat-drawer-btn { display: inline-flex; }
 body.workspace-mode .chat-grafo {
-  position: absolute;
-  inset: 0 0 0 auto;
+  position: relative;
+  inset: auto;
   z-index: 22;
-  width: min(31rem, 88%);
-  flex: none;
+  width: min(31rem, 48%);
+  max-width: calc(100% - 20rem);
+  flex: 0 0 auto;
   border-left: 1px solid var(--ws-line-strong);
   background: #141918;
-  box-shadow: -18px 0 34px rgba(0, 0, 0, .26);
+  box-shadow: none;
 }
 body.workspace-mode .chat-grafo[hidden] { display: none; }
+body.workspace-mode .chat-grafo.ancho { width: min(47.5rem, calc(100% - 20rem)); }
 body.workspace-mode .chat-viewer { background: var(--ws-surface-sunk); }
 body.workspace-mode .chat-input-bar { background: #151a19; border-color: var(--ws-line); }
 body.workspace-mode .chat-convo-head { border-color: var(--ws-line); }
@@ -2509,7 +2510,9 @@ body.workspace-mode .chat-convo-head .chat-drawer-btn { order: -1; }
 body.workspace-mode .chat-drawer-btn-empty { order: 0; }
 
 @container (max-width: 700px) {
-  .workspace-window .chat-grafo { width: min(88%, 25rem); }
+  body.workspace-mode .chat-grafo,
+  body.workspace-mode .chat-grafo.ancho { width: 100%; max-width: none; border-left: 0; }
+  body.workspace-mode .chat-main:has(~ .chat-grafo:not([hidden])) { display: none; }
   .workspace-window .chat-messages { padding-inline: 1rem; }
 }
 
@@ -2550,7 +2553,8 @@ body.workspace-mode .chat-drawer-btn-empty { order: 0; }
   dialog.workspace-launcher { width: calc(100vw - 1rem); }
   #workspace-modules { grid-template-columns: 1fr; gap: .35rem; padding: .7rem; }
   .workspace-module-group h3 { margin-top: .45rem; }
-  body.workspace-mode .chat-grafo { width: 100%; border-left: 0; }
+  body.workspace-mode .chat-grafo,
+  body.workspace-mode .chat-grafo.ancho { width: 100%; border-left: 0; }
   body.workspace-mode .chat-sidebar.mobile-open { width: min(88%, 20rem); }
   body.workspace-mode .chat-input-bar { padding-bottom: calc(.55rem + env(safe-area-inset-bottom)); }
   #workspace-welcome { padding-inline: 1rem; }

@@ -9,8 +9,7 @@ preparación para un servicio público multiusuario.
 
 - Copia independiente con historial nuevo, sin heredar el repositorio privado.
 - Copia alojada en el repositorio público `FourBis/4bis.relay-showcase`,
-  verificado con `develop` como rama predeterminada y `79a26513` como HEAD de esta
-  revisión.
+  con `develop` como rama predeterminada.
 - Configuraciones locales, respaldos, bases de datos, conversaciones, cachés,
   claves y apuntes internos excluidos. Ejemplos y captura usan datos ficticios.
 - Atribución pública intencional: FourBis y Jeremías Badilla. Los commits usan
@@ -104,29 +103,38 @@ También pasaron JavaScript, sintaxis y los sellos del CSS recompilado.
 ### Revisión de la UI del workspace — 17 de septiembre de 2026
 
 Se recorrieron en navegador los 20 módulos del workspace con pruebas aisladas y
-datos ficticios locales, sin proveedores reales. El recorrido principal registró
+datos ficticios locales, sin proveedores reales. El recorrido inicial registró
 **66 passed y 1 fallo**: el fallo corresponde a un selector obsoleto del test;
 los indicadores secundarios ahora están en un desplegable y la navegación se
 abre desde el catálogo. Una copia de trabajo adaptada a esa interfaz conservó
 las assertions y completó el flujo de workflow con **1
-passed en 7,78 segundos**; esto no implica que el archivo público del test haya
-sido corregido.
+passed en 7,78 segundos**. El archivo público se corrigió después en la revisión
+de distribución del chat y el grafo descrita a continuación.
 
 Otro grupo aislado registró **94 passed y 6 subtests**. Se comprobaron edición
 y persistencia de un proyecto ficticio, tablas desprendibles y filtro de filas,
 mosaico, métricas y chat móvil a 390 px sin desbordamiento horizontal.
 
-Quedan dos detalles menores de UI: “Cerrados recientemente” ordena las ventanas
-por apertura, no por cierre; el botón de ensanchar el grafo cambia de estado
-pero el CSS del workspace mantiene su ancho. El grafo abre, muestra las
-dependencias y permite inspeccionar tareas. Ninguno bloqueó los recorridos
-comprobados. También aparece un aviso de consola al no existir el botón de
-proyectos ocultos; no interrumpe el módulo Gestión.
+Se corrigieron el solapamiento entre chat y grafo y el botón de ensanchar el
+grafo. Ambos paneles comparten el espacio; al ampliar el plan se conservan al
+menos 320 px para la conversación. En ventanas de hasta 700 px se muestra uno
+a la vez, y cerrar el grafo devuelve el chat. Las regresiones de JavaScript,
+sintaxis, CSS, chat móvil y workflow registraron **78 passed en 18,30 segundos**.
+El recorrido de workflow comprueba geometría normal, ampliada y restaurada,
+ventana estrecha, móvil a 390 px, cierre/reapertura con devolución de foco,
+ausencia de desbordamiento
+horizontal y de errores JavaScript o peticiones externas del navegador.
 
-Las nuevas capturas del README se generaron desde la aplicación sin modificar,
-con proyectos, conversaciones, estados y consumo sintéticos en una base temporal.
-La captura automatizada comprobó ausencia de errores JavaScript y bloqueó toda
-solicitud del navegador fuera del servidor local (**1 passed**, 8,37 segundos).
+Quedan dos detalles menores observados en la revisión inicial: “Cerrados
+recientemente” ordena las ventanas por apertura, no por cierre; aparece un
+aviso de consola al no existir el botón de proyectos ocultos. No forman parte
+de la corrección de distribución del grafo.
+
+Las capturas del README se generaron desde la aplicación con proyectos,
+conversaciones, estados y consumo sintéticos en una base temporal. La captura
+del grafo se actualizó después de la corrección visual. La captura automatizada
+comprobó ausencia de errores JavaScript y bloqueó toda solicitud del navegador
+fuera del servidor local (**1 passed**, 9,08 segundos).
 
 La primera corrida completa del clon limpio produjo **2224 passed, 26 failed,
 14 skipped, 18 subtests passed**. Identificó fixtures anteriores a la configuración
@@ -152,6 +160,7 @@ $env:RELAY_TEST_UI = '1'
 .\mcp-server\.venv\Scripts\python.exe -m pytest `
   mcp-server/tests/test_workspace_browser.py `
   mcp-server/tests/test_admin_browser_real.py `
+  mcp-server/tests/test_workflow_browser.py `
   mcp-server/tests/test_vendor_browser.py -q
 ```
 
