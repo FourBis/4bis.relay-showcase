@@ -32,6 +32,9 @@ abiertas en un espacio compartido.
   Enter expande/restaura. Los botones ofrecen alternativas al arrastre.
 - El chat mantiene el contenido y el compositor. La lista de conversaciones aparece
   bajo demanda. `/abrir proyectos` abre Proyectos localmente, sin enviar al modelo.
+- Chat y grafo comparten el ancho disponible sin superponerse. Ampliar el grafo
+  conserva al menos 320 px para la conversación; en ventanas de hasta 700 px
+  se muestra uno a la vez y cerrar el plan recupera el chat.
 - «Abrir en workspace» conserva una respuesta fuera del hilo. Desde ella se pueden
   separar tablas y gráficos SVG. Las tablas permiten filtrar filas y copiar TSV;
   las respuestas se copian como texto. «Ir a la conversación» recupera el origen.
