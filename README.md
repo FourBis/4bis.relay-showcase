@@ -20,6 +20,27 @@ Las capacidades visuales del workspace están descritas en [docs/UI_WORKSPACE.md
 
 Datos de ejemplo renderizados en un workspace local.
 
+### Del chat al plan de trabajo
+
+Consulta las dependencias, el avance y el detalle de cada tarea desde la
+conversación. Cuando una tarea se subdivide, el grafo conserva su historial y
+muestra las nuevas partes del plan.
+
+![Grafo de ejecución](docs/images/workflow-graph.png)
+
+### Actividad y consumo a la vista
+
+Explora ejecuciones, uso de tokens y tendencias por proyecto y período.
+El desglose distingue errores, tareas en curso, cancelaciones y subdivisiones.
+
+![Métricas del relay](docs/images/workflow-metrics.png)
+
+Las respuestas del chat también pueden abrirse como paneles independientes; las
+tablas desprendibles conservan su origen, permiten filtrar filas y copiar TSV.
+
+*Capturas reales de la interfaz con datos ficticios locales. Los estados y
+consumos ilustran un escenario de demostración, sin ejecutar proveedores externos.*
+
 ## Inicio rápido en Windows
 
 Requisitos: Python 3.11 o posterior y PowerShell. La portabilidad a otros sistemas no está validada.

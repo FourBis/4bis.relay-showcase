@@ -8,8 +8,9 @@ preparación para un servicio público multiusuario.
 ## Publicación y privacidad
 
 - Copia independiente con historial nuevo, sin heredar el repositorio privado.
-- Copia alojada en el repositorio privado `FourBis/4bis.relay-showcase`,
-  con `develop` como rama principal. No se ha hecho público.
+- Copia alojada en el repositorio público `FourBis/4bis.relay-showcase`,
+  verificado con `develop` como rama predeterminada y `79a26513` como HEAD de esta
+  revisión.
 - Configuraciones locales, respaldos, bases de datos, conversaciones, cachés,
   claves y apuntes internos excluidos. Ejemplos y captura usan datos ficticios.
 - Atribución pública intencional: FourBis y Jeremías Badilla. Los commits usan
@@ -99,6 +100,33 @@ en Chrome (**3 passed**, 27,65 segundos):
 workspace y objetos flotantes; estados del chat y adjuntos; render Mermaid de
 flujo, secuencia, clases y frontmatter, más sanitización de HTML malicioso.
 También pasaron JavaScript, sintaxis y los sellos del CSS recompilado.
+
+### Revisión de la UI del workspace — 17 de septiembre de 2026
+
+Se recorrieron en navegador los 20 módulos del workspace con pruebas aisladas y
+datos ficticios locales, sin proveedores reales. El recorrido principal registró
+**66 passed y 1 fallo**: el fallo corresponde a un selector obsoleto del test;
+los indicadores secundarios ahora están en un desplegable y la navegación se
+abre desde el catálogo. Una copia de trabajo adaptada a esa interfaz conservó
+las assertions y completó el flujo de workflow con **1
+passed en 7,78 segundos**; esto no implica que el archivo público del test haya
+sido corregido.
+
+Otro grupo aislado registró **94 passed y 6 subtests**. Se comprobaron edición
+y persistencia de un proyecto ficticio, tablas desprendibles y filtro de filas,
+mosaico, métricas y chat móvil a 390 px sin desbordamiento horizontal.
+
+Quedan dos detalles menores de UI: “Cerrados recientemente” ordena las ventanas
+por apertura, no por cierre; el botón de ensanchar el grafo cambia de estado
+pero el CSS del workspace mantiene su ancho. El grafo abre, muestra las
+dependencias y permite inspeccionar tareas. Ninguno bloqueó los recorridos
+comprobados. También aparece un aviso de consola al no existir el botón de
+proyectos ocultos; no interrumpe el módulo Gestión.
+
+Las nuevas capturas del README se generaron desde la aplicación sin modificar,
+con proyectos, conversaciones, estados y consumo sintéticos en una base temporal.
+La captura automatizada comprobó ausencia de errores JavaScript y bloqueó toda
+solicitud del navegador fuera del servidor local (**1 passed**, 8,37 segundos).
 
 La primera corrida completa del clon limpio produjo **2224 passed, 26 failed,
 14 skipped, 18 subtests passed**. Identificó fixtures anteriores a la configuración
