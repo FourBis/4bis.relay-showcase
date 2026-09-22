@@ -12,6 +12,7 @@ contesta mal una consigna que entendió bien — y tirar el grafo entero
 por eso sería perder trabajo bueno por un detalle de forma.
 """
 from __future__ import annotations
+from relay import experts, expert_models, expert_runner
 
 import json
 
@@ -532,7 +533,7 @@ async def test_un_pedido_nuevo_en_un_hilo_abierto_arma_grafo(db, monkeypatch):
     base no había UN grafo después de semanas de uso. Ahora el corte lo
     decide `_es_continuacion` (el mensaje), no `is_followup` (el hilo).
     """
-    from relay import experts, server
+    from relay import experts, server, server_night
 
     agente, _ = _modelo_que_dice(_json([
         {"id": "t1", "titulo": "Inventariar la UI", "archivos": ["a.md"]},
@@ -542,7 +543,7 @@ async def test_un_pedido_nuevo_en_un_hilo_abierto_arma_grafo(db, monkeypatch):
     monkeypatch.setattr(experts, "Agent", agente)
     monkeypatch.setattr(experts, "build_model", lambda spec: object())
     largados: list[str] = []
-    monkeypatch.setattr(server, "_largar_grafo",
+    monkeypatch.setattr(server_night, "_largar_grafo",
                         lambda app, proj, gid: largados.append(gid))
 
     salida = await server._grafo_en_vez_de_proponer(
@@ -566,7 +567,7 @@ async def test_un_plan_vivo_frena_al_segundo_y_lo_dice(db, monkeypatch):
     propuesta cualquiera ("todavía no ejecuté nada") y el humano no
     tenía cómo saber que lo único que faltaba era esperar. Pasó el 30/8
     a las 07:25, después de que el planificador gastara 17k tokens."""
-    from relay import server
+    from relay import server, server_night
 
     await db.create_task_graph("g_vivo", "lo que ya corre", tareas=[
         {"id": "a", "titulo": "A"}, {"id": "b", "titulo": "B"}],
@@ -591,7 +592,7 @@ async def test_un_plan_colgado_no_frena_al_hilo_para_siempre(db, monkeypatch):
     conversación sin poder volver a planificar. Hay uno así desde el
     24/8 — tres nodos en `esperando_humano` con todas sus preguntas ya
     contestadas."""
-    from relay import experts, server
+    from relay import experts, server, server_night
 
     await db.create_task_graph("g_colgado", "abandonado", tareas=[
         {"id": "a", "titulo": "A"}], conversation_id="conv-trabada",
@@ -603,7 +604,7 @@ async def test_un_plan_colgado_no_frena_al_hilo_para_siempre(db, monkeypatch):
         {"id": "t2", "titulo": "Dos", "deps": ["t1"]}]))
     monkeypatch.setattr(experts, "Agent", agente)
     monkeypatch.setattr(experts, "build_model", lambda spec: object())
-    monkeypatch.setattr(server, "_largar_grafo", lambda app, proj, gid: None)
+    monkeypatch.setattr(server_night, "_largar_grafo", lambda app, proj, gid: None)
 
     salida = await server._grafo_en_vez_de_proponer(
         app={}, db=db, project={"slug": "demo", "defaults_json": {}},

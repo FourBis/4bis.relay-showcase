@@ -14,6 +14,7 @@ Por eso los tests de esas dos funciones son parametrizados y agresivos,
 y el resto (formato, caps) va más liviano.
 """
 from __future__ import annotations
+from relay import cbm_runtime, expert_models, expert_runner
 
 import asyncio
 import os
@@ -594,8 +595,9 @@ async def _tools_del_agente(proj, db):
 
     from relay import experts
 
+    await db.create_conversation(project_slug=proj["slug"], conversation_id="v1")
     capturado = {}
-    _RealAgent = experts.Agent
+    _RealAgent = expert_runner.Agent
 
     class _SpyAgent:
         def __init__(self, *a, **kw):
@@ -605,11 +607,11 @@ async def _tools_del_agente(proj, db):
         def __getattr__(self, n):
             return getattr(self._inner, n)
 
-    with patch.object(experts, "Agent", _SpyAgent), \
-         patch.object(experts, "build_model",
+    with patch.object(expert_runner, "Agent", _SpyAgent), \
+         patch.object(expert_models, "build_model",
                       lambda s: TestModel(call_tools=[])), \
-         patch.object(experts, "cbm_binary_path", lambda: None):
-        await experts.run_expert(
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+        await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
             chat_id="c1", conversation_id="v1")
 

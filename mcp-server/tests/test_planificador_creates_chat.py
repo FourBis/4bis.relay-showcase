@@ -13,6 +13,7 @@ arrancar (mismo patrón que `orquestador.ejecutor_minimax`) y lo cierra
 al terminar.
 """
 from __future__ import annotations
+from relay import experts, expert_models, expert_runner
 
 import json
 

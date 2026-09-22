@@ -1,3 +1,4 @@
+from relay import expert_instructions, expert_models, expert_planning, expert_runner, expert_selection, expert_toolsets
 """Regresiones en activación, permisos y ciclo de vida del MCP real del runner."""
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -19,7 +20,7 @@ async def test_on_demand_keeps_native_filters_watchdog_and_evidence(tmp_path):
     await db.upsert_mcp_server(dict(name="browser", capability="browser", command="node",
                                     enabled=True, on_demand=True))
     calls = []
-    original = experts._catalog_toolsets
+    original = expert_selection._catalog_toolsets
 
     async def record(*args, **kwargs):
         result = await original(*args, **kwargs)
@@ -44,15 +45,15 @@ async def test_on_demand_keeps_native_filters_watchdog_and_evidence(tmp_path):
         assert len(written) == 1
         if "browser_snapshot" not in {t.name for t in info.function_tools}:
             return ModelResponse(parts=[ToolCallPart("use_capability", {"name": "browser"})])
-        assert experts.EVIDENCE_BLOCK in str(info.instructions)
+        assert expert_instructions.EVIDENCE_BLOCK in str(info.instructions)
         if not any(p.tool_name == "browser_snapshot" for p in returns):
             return ModelResponse(parts=[ToolCallPart("browser_snapshot", {})])
         return ModelResponse(parts=[TextPart("ready")])
 
-    with patch.object(experts, "build_model", return_value=FunctionModel(model)), \
+    with patch.object(expert_models, "build_model", return_value=FunctionModel(model)), \
             patch.object(mcp_pool, "make_toolset", side_effect=make), \
-            patch.object(experts, "_catalog_toolsets", side_effect=record):
-        result = await experts.run_expert(await db.get_project("demo"), "inspect",
+            patch.object(expert_selection, "_catalog_toolsets", side_effect=record):
+        result = await expert_runner.run_expert(await db.get_project("demo"), "inspect",
                                          db=db, model_override="function")
     assert result["content"] == "ready"
     assert (tmp_path / "once.txt").read_text() == "once"
@@ -69,7 +70,7 @@ async def test_planner_cannot_bypass_run_permissions(defaults, role):
     db, pool = AsyncMock(), AsyncMock()
     token = request_role.set(role)
     try:
-        assert await experts._reasoning_toolset(
+        assert await expert_planning._reasoning_toolset(
             db, {"id": 1, "repo_path": ".", "defaults_json": defaults}, pool) == []
         db.mcp_servers_for_project.assert_not_called()
         pool.acquire.assert_not_called()
@@ -133,7 +134,7 @@ async def test_text_only_model_still_delivers_image_to_user(tmp_path, monkeypatc
     photo = BinaryImage(data=b"png-bytes", media_type="image/png")
     source = SimpleNamespace(call_tool=AsyncMock(return_value=["captura", photo]))
     sink = {}
-    capped = experts.CappedToolset(wrapped=source, image_artifacts=sink, vision=False)
+    capped = expert_toolsets.CappedToolset(wrapped=source, image_artifacts=sink, vision=False)
     output = await capped.call_tool("browser_take_screenshot", {}, SimpleNamespace(messages=[]), None)
     assert photo not in output
     assert "NO se envió al modelo" in str(output)

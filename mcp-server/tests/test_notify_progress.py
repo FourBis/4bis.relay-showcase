@@ -1,3 +1,4 @@
+from relay import expert_models, expert_runner, expert_selection, progress as progress_mod
 """El progreso no espera al bot; cierre/preguntas sí verifican aceptación.
 
 Transporte HTTP y herramientas simulados: no usa red ni ejecuta comandos.
@@ -54,14 +55,14 @@ async def test_batch_of_25_tools_runs_while_bot_is_stalled(tmp_path, monkeypatch
     async def catalog(*args, **kwargs):
         return [FunctionToolset(tools=[Tool(check, takes_ctx=False)])], [], []
 
-    monkeypatch.setattr(experts, "build_model", lambda spec: FunctionModel(model))
-    monkeypatch.setattr(experts, "_catalog_toolsets", catalog)
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: FunctionModel(model))
+    monkeypatch.setattr(expert_selection, "_catalog_toolsets", catalog)
     client = await _client(bot)
     store = {}
-    progress = experts.make_progress_callback(
+    progress = progress_mod.make_progress_callback(
         store, client, "batch", "demo", "test")
     try:
-        result = await asyncio.wait_for(experts.run_expert(
+        result = await asyncio.wait_for(expert_runner.run_expert(
             {"slug": "demo", "repo_path": str(tmp_path), "id": 1,
              "system_prompt": "", "mcp_servers": [], "native_tools": [],
              "defaults_json": {"model": "fake", "timeout": 5,
@@ -271,7 +272,7 @@ async def test_concurrent_closures_do_not_lose_other_agents_worker():
 
 async def test_live_outputs_match_call_ids_even_when_results_arrive_out_of_order():
     store = {}
-    progress = experts.make_progress_callback(store, None, "ids", "demo", "test")
+    progress = progress_mod.make_progress_callback(store, None, "ids", "demo", "test")
     await progress(phase="tool_call", tool="shell", cmd="build",
                    tool_call_id="build-id")
     await progress(phase="tool_call", tool="shell", cmd="test",

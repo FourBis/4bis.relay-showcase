@@ -127,13 +127,17 @@ async def test_workflow_metrics_and_replaced_parent_in_real_browser(tmp_path, mo
             await launcher.locator('.tab[data-tab="chat"]').click()
             await page.locator('button.chat-drawer-btn:visible').first.click()
             await page.locator(f'.chat-conv-item[data-id="{conv}"]').click()
-            await page.locator("#chat-panel-grafo").click()
-            await pw.expect(page.locator("#chat-grafo")).to_be_visible()
-            await pw.expect(page.locator("#chat-grafo-estado")).to_have_text("hecho")
-            await pw.expect(page.locator("#chat-grafo-conteo")).to_have_text("2/2 hechas · 1 subdividida")
+            conversation_window = page.locator(
+                f'article.workspace-window[data-window-id="object:conversation:{conv}"]')
+            await pw.expect(conversation_window).to_be_visible(timeout=10_000)
+            chat = conversation_window.frame_locator("iframe")
+            await chat.locator("#chat-panel-grafo").click()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_visible()
+            await pw.expect(chat.locator("#chat-grafo-estado")).to_have_text("hecho")
+            await pw.expect(chat.locator("#chat-grafo-conteo")).to_have_text("2/2 hechas · 1 subdividida")
 
             async def graph_layout():
-                return await page.locator("#chat-grafo").evaluate("""grafo => {
+                return await chat.locator("#chat-grafo").evaluate("""grafo => {
                     const rect = el => {
                         const box = el.getBoundingClientRect();
                         return {left: box.left, right: box.right, top: box.top,
@@ -153,73 +157,73 @@ async def test_workflow_metrics_and_replaced_parent_in_real_browser(tmp_path, mo
             normal_layout = await graph_layout()
             assert_graph_layout(normal_layout)
             normal_graph_width = normal_layout["grafo"]["width"]
-            await page.locator("#chat-grafo-ancho").click()
-            await pw.expect(page.locator("#chat-grafo")).to_have_class("chat-grafo ancho")
+            await chat.locator("#chat-grafo-ancho").click()
+            await pw.expect(chat.locator("#chat-grafo")).to_have_class("chat-grafo ancho")
             await page.wait_for_timeout(220)
             expanded_layout = await graph_layout()
             assert_graph_layout(expanded_layout)
             assert expanded_layout["grafo"]["width"] > normal_graph_width + 5, expanded_layout
-            await page.locator("#chat-grafo-ancho").click()
-            await pw.expect(page.locator("#chat-grafo")).to_have_class("chat-grafo")
+            await chat.locator("#chat-grafo-ancho").click()
+            await pw.expect(chat.locator("#chat-grafo")).to_have_class("chat-grafo")
             await page.wait_for_timeout(220)
             restored_layout = await graph_layout()
             assert_graph_layout(restored_layout)
             assert abs(restored_layout["grafo"]["width"] - normal_graph_width) <= 1.5, restored_layout
 
-            parent = page.locator('.gnodo[data-id="qa-parent"]')
+            parent = chat.locator('.gnodo[data-id="qa-parent"]')
             await pw.expect(parent).to_contain_text("subdividida")
             assert "fallado" not in (await parent.get_attribute("class")).split()
-            assert await page.locator("#chat-grafo-barra-mal").evaluate("el => el.style.width") == "0%"
+            assert await chat.locator("#chat-grafo-barra-mal").evaluate("el => el.style.width") == "0%"
             await parent.click()
-            await pw.expect(page.locator("#chat-grafo-detalle")).to_contain_text("Tarea conservada como historial")
-            await pw.expect(page.locator("#chat-grafo-detalle")).to_contain_text("subdividido en 2 subtareas")
-            await pw.expect(page.locator("#chat-grafo-detalle .gerror")).to_have_count(0)
+            await pw.expect(chat.locator("#chat-grafo-detalle")).to_contain_text("Tarea conservada como historial")
+            await pw.expect(chat.locator("#chat-grafo-detalle")).to_contain_text("subdividido en 2 subtareas")
+            await pw.expect(chat.locator("#chat-grafo-detalle .gerror")).to_have_count(0)
             await page.screenshot(path=str(evidence / "workflow-graph.png"))
-            await page.locator("#chat-grafo-tab-resumen").click()
-            row = page.locator('.gres-item[data-id="qa-parent"]')
+            await chat.locator("#chat-grafo-tab-resumen").click()
+            row = chat.locator('.gres-item[data-id="qa-parent"]')
             await pw.expect(row).to_contain_text("subdividida")
             assert "fallado" not in (await row.get_attribute("class")).split()
             await page.screenshot(path=str(evidence / "workflow-summary.png"))
 
             # Shrink the desktop workspace to exercise the 700px container query.
-            window_head = page.locator(".workspace-window[data-module='chat'] .workspace-window-head")
+            window_head = conversation_window.locator(".workspace-window-head")
             await pw.expect(window_head).to_have_count(1)
             await window_head.focus()
             for _ in range(11):
                 await window_head.press("Shift+ArrowLeft")
             await page.wait_for_timeout(100)
-            container_width = await page.locator(".chat-workspace").evaluate(
+            container_width = await chat.locator(".chat-workspace").evaluate(
                 "el => el.getBoundingClientRect().width")
             assert container_width <= 700, container_width
-            await pw.expect(page.locator(".chat-workspace .chat-main")).to_be_hidden()
-            await pw.expect(page.locator("#chat-grafo")).to_be_visible()
+            await pw.expect(chat.locator(".chat-workspace .chat-main")).to_be_hidden()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_visible()
             assert (await graph_layout())["overflow"] <= 1
 
-            chat_main = page.locator(".chat-workspace .chat-main")
-            await page.locator("#chat-grafo-cerrar").click()
-            await pw.expect(page.locator("#chat-grafo")).to_be_hidden()
+            chat_main = chat.locator(".chat-workspace .chat-main")
+            await chat.locator("#chat-grafo-cerrar").click()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_hidden()
             await pw.expect(chat_main).to_be_visible()
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
 
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.wait_for_timeout(100)
-            await pw.expect(page.locator("#chat-grafo")).to_be_hidden()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_hidden()
             await pw.expect(chat_main).to_be_visible()
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-            graph_open = page.locator("#chat-panel-grafo")
-            graph_close = page.locator("#chat-grafo-cerrar")
+            graph_open = chat.locator("#chat-panel-grafo")
+            graph_close = chat.locator("#chat-grafo-cerrar")
             await graph_open.click()
-            await pw.expect(page.locator("#chat-grafo")).to_be_visible()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_visible()
             await pw.expect(chat_main).to_be_hidden()
             await pw.expect(graph_close).to_be_focused()
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
             await graph_close.press("Enter")
-            await pw.expect(page.locator("#chat-grafo")).to_be_hidden()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_hidden()
             await pw.expect(chat_main).to_be_visible()
             await pw.expect(graph_open).to_be_focused()
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
             await graph_open.press("Enter")
-            await pw.expect(page.locator("#chat-grafo")).to_be_visible()
+            await pw.expect(chat.locator("#chat-grafo")).to_be_visible()
             await pw.expect(chat_main).to_be_hidden()
             await pw.expect(graph_close).to_be_focused()
             assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")

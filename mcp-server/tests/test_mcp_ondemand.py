@@ -14,6 +14,7 @@ Cómo correr:
     python -m pytest tests/test_mcp_ondemand.py -q
 """
 from __future__ import annotations
+from relay import expert_runner, expert_selection
 
 import asyncio
 import os
@@ -230,7 +231,7 @@ class TestRunExpertCatalog(unittest.IsolatedAsyncioTestCase):
 
         from relay import experts as experts_mod
         self._patch = patch.object(
-            experts_mod.mcp_pool_mod, "make_toolset", fake_make)
+            expert_selection.mcp_pool_mod, "make_toolset", fake_make)
         self._patch.start()
         self.addCleanup(self._patch.stop)
 
@@ -260,14 +261,14 @@ class TestRunExpertCatalog(unittest.IsolatedAsyncioTestCase):
         from pydantic_ai.models.function import FunctionModel
         texto = FunctionModel(
             lambda messages, info: ModelResponse(parts=[TextPart("ok")]))
-        with patch("relay.experts.build_model", return_value=texto):
+        with patch("relay.expert_models.build_model", return_value=texto):
             await run_expert(self.project, "hola", db=self.db,
                              model_override="fm")
         self.assertNotIn("postgres-demo", self.built)
         self.assertIn("files-global", self.built)
 
     async def test_seleccion_explicita_adjunta(self):
-        with patch("relay.experts.build_model",
+        with patch("relay.expert_models.build_model",
                    return_value=self._function_model()):
             result = await run_expert(
                 self.project, "cuántas órdenes?", db=self.db,
@@ -278,7 +279,7 @@ class TestRunExpertCatalog(unittest.IsolatedAsyncioTestCase):
     async def test_use_capability_re_corre(self):
         """Round 1: el modelo pide use_capability('db') → round 2 con
         postgres-demo adjunto responde."""
-        with patch("relay.experts.build_model",
+        with patch("relay.expert_models.build_model",
                    return_value=self._function_model()):
             result = await run_expert(
                 self.project, "cuántas órdenes?", db=self.db,

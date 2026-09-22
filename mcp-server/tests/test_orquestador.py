@@ -15,6 +15,7 @@ Eso se resuelve en dos capas y las dos se prueban acá:
 El loop recibe `ejecutar` inyectado, así que todo esto corre sin modelo.
 """
 from __future__ import annotations
+from relay import experts, expert_models, expert_runner, expert_selection, progress, orchestrator_execution
 
 import asyncio
 import json
@@ -826,7 +827,7 @@ async def test_el_ejecutor_llama_a_run_expert_con_kwargs_que_existen(db, tmp_pat
         ejecutar = orquestador.ejecutor_minimax(db, _proyecto(tmp_path), g)
         await ejecutar(g["tasks"][0])
 
-    acepta = set(inspect.signature(experts.run_expert).parameters)
+    acepta = set(inspect.signature(expert_runner.run_expert).parameters)
     de_mas = set(capturado) - acepta
     assert not de_mas, f"run_expert no acepta: {sorted(de_mas)}"
 
@@ -989,8 +990,8 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
     async def catalog(*args, **kwargs):
         return [FunctionToolset(tools=[Tool(checkpoint, takes_ctx=False)])], [], []
 
-    monkeypatch.setattr(experts, "build_model", lambda spec: FunctionModel(model))
-    monkeypatch.setattr(experts, "_catalog_toolsets", catalog)
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: FunctionModel(model))
+    monkeypatch.setattr(expert_selection, "_catalog_toolsets", catalog)
     await db.create_task_graph("g-cancel", "x", tareas=[{
         "id": "t1", "titulo": "Una", "idempotente": idempotente,
         "archivos": ["avance.txt"]}])
@@ -1539,7 +1540,7 @@ async def test_el_nodo_comparte_la_cola_steer_del_progreso(db, tmp_path, monkeyp
     started, resume = asyncio.Event(), asyncio.Event()
 
     def progreso_de(chat_id):
-        return experts.make_progress_callback(store, None, chat_id, "demo", "test")
+        return progress.make_progress_callback(store, None, chat_id, "demo", "test")
 
     async def fake_run_expert(proyecto, prompt, **kw):
         queue = kw["steer"]
@@ -1557,12 +1558,12 @@ async def test_el_nodo_comparte_la_cola_steer_del_progreso(db, tmp_path, monkeyp
     task = asyncio.create_task(ejecutar(graph["tasks"][0]))
     try:
         await asyncio.wait_for(started.wait(), 1)
-        progress = next(iter(store.values()))
-        progress.steer.append("Deja de explorar y verifica el endpoint concreto.")
+        run_progress = next(iter(store.values()))
+        run_progress.steer.append("Deja de explorar y verifica el endpoint concreto.")
         resume.set()
         assert (await asyncio.wait_for(task, 1))["ok"] is True
         assert seen == ["Deja de explorar y verifica el endpoint concreto."]
-        assert progress.steer == []
+        assert run_progress.steer == []
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -1584,7 +1585,7 @@ async def test_cancelar_autosplit_conserva_resultado_del_ejecutor(db, tmp_path, 
         await asyncio.Event().wait()
 
     monkeypatch.setattr(experts, "run_expert", run_expert)
-    monkeypatch.setattr(orquestador, "_intentar_autosplit", split)
+    monkeypatch.setattr(orchestrator_execution, "_intentar_autosplit", split)
     monkeypatch.setattr(config, "grafo_autosplit_habilitado", lambda: True)
     graph = await db.get_task_graph("g-split-cancel")
     execute = orquestador.ejecutor_minimax(db, _proyecto(tmp_path), graph)

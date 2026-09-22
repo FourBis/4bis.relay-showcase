@@ -59,7 +59,7 @@ async def env():
         }
         fake = _FakeNotify()
         with patch.dict("os.environ", env_vars, clear=False):
-            with patch("relay.server.NotifyClient", lambda **kw: fake):
+            with patch("relay.server_lifecycle.NotifyClient", lambda **kw: fake):
                 app = create_app()
                 server = TestServer(app)
                 cli = TestClient(server)

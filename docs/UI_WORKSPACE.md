@@ -35,6 +35,17 @@ abiertas en un espacio compartido.
 - Chat y grafo comparten el ancho disponible sin superponerse. Ampliar el grafo
   conserva al menos 320 px para la conversación; en ventanas de hasta 700 px
   se muestra uno a la vez y cerrar el plan recupera el chat.
+- Elegir una conversación de la lista, de la búsqueda o de la memoria la abre
+  directamente en su propia ventana. **Ordenar ventanas en mosaico** las coloca
+  lado a lado.
+  Cada conversación conserva su borrador y sus envíos de forma independiente.
+  Elegir nuevamente la misma conversación recupera su ventana. Consultar otro
+  hilo conserva el borrador de una nueva conversación en el chat principal.
+- Las ventanas y la bandeja muestran el proyecto, sin identificadores. El botón
+  **Renombrar** (lápiz en la cabecera) permite dar un nombre local a cada ventana;
+  se conserva al recargar y no cambia el ID ni el destino de los mensajes.
+  Los nombres largos se recortan visualmente con puntos suspensivos.
+
 - «Abrir en workspace» conserva una respuesta fuera del hilo. Desde ella se pueden
   separar tablas y gráficos SVG. Las tablas permiten filtrar filas y copiar TSV;
   las respuestas se copian como texto. «Ir a la conversación» recupera el origen.
@@ -54,6 +65,13 @@ no guarda el texto de las respuestas ni los datos de las tablas. Los objetos se
 recuperan desde la conversación y comprueban la huella de la respuesta antes de
 mostrarla. Si el origen cambia o desaparece, muestran un error con recuperación.
 
+Las ventanas de conversación guardan únicamente su referencia y disposición. Al
+recargar se recupera el historial del servidor; los borradores sin enviar no se
+guardan en localStorage. Minimizar o cerrar una ventana conserva su borrador
+durante esa carga de la página y no cierra la conversación ni cancela su tarea.
+Cada chat separado reutiliza la vista existente en un iframe del mismo origen,
+con estado independiente y sin duplicar la inicialización global del workspace.
+
 La disposición pertenece a este navegador. El workspace usa el área visible, no
 un canvas infinito. Las herramientas mantienen una instancia; las confirmaciones
 destructivas siguen siendo modales. Los objetos de chat son respuestas existentes,
@@ -61,7 +79,9 @@ no formularios o código ejecutable generados arbitrariamente por un modelo.
 
 Los refrescos registrados de módulos se ejecutan mientras su ventana esté visible
 y se pausan al minimizarla/cerrarla. El seguimiento de una conversación en ejecución
-continúa para conservar sus eventos. Ocultar una ventana no cancela trabajos del servidor.
+principal continúa para conservar sus eventos; los chats separados pausan las
+consultas al ocultarse y retoman al volver a mostrarse. Ocultar una ventana no
+cancela trabajos del servidor.
 El CSS y JS se sirven en vivo por el relay: cambios de frontend no requieren reinicio.
 
 ## Verificación runnable
@@ -76,5 +96,12 @@ mcp-server/.venv/Scripts/python.exe -m pytest mcp-server/tests/test_workspace_br
 Las pruebas de navegador usan Chrome y una base temporal; no envían conversaciones
 a proveedores ni modifican los datos reales. Cubren el flujo de ventanas, objetos,
 recuperación, foco y tamaños de pantalla.
+
+`node docs/qa/multi-chat-visual.mjs` comprueba los chats simultáneos contra una API
+sintética: borradores y envíos independientes, cierre, restauración y móvil. No
+envía mensajes a proveedores ni modifica el Relay que esté ejecutándose.
+`node docs/qa/task-panel-visual.mjs` revisa el panel de tarea con datos simulados,
+foco de teclado y ancho móvil. Ambos scripts requieren Playwright instalado en el
+entorno de pruebas; las capturas quedan en la carpeta temporal del sistema.
 
 Resultados y límites de esta entrega: [Validación](VALIDATION.md).

@@ -202,6 +202,7 @@ MEMBER_ALLOWED = frozenset({
     # `POST /experts/cancel/{chat_id}`, y reanudar no le da nada que no
     # consiga lanzando otro `POST /experts/run`.
     ("GET", "/conversations/{id}/plan"),
+    ("GET", "/conversations/{id}/task"),
     ("POST", "/graphs/{id}/resume"),
     ("POST", "/graphs/{id}/cancel"),
     # Contestar las preguntas del modo nocturno. No es "abrir night al

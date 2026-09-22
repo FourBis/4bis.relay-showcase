@@ -185,10 +185,10 @@ class TestVoiceEndpoints(unittest.IsolatedAsyncioTestCase):
             assert "hola esto es una prueba" in user
             return {"content": "Resumen: era una prueba.", "model": "test:m"}
 
-        from relay import experts, server as server_mod
+        from relay import experts, voice_routes
         with patch.object(voice, "transcribe_minimax", _fake_stt), \
              patch.object(experts, "run_expert", fake_expert), \
-             patch.dict(server_mod._voice_process_locks, clear=True):
+             patch.dict(voice_routes._voice_process_locks, clear=True):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
                 r = await client.post("/voice/transcribe", data=_form())
@@ -221,10 +221,10 @@ class TestVoiceEndpoints(unittest.IsolatedAsyncioTestCase):
         async def boom_expert(project, user, **kw):
             raise RuntimeError("modelo explotó")
 
-        from relay import experts, server as server_mod
+        from relay import experts, voice_routes
         with patch.object(voice, "transcribe_minimax", _fake_stt), \
              patch.object(experts, "run_expert", boom_expert), \
-             patch.dict(server_mod._voice_process_locks, clear=True):
+             patch.dict(voice_routes._voice_process_locks, clear=True):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
                 r = await client.post(

@@ -1,6 +1,7 @@
 """Tests de expertos (ADR-012): armado de prompt/modelo/toolsets y
 el endpoint POST /experts/run end-to-end con TestModel (sin red)."""
 from __future__ import annotations
+from relay import expert_history, expert_instructions, expert_models, expert_planning
 
 import re
 import os
@@ -28,33 +29,33 @@ from relay.server import create_app  # noqa: E402
 
 def test_build_model_test():
     from pydantic_ai.models.test import TestModel
-    assert isinstance(experts.build_model("test"), TestModel)
+    assert isinstance(expert_models.build_model("test"), TestModel)
 
 
 def test_build_model_minimax_sin_key():
     with patch.dict(os.environ, {"MINIMAX_API_KEY": ""}):
-        with pytest.raises(experts.ModelUnavailable):
-            experts.build_model("minimax:MiniMax-M3")
+        with pytest.raises(expert_models.ModelUnavailable):
+            expert_models.build_model("minimax:MiniMax-M3")
 
 
 def test_build_model_minimax_con_key():
     with patch.dict(config._runtime, {"MINIMAX_API_KEY": "test-key",
                                       "MINIMAX_BASE_URL": "https://api.minimax.io/v1"}):
-        model = experts.build_model("minimax:MiniMax-M3")
+        model = expert_models.build_model("minimax:MiniMax-M3")
         assert model.model_name == "MiniMax-M3"
 
 
 def test_build_model_passthrough():
     # Un provider desconocido conserva el spec para el SDK consumidor.
-    assert experts.build_model("custom:model") == "custom:model"
+    assert expert_models.build_model("custom:model") == "custom:model"
 
 
 def test_build_model_openai_uses_configured_credentials():
     with patch.dict(config._runtime, {"OPENAI_API_KEY": "test-key",
                                       "secret:OPENAI_API_KEY": "test-key"}), patch.dict(
-        experts._catalog, {"openai:gpt-5": {"api_key_env": "OPENAI_API_KEY"}}
+        expert_models._catalog, {"openai:gpt-5": {"api_key_env": "OPENAI_API_KEY"}}
     ):
-        assert experts.build_model("openai:gpt-5").model_name == "gpt-5"
+        assert expert_models.build_model("openai:gpt-5").model_name == "gpt-5"
 
 
 def test_structured_output_settings_deepseek_v4():
@@ -62,17 +63,17 @@ def test_structured_output_settings_deepseek_v4():
     corriera sobre deepseek-v4 moría con 400 'Thinking mode does not
     support this tool_choice' (el night plan no se generaba nunca)."""
     for spec in ("deepseek-v4-pro", "openai:deepseek-v4-flash", "DeepSeek-V4-Pro"):
-        assert experts.structured_output_settings(spec) == {
+        assert expert_models.structured_output_settings(spec) == {
             "extra_body": {"thinking": {"type": "disabled"}}}, spec
     # El resto de los providers no tiene el bug: no les tocamos nada.
     for spec in ("minimax:MiniMax-M3", "anthropic:claude-opus-5", "test", ""):
-        assert experts.structured_output_settings(spec) is None, spec
+        assert expert_models.structured_output_settings(spec) is None, spec
 
 
 def test_build_instructions_orden():
     project = {"slug": "inventorydemo", "repo_path": "C:/x/INVENTORYDEMO",
                "system_prompt": "SOS EXPERTO INVENTORYDEMO"}
-    out = experts.build_instructions(project, "PONYTAIL", "SKILLS")
+    out = expert_instructions.build_instructions(project, "PONYTAIL", "SKILLS")
     # orden: ponytail → proyecto → skills → workspace
     assert out.index("PONYTAIL") < out.index("SOS EXPERTO INVENTORYDEMO") \
         < out.index("SKILLS") < out.index("## Workspace abierto")
@@ -81,7 +82,7 @@ def test_build_instructions_orden():
 
 def test_build_instructions_partes_vacias():
     project = {"slug": "x", "repo_path": "C:/x", "system_prompt": ""}
-    out = experts.build_instructions(project, "", "")
+    out = expert_instructions.build_instructions(project, "", "")
     assert out.startswith("## Workspace abierto")  # sin dobles \n\n huérfanos
 
 
@@ -95,7 +96,7 @@ def test_build_instructions_trae_la_regla_de_lotes_siempre():
     adjunto, y ese run no usó el browser. Este bloque va siempre.
     """
     project = {"slug": "x", "repo_path": "C:/x", "system_prompt": ""}
-    out = experts.build_instructions(project, "", "")
+    out = expert_instructions.build_instructions(project, "", "")
     assert "## Lotes de artefactos" in out
     # Lo que hace la regla accionable: comparar, no mirar.
     assert "sha256sum" in out or "Get-FileHash" in out
@@ -122,7 +123,7 @@ def test_evidence_block_nombra_tools_que_existen():
     y —si el clone está instalado en esta máquina— cada `browser_*` que
     el bloque menciona tiene que existir de verdad en su README.
     """
-    bloque = experts.EVIDENCE_BLOCK
+    bloque = expert_instructions.EVIDENCE_BLOCK
 
     # 1. Los nombres del módulo huérfano no vuelven. Son genéricos a
     #    propósito (`navigate`, `get_text`): con backtick y paréntesis
@@ -336,7 +337,7 @@ def test_slim_history_deja_una_respuesta_por_turno():
     from pydantic_ai.messages import (
         ModelResponse, TextPart, ToolCallPart, ToolReturnPart,
     )
-    slim = experts._slim_history(_hist_dos_turnos())
+    slim = expert_history._slim_history(_hist_dos_turnos())
 
     responses = [m for m in slim if isinstance(m, ModelResponse)]
     assert len(responses) == 1, "sobrevivió narración de mitad de run"
@@ -359,7 +360,7 @@ def test_slim_history_no_toca_el_ultimo_turno():
                              ToolCallPart("list_dir", {"p": "web"},
                                           tool_call_id="c3")]),
     ]
-    slim = experts._slim_history(hist)
+    slim = expert_history._slim_history(hist)
     partes = [p for m in slim for p in m.parts]
     assert any(isinstance(p, ToolCallPart) and p.tool_call_id == "c3"
                for p in partes)
@@ -385,7 +386,7 @@ def test_slim_history_con_corte_tambien_poda_el_ultimo_turno():
                                            tool_call_id="c3")]),
         ModelResponse(parts=[TextPart(content="Qué se hizo: nada útil.")]),
     ]
-    slim = experts._slim_history(hist, corte=len(hist))
+    slim = expert_history._slim_history(hist, corte=len(hist))
 
     partes = [p for m in slim for p in m.parts]
     assert not any(isinstance(p, (ToolCallPart, ToolReturnPart))
@@ -491,11 +492,11 @@ ABRE_ALGO_NUEVO = [
 
 @pytest.mark.parametrize("texto", RETOMA)
 def test_es_continuacion_reconoce_lo_que_retoma(texto):
-    assert experts._es_continuacion(texto), texto
+    assert expert_planning._es_continuacion(texto), texto
 
 
 @pytest.mark.parametrize("texto", ABRE_ALGO_NUEVO)
 def test_es_continuacion_no_se_come_un_pedido_nuevo(texto):
     """El falso positivo es el caro: apaga el grafo y el pedido grande
     se ejecuta igual hasta morir por presupuesto."""
-    assert not experts._es_continuacion(texto), texto
+    assert not expert_planning._es_continuacion(texto), texto

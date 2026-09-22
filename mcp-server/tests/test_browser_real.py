@@ -1,3 +1,4 @@
+from relay import expert_models, expert_runner
 """Opt-in: RELAY_TEST_PLAYWRIGHT_MCP=<cli.js instalado>, Chrome local.
 
 Usa el MCP de Node real, perfil aislado, HTTP y archivos temporales. El
@@ -75,8 +76,8 @@ async def test_browser_capture_reaches_model_and_user(tmp_path, monkeypatch):
             model_history.extend(copy.deepcopy(messages))
             return ModelResponse(parts=[TextPart("Flujo comprobado.")])  # sin citar ids
 
-        monkeypatch.setattr(experts, "build_model", lambda spec: FunctionModel(model))
-        result = await experts.run_expert(await db.get_project("browser-test"), "Prueba aislada",
+        monkeypatch.setattr(expert_models, "build_model", lambda spec: FunctionModel(model))
+        result = await expert_runner.run_expert(await db.get_project("browser-test"), "Prueba aislada",
                                          db=db, model_override="function", mcp_with=["browser-test"])
         assert result["content"].startswith("Flujo comprobado."), result["content"]
         assert result["tool_calls"] == len(steps)

@@ -25,9 +25,13 @@ import { attachGrafo, detachGrafo, pokeGrafo, wireGrafoPanel, planEnCurso } from
 import { aplicarAnchosGuardados } from "./panel-resize.js";
 import { openConvDiff } from "./chat-diff.js";
 import { openChatObject } from "./chat-objects.js";
+import { mountTaskPanel } from "./chat-task.js";
+import { setTaskWorkspaceContext, openConversationWindow } from "./workspace.js";
+import { announceEmbeddedChat, getEmbeddedConversation, isChatViewVisible } from "./chat-window.js";
 
 // --- estado ----------------------------------------------------------
-// Ponytail: una conversación activa por vez (la UI es single-pane).
+// Una conversación por contexto de navegador; las ventanas separadas
+// reutilizan este controlador con su propio DOM y estado.
 let activeChat = null;   // {convId, projectSlug, currentChatId, busy, readOnly}
 let convCache = [];      // última lista de /conversations (para filtrar client-side)
 // Catálogo de /admin/api/models. `chosenModel` vacío = "el del proyecto",
@@ -43,6 +47,16 @@ let modelCatalog = [];
 let chosenModel = globalThis.localStorage?.getItem("chat.model") || "";
 let chatObjectBackWired = false;
 let chatSelectionGeneration = 0;
+let taskPanel = null;
+
+function newRequestId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export function steerRequestPayload(message, requestId) {
+  return { message, request_id: requestId };
+}
 
 function selectionIsCurrent(generation, convId = null) {
   return generation === chatSelectionGeneration
@@ -136,7 +150,7 @@ function renderConvList() {
   if (closed.length) html += group("Cerradas", closed);
   list.innerHTML = html;
   $$(".chat-conv-item").forEach((el) =>
-    el.addEventListener("click", () => selectConversation(el.dataset.id)));
+    el.addEventListener("click", () => navigateConversation(el.dataset.id)));
 }
 
 function group(title, convs) {
@@ -253,6 +267,13 @@ function wireChatDrawer() {
 // PANEL: seleccionar y renderizar una conversación
 // =====================================================================
 
+export function navigateConversation(convId) {
+  if (getEmbeddedConversation()) return selectConversation(convId);
+  setChatDrawer(false);
+  const meta = convCache.find(conversation => conversation.id === convId);
+  return openConversationWindow({ id: convId, project_slug: meta?.project_slug });
+}
+
 export async function selectConversation(convId) {
   const generation = ++chatSelectionGeneration;
   setChatDrawer(false);
@@ -261,12 +282,14 @@ export async function selectConversation(convId) {
     if (generation !== chatSelectionGeneration) return;
     if (!meta || meta.error) {
       toast("No se pudo cargar la conversación: " + (meta?.error ?? "404"), "err");
-      return;
+      return false;
     }
     await openConversation(meta, generation);
+    return true;
   } catch (e) {
     if (generation !== chatSelectionGeneration) return;
     toast("No se pudo abrir la conversación: " + e.message, "err");
+    return false;
   }
 }
 
@@ -281,7 +304,20 @@ async function openConversation(meta, generation) {
     currentChatId: null,
     busy: false,
     readOnly,
+    mode: meta.read_only ? "consultation" : "change",
+    publishAllowed: !!meta.publish_allowed,
   };
+  setTaskWorkspaceContext({ conversationId: meta.id, projectSlug: meta.project_slug });
+  taskPanel?.destroy();
+  taskPanel = mountTaskPanel({
+    convId: meta.id,
+    onContinue: () => reopenConversation(meta.id),
+    onTaskUpdate: (task, previous) => handleTaskUpdate(meta, task, previous, generation),
+  });
+  // Cambiar el plan antes de esperar metadatos: una respuesta lenta no debe
+  // dejar el grafo de la conversación anterior bajo el nuevo encabezado.
+  attachGrafo(meta.id);
+
   showMainView("convo");
   renderConvList();  // refrescar highlight del sidebar
   $("#chat-draft-project").hidden = true;  // por si venías de un borrador
@@ -296,6 +332,7 @@ async function openConversation(meta, generation) {
     summaryEl.hidden = true;
     summaryEl.textContent = "";
   }
+  renderTaskMode(meta);
 
   // Input vs read-only.
   $("#chat-input-bar").hidden = readOnly;
@@ -318,16 +355,11 @@ async function openConversation(meta, generation) {
   if (!selectionIsCurrent(generation, meta.id)) return;
 
   renderSuggestions([]);   // las del hilo anterior no valen para éste
-  // El panel del plan se engancha ACÁ y no al final: más abajo hay
-  // `return`s tempranos (el de `resumeRunningChat`, sobre todo) y con
-  // el enganche al final una conversación con un run en curso se abría
-  // mostrando el plan de la conversación ANTERIOR. Justo el caso que
-  // más se mira.
-  attachGrafo(meta.id);
   await loadMessages(meta.id);
   if (!selectionIsCurrent(generation, meta.id)) return;
   setBusy(false);
-  if (!readOnly) $("#chat-panel-input").focus();
+  // Una ventana que termina de cargar no debe quitar el foco a otra.
+  if (!readOnly && !getEmbeddedConversation()) $("#chat-panel-input").focus();
 
   // ¿Hay un run EN CURSO para esta conversación? Puede haber arrancado
   // antes de este page load (recargaste en medio), desde Discord, o desde
@@ -348,18 +380,78 @@ async function openConversation(meta, generation) {
   if (!readOnly) refreshChatQuestions(meta.id, generation);
 }
 
+function renderTaskMode(meta) {
+  const el = $("#chat-task-mode");
+  if (!el) return;
+  let taskMeta = meta.task_json;
+  if (typeof taskMeta === "string") {
+    try { taskMeta = JSON.parse(taskMeta); } catch (_) { taskMeta = null; }
+  }
+  const mode = (taskMeta?.mode || (meta.read_only ? "read_only" : "write")) === "read_only"
+    ? "Consulta" : "Cambio con PR";
+  el.textContent = mode === "Consulta" || (taskMeta?.publish_allowed ?? meta.publish_allowed)
+    ? mode : `${mode} · publicación apagada`;
+  el.hidden = false;
+}
+
+function taskSnapshot(task) {
+  if (!task) return "";
+  const event = task.last_event || {};
+  return JSON.stringify([
+    task.state || "", task.head_sha || "", event.id || "",
+    event.state || "", event.chat_id || "",
+  ]);
+}
+
+async function handleTaskUpdate(meta, task, previous, generation) {
+  if (!task || !selectionIsCurrent(generation, meta.id)) return;
+  const chat = activeChat;
+  const mode = task.mode || "";
+  chat.mode = mode === "read_only" ? "consultation" : "change";
+  chat.publishAllowed = !!task.publish_allowed;
+  chat.readOnly = meta.status !== "open";
+  renderTaskMode({ ...meta, task_json: task });
+  const snapshot = taskSnapshot(task);
+  // La apertura ya carga mensajes y reconecta el run anterior.
+  if (chat.lastTaskSnapshot === undefined) {
+    chat.lastTaskSnapshot = snapshot;
+    return;
+  }
+  if (snapshot === chat.lastTaskSnapshot) return;
+  // No consumir una novedad mientras el envío actual aún pinta su respuesta.
+  if (!chat.busy && !chat.taskResumeInFlight && !chat.readOnly) {
+    chat.taskResumeInFlight = true;
+    try {
+      await resumeRunningChat(meta.id, generation);
+      if (selectionIsCurrent(generation, meta.id) && !activeChat.busy) {
+        await loadMessages(meta.id);
+      }
+      chat.lastTaskSnapshot = snapshot;
+    } finally { chat.taskResumeInFlight = false; }
+  }
+}
+
+async function reopenConversation(convId) {
+  try {
+    if (await selectConversation(convId)) toast("Conversación reabierta", "ok");
+  } catch (e) { toast("No se pudo continuar: " + e.message, "err"); }
+}
+
 // Busca un chat `running` de esta conversación y engancha el polling.
 // Devuelve true si retomó uno.
 async function resumeRunningChat(convId, generation) {
   try {
-    const r = await apiRoot("/chats?status=running&limit=50");
+    const [running, queued] = await Promise.all([
+      apiRoot("/chats?status=running&limit=50"),
+      apiRoot("/chats?status=queued&limit=50").catch(() => ({ chats: [] })),
+    ]);
     if (!selectionIsCurrent(generation, convId)) return false;
     // `source !== "grafo"`: los nodos de un plan corren como chats del
     // MISMO hilo. Sin el filtro, abrir una conversación con el plan
     // trabajando enganchaba el polling a un NODO — el composer se ponía
     // en "ocupado" por un run que no era del humano, y al cerrar el nodo
     // sonaba el chime de "terminó" con el plan a mitad de camino.
-    const run = (r.chats || []).find(
+    const run = [...(running.chats || []), ...(queued.chats || [])].find(
       (c) => c.conversation_id === convId && (c.source || "") !== "grafo");
     if (!run) return false;
     activeChat.currentChatId = run.id;
@@ -382,7 +474,9 @@ function showMainView(which) {
 
 function renderHeader(meta, generation = chatSelectionGeneration) {
   const slug = meta.project_slug || activeChat?.projectSlug || "?";
-  $("#chat-panel-title").textContent = `${slug} · ${meta.id.slice(0, 8)}`;
+  announceEmbeddedChat({ conversationId: meta.id, projectSlug: slug,
+    title: meta.title || slug });
+  $("#chat-panel-title").textContent = slug;
 
   const stEl = $("#chat-convo-status");
   stEl.textContent = meta.status;
@@ -1276,7 +1370,7 @@ function wireChatObjects() {
     chatObjectBackWired = true;
     window.addEventListener("chat-object-back", (ev) => {
       const id = ev.detail?.conversationId;
-      if (id) selectConversation(id);
+      if (id) navigateConversation(id);
     });
   }
 }
@@ -1327,7 +1421,9 @@ function updateBusyStatus(s) {
     // mientras el experto trabaja.
     const tin = s.tokens_in || 0;
     const tok = tin ? ` · ${Math.round(tin / 1000)}k tok` : "";
-    if (s.phase === "tool_call") {
+    if (s.status === "queued") {
+      b.textContent = "⌛ en cola…";
+    } else if (s.phase === "tool_call") {
       const n = s.tool_calls || 0;
       const tool = s.last_tool ? ` ${s.last_tool}` : "";
       b.textContent = `🔧${tool} · ${n} tool${n === 1 ? "" : "s"} · ${secs}s${tok}`;
@@ -1414,10 +1510,16 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
   const POLL_MS = 1500;
   while (selectionIsCurrent(generation, convId)
       && activeChat.currentChatId === chatId) {
+    if (!isChatViewVisible()) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      continue;
+    }
     let finished = false, err = null;
     try {
       const s = await apiRoot(`/experts/status/${encodeURIComponent(chatId)}`);
-      finished = !!s.finished;
+      // Un run en cola no terminó aunque un backend antiguo envíe
+      // `finished` por defecto; conservar el polling evita un fin espurio.
+      finished = s.status !== "queued" && !!s.finished;
       if (s.error) err = s.error;
       if (!selectionIsCurrent(generation, convId)) return;
       if (!finished) updateBusyStatus(s);
@@ -1480,17 +1582,25 @@ function appendCommandReply(label, text) {
 async function steerCurrentRun(text) {
   const id = activeChat?.currentChatId;
   if (!id) { toast("El run recién arranca — prueba en un segundo", "warn"); return; }
+  if (!activeChat.pendingSteer || activeChat.pendingSteer.text !== text) {
+    activeChat.pendingSteer = { text, requestId: newRequestId() };
+  }
   try {
-    await apiRoot(`/experts/steer/${encodeURIComponent(id)}`, {
-      method: "POST", body: JSON.stringify({ message: text }),
+    const r = await apiRoot(`/experts/steer/${encodeURIComponent(id)}`, {
+      method: "POST", body: JSON.stringify(steerRequestPayload(
+        activeChat.pendingSteer.text, activeChat.pendingSteer.requestId)),
     });
+    activeChat.pendingSteer = null;
     $("#chat-panel-input").value = "";
     // Sin burbuja optimista a propósito: el 🧭 lo pinta el poll cuando el
     // experto REALMENTE cortó y la tomó. Así ves si se aplicó o no.
-    toast("Corrección encolada — se aplica al terminar la tool en curso", "ok");
+    toast(r?.durable && r?.phase === "queued"
+      ? "Mensaje guardado; se ejecutará al terminar el turno actual"
+      : "Corrección encolada — se aplica al terminar la tool en curso", "ok");
   } catch (e) {
     if (e.status === 409 || e.status === 404) {
       // Terminó entre que escribiste y mandaste: es un mensaje normal.
+      activeChat.pendingSteer = null;
       setBusy(false);
       await sendCurrentMessage();
       return;
@@ -1735,6 +1845,7 @@ async function sendCurrentMessage() {
     const convId = await createDraftConversation(activeChat.projectSlug);
     if (!convId) { inp.value = text; setBusy(false); return; }
     activeChat.convId = convId;
+    setTaskWorkspaceContext({ conversationId: convId, projectSlug: activeChat.projectSlug });
     activeChat.draft = false;
     $("#chat-draft-project").hidden = true;
     $("#chat-panel-messages").innerHTML = "";
@@ -1750,6 +1861,9 @@ async function sendCurrentMessage() {
   renderAttachTray();
   // Queda pendiente hasta que el relay lo persista (al terminar el run).
   activeChat.pendingUserText = text;
+  // Se conserva si el POST falla: el siguiente click reintenta el mismo
+  // intento lógico y el backend puede deduplicarlo.
+  activeChat.pendingRequestId ||= newRequestId();
   appendOptimisticUser(
     text + (enviados.length ? `\n📎 ${enviados.map((a) => a.name).join(", ")}` : ""));
   try {
@@ -1765,6 +1879,7 @@ async function sendCurrentMessage() {
         // usuario mandó.
         user: text || "Mira el adjunto.",
         conversation: activeChat.convId, source: "ui", author: "ui",
+        request_id: activeChat.pendingRequestId,
         ...(chosenModel ? { model: chosenModel } : {}),
         ...(Object.keys(chosenStageModels).length
           ? { stage_models: { ...chosenStageModels } } : {}),
@@ -1778,6 +1893,7 @@ async function sendCurrentMessage() {
     // en command_logs, que es donde se audita.
     if (r.command && typeof r.text === "string") {
       activeChat.pendingUserText = null;
+      activeChat.pendingRequestId = null;
       appendCommandReply(`!${r.command}`, r.text);
       setBusy(false);
       return;
@@ -1793,6 +1909,7 @@ async function sendCurrentMessage() {
             "elegiste no se usó.", "warn");
     }
     activeChat.currentChatId = r.id;
+    activeChat.pendingRequestId = null;
     // OJO: NO llamar loadMessages() acá. La conversación se persiste recién
     // al terminar el run, así que re-renderizar ahora borra la burbuja
     // optimista y el usuario ve desaparecer su propio prompt. Los pasos en
@@ -2019,6 +2136,10 @@ export async function viewChat(id) {
 // vacías bloqueando el "ya hay una abierta" (409).
 
 async function openNewChatDraft() {
+  if (getEmbeddedConversation()) {
+    toast("Abre una nueva conversación desde el chat principal.", "info");
+    return;
+  }
   const sel = $("#chat-draft-project");
   if (!sel) { toast("UI de chats no montada (refresca)", "err"); return; }
   const generation = ++chatSelectionGeneration;
@@ -2033,9 +2154,15 @@ async function openNewChatDraft() {
 
   activeChat = {
     convId: null, projectSlug: sel.value, currentChatId: null,
-    busy: false, readOnly: false, draft: true,
+    busy: false, readOnly: false, draft: true, mode: "change",
+    publishAllowed: true,
   };
-  sel.onchange = () => { if (activeChat?.draft) activeChat.projectSlug = sel.value; };
+  setTaskWorkspaceContext({ conversationId: "", projectSlug: activeChat.projectSlug });
+  sel.onchange = () => {
+    if (!activeChat?.draft) return;
+    activeChat.projectSlug = sel.value;
+    setTaskWorkspaceContext({ conversationId: "", projectSlug: sel.value });
+  };
 
   showMainView("convo");
   renderConvList();
@@ -2045,6 +2172,10 @@ async function openNewChatDraft() {
   $("#chat-convo-status").textContent = "borrador";
   $("#chat-convo-status").className = "badge dim";
   $("#chat-panel-meta").textContent = "se crea al mandar el primer mensaje";
+  $("#chat-task-mode").hidden = true;
+  renderDraftMode();
+  taskPanel?.destroy();
+  taskPanel = null;
   for (const id of ["#chat-panel-link-discord", "#chat-panel-unlink-discord",
                     "#chat-panel-follow-mobile", "#chat-panel-chime",
                     "#chat-panel-close-conv", "#chat-panel-vscode",
@@ -2053,22 +2184,53 @@ async function openNewChatDraft() {
                     "#chat-panel-diff"]) $(id).hidden = true;
   $("#chat-summary").hidden = true;
   $("#chat-panel-messages").innerHTML =
-    `<div class="chat-banner"><div class="chat-banner-title">💬 Nueva conversación</div>
+    `<div id="chat-draft-mode" class="chat-task-mode-picker" role="group" aria-label="Tipo de conversación">
+       <span class="label">Tipo</span>
+       <button type="button" class="btn btn-xs btn-primary" data-chat-mode="change" aria-pressed="true">Cambio con PR</button>
+       <button type="button" class="btn btn-xs" data-chat-mode="consultation" aria-pressed="false">Consulta</button>
+       <span class="text-xs text-zinc-400">Consulta no crea worktree ni publica.</span>
+     </div>
+     <div class="chat-banner"><div class="chat-banner-title">💬 Nueva conversación</div>
      <div class="chat-banner-hint">Escribe abajo el primer mensaje (Ctrl+Enter envía).
-     Al enviarlo se abre la rama de trabajo del proyecto.</div></div>`;
+     El tipo elegido se guarda con el hilo.</div></div>`;
+  $("#chat-draft-mode")?.querySelectorAll("[data-chat-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeChat.mode = button.dataset.chatMode;
+      activeChat.publishAllowed = activeChat.mode === "change";
+      renderDraftMode();
+    });
+  });
   $("#chat-input-bar").hidden = false;
   $("#chat-readonly-note").hidden = true;
   setBusy(false);
   $("#chat-panel-input").focus();
 }
 
+function renderDraftMode() {
+  const mode = $("#chat-draft-mode");
+  if (!mode) return;
+  mode.hidden = false;
+  mode.querySelectorAll("[data-chat-mode]").forEach((button) => {
+    const selected = button.dataset.chatMode === activeChat?.mode;
+    button.setAttribute("aria-pressed", String(selected));
+    button.classList.toggle("btn-primary", selected);
+  });
+}
+
 // Crea la conversación del borrador. Devuelve el id, o null si falló
 // (con el porqué en un toast — el texto del composer lo restaura el caller).
 async function createDraftConversation(slug) {
   try {
-    return (await apiRoot("/conversations", {
-      method: "POST", body: JSON.stringify({ project: slug }),
-    })).id;
+    const created = await apiRoot("/conversations", {
+      method: "POST", body: JSON.stringify({
+        project: slug,
+        request_id: (activeChat.pendingConversationRequestId ||= newRequestId()),
+        read_only: activeChat?.mode === "consultation",
+        publish_allowed: activeChat?.mode === "change" && !!activeChat?.publishAllowed,
+      }),
+    });
+    activeChat.pendingConversationRequestId = null;
+    return created.id;
   } catch (e) {
     toast(newChatErrorText(e, slug), "err", 9000);
     return null;
@@ -2467,7 +2629,7 @@ async function searchMemories(skipQuery) {
       </tr>`;
     }).join("");
     $$(".mem-row").forEach((tr) =>
-      tr.addEventListener("click", () => { showMainView("convo"); selectConversation(tr.dataset.id); }));
+      tr.addEventListener("click", () => navigateConversation(tr.dataset.id)));
     $$(".mem-del").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); deleteMemory(b.dataset.id); }));
   } catch (e) {

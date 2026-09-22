@@ -16,7 +16,7 @@
 
 import { $, $$, api, escape, _dbg } from "./api.js";
 import { toast } from "./ui.js";
-import { selectConversation, viewChat } from "./tab-chats.js";
+import { navigateConversation, viewChat } from "./tab-chats.js";
 
 const MIN_CHARS = 2;
 const DEBOUNCE_MS = 180;
@@ -79,17 +79,17 @@ async function _openAdmin(slug) {
 
 async function _openChat(chatId, conversationId) {
   // Workspace unificado (2026-07-20e): si el chat tiene conversación, la
-  // abrimos en el panel; si no, caemos al .md viewer. selectConversation
+  // abrimos en su ventana; si no, caemos al .md viewer. navigateConversation
   // no depende de la lista del sidebar (fetch directo por id), así que
   // corre apenas cambia el tab.
   await new Promise((r) => setTimeout(r, 60));
-  if (conversationId) selectConversation(conversationId);
+  if (conversationId) navigateConversation(conversationId);
   else viewChat(chatId);
 }
 
 async function _openConv(convId) {
   await new Promise((r) => setTimeout(r, 60));
-  selectConversation(convId);
+  navigateConversation(convId);
 }
 
 function _render() {

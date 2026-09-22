@@ -153,7 +153,7 @@ async def test_index_now_sin_cbm_degrada_honesto(env):
     cli, db, tmp = env
     repo = tmp / "sin-cbm"
     repo.mkdir()
-    with patch("relay.admin.cbm_binary_path", return_value=None):
+    with patch("relay.admin_project_lifecycle.cbm_binary_path", return_value=None):
         r = await cli.post("/admin/api/projects", json={
             "repo_path": str(repo), "index_now": True,
         })

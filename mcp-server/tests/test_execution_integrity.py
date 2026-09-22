@@ -1,3 +1,6 @@
+from relay import git_process
+from relay import expert_models, expert_runner, expert_staged_runner, expert_stages, expert_verdicts
+from relay import server_common, server_expert_jobs, server_expert_routes, server_lifecycle
 """Regresiones de concurrencia, persistencia y SQL sin servicios externos."""
 import asyncio
 import gc
@@ -49,8 +52,8 @@ async def test_sqlite_respects_file_veto_even_when_connection_can_write(db, tmp_
             "conexion": str(path), "sql": "SELECT * FROM hidden"})])
     project = await db.get_project("demo")
     project["defaults_json"] = {"rutas_vedadas": ["private"]}
-    with patch.object(experts, "build_model", return_value=FunctionModel(model)):
-        result = await experts.run_expert(project, "query", db=db, model_override="function")
+    with patch.object(expert_models, "build_model", return_value=FunctionModel(model)):
+        result = await expert_runner.run_expert(project, "query", db=db, model_override="function")
     output = result["content"]
     assert "vedadas" in output
     assert "confidential" not in output
@@ -68,7 +71,7 @@ def test_nested_extra_root_cannot_remove_a_file_veto(tmp_path):
 def test_unstructured_verifier_text_cannot_approve():
     from relay import experts
     for text in ("No he podido revisar", "This is not complete yet"):
-        verdict, _, steps = experts._parse_verifier(text)
+        verdict, _, steps = expert_verdicts._parse_verifier(text)
         assert verdict != "complete"
         assert not steps
 
@@ -77,9 +80,9 @@ async def test_invalid_verifier_is_reported_as_unverified(monkeypatch):
     from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import FunctionModel
     from relay import experts
-    monkeypatch.setattr(experts, "build_model", lambda spec: FunctionModel(
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: FunctionModel(
         lambda messages, info: ModelResponse(parts=[TextPart("This is not complete yet")])) )
-    verdict, feedback, usage, error, steps = await experts._run_verifier(
+    verdict, feedback, usage, error, steps = await expert_stages._run_verifier(
         user="pedido", plan="1. verificar", executor_result={"content": "listo"},
         model_spec="function", ponytail="")
     assert verdict == "needs_human" and error and not steps
@@ -92,8 +95,8 @@ async def test_expired_stage_budget_does_not_call_model(monkeypatch):
     from relay import experts
     def forbidden(*args):
         pytest.fail("presupuesto agotado: no debe iniciar otra petición al proveedor")
-    monkeypatch.setattr(experts, "build_model", lambda spec: FunctionModel(forbidden))
-    verdict, _, _, error, steps = await experts._run_verifier(user="pedido", plan="1. probar",
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: FunctionModel(forbidden))
+    verdict, _, _, error, steps = await expert_stages._run_verifier(user="pedido", plan="1. probar",
         executor_result={"content": "parcial"}, model_spec="function", ponytail="", deadline=0)
     assert verdict == "needs_human" and "TimeoutError" in error and not steps
 
@@ -108,9 +111,9 @@ async def test_request_deadline_is_shared_with_planner_and_executor(monkeypatch)
     async def executor(project, user, **kwargs):
         assert kwargs["deadline_pedido"] == deadline
         return dict(content="hola", phase_at_end="done", tool_calls=0)
-    monkeypatch.setattr(experts, "_run_planner", planner)
-    monkeypatch.setattr(experts, "run_expert", executor)
-    result = await experts.run_expert_staged(dict(repo_path="", defaults_json={"verifier": False}),
+    monkeypatch.setattr(expert_stages, "_run_planner", planner)
+    monkeypatch.setattr(expert_runner, "run_expert", executor)
+    result = await expert_staged_runner.run_expert_staged(dict(repo_path="", defaults_json={"verifier": False}),
                                             "hola", deadline_pedido=deadline)
     assert result["content"]
 
@@ -141,8 +144,8 @@ async def test_jsonl_ignores_non_object_records(tmp_path, monkeypatch):
 @pytest.mark.parametrize("status", [0, 128])
 async def test_git_warnings_do_not_become_parsed_stdout(monkeypatch, status):
     from relay import git_flow
-    monkeypatch.setattr(git_flow, "_git_out", AsyncMock(return_value=(status, "", "warning: ignore inaccessible")))
-    rc, output = await git_flow._git("repo", "status", "--porcelain")
+    monkeypatch.setattr(git_process, "_git_out", AsyncMock(return_value=(status, "", "warning: ignore inaccessible")))
+    rc, output = await git_process._git("repo", "status", "--porcelain")
     assert rc == status
     assert output == ("warning: ignore inaccessible" if status else "")
 
@@ -177,7 +180,7 @@ async def test_generated_images_are_persisted_and_notified_without_llm_citation(
         return dict(content="listo", image_artifacts={aid: path.name}, phase_at_end="done",
                     three_stage=True, verifier_verdict="complete", model="test")
     monkeypatch.setattr(server.experts, "run_expert_staged", runner)
-    monkeypatch.setattr(server, "_suggest_followups", AsyncMock(return_value=[]))
+    monkeypatch.setattr(server_expert_jobs, "_suggest_followups", AsyncMock(return_value=[]))
     notify = AsyncMock()
     await server._run_expert_bg(db=db, notify=notify, running={}, progress={}, chat_id=cid,
         project=await db.get_project("demo"), user="capturar", skills_block="", system_extra="",
@@ -210,7 +213,7 @@ def app(db, monkeypatch):
     app[server.PROGRESS_KEY] = {}
     app[server.NOTIFY_KEY] = AsyncMock()
     app[server.BG_TASKS_KEY] = set()
-    monkeypatch.setattr(server, "_get_api_key", lambda: "")
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
     monkeypatch.setattr(server.relay_config, "default_discord_user", lambda: ("", ""))
     monkeypatch.setattr(server.git_flow, "is_git_repo", AsyncMock(return_value=False))
     monkeypatch.setattr(persist, "append_jsonl", AsyncMock())
@@ -243,7 +246,7 @@ async def test_two_project_aliases_cannot_open_two_branches(app, db):
 async def test_active_turn_blocks_another_turn_and_close_until_background_finishes(app, db, monkeypatch):
     conv = await db.create_conversation(project_slug="demo")
     done = asyncio.Event()
-    monkeypatch.setattr(server, "_run_expert_bg", lambda **kw: done.wait())
+    monkeypatch.setattr(server_expert_routes, "_run_expert_bg", lambda **kw: done.wait())
     body = {"target": "demo", "user": "revisar", "conversation": conv}
     first = await server.experts_run(request(app, body))
     assert first.status == 202
@@ -520,7 +523,7 @@ async def test_el_drenaje_tiene_un_plazo_global(monkeypatch):
     largan entre si estiraria el cierre indefinidamente."""
     from relay import server as srv
 
-    monkeypatch.setattr(srv, "_DRAIN_RUNNING_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(server_lifecycle, "_DRAIN_RUNNING_TIMEOUT_S", 0.3)
     app = {srv.BG_TASKS_KEY: set()}
 
     async def eterna():

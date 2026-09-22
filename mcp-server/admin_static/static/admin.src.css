@@ -2288,11 +2288,11 @@ body.workspace-mode :where(button, a, summary, input, select, textarea):focus-vi
   font-size: .72rem;
   white-space: nowrap;
 }
-.workspace-dock-item { max-width: 13rem; padding: 0 .65rem; }
+.workspace-dock-item { flex: 0 0 auto; min-width: 0; max-width: 13rem; padding: 0 .65rem; }
 .workspace-dock-item:hover,
 .workspace-dock-tools:hover { border-color: var(--ws-line-strong); color: var(--ws-text); }
 .workspace-dock-item[aria-pressed="true"] { border-color: #587667; background: #1d2925; color: var(--ws-mint-strong); }
-.workspace-dock-item span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-dock-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .workspace-dock-tools { margin-left: auto; padding: 0 .7rem; }
 
 dialog.workspace-launcher {
@@ -2719,6 +2719,34 @@ dialog.workspace-launcher[open] {
   background: transparent;
   box-shadow: none;
 }
+
+.chat-task-panel { margin: .75rem 1rem 0; padding: .75rem; border-color: var(--ws-line, #27272a); }
+.chat-task-head, .chat-task-meta, .chat-task-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.chat-task-head { justify-content: space-between; color: var(--ws-text, #f4f4f5); }
+.chat-task-meta { margin-top: .35rem; color: var(--ws-muted, #a1a1aa); font-size: .72rem; }
+.chat-task-meta a { color: #34d399; text-decoration: underline; }
+.chat-task-detail { display: block; margin-top: .4rem; color: var(--ws-muted, #a1a1aa); font-size: .7rem; overflow-wrap: anywhere; }
+.chat-task-actions { margin-top: .65rem; }
+.chat-task-track { align-items: center; color: var(--ws-muted, #a1a1aa); display: inline-flex; font-size: .72rem; gap: .35rem; margin-left: auto; }
+.chat-task-error { margin: .5rem 0 0; color: #fca5a5; font-size: .75rem; }
+.chat-task-empty { color: var(--ws-muted, #a1a1aa); font-size: .75rem; }
+.chat-task-mode-picker { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .75rem; }
+.chat-task-mode-picker .label { margin: 0; }
+
+/* Cada conversación separada conserva su controlador y borrador. */
+.workspace-conversation-body { overflow: hidden; }
+.workspace-conversation-frame { width: 100%; height: 100%; flex: 1 1 auto; min-height: 0; border: 0; background: #141918; }
+.workspace-window.is-moving iframe { pointer-events: none; }
+body.chat-embedded .workspace-bar,
+body.chat-embedded .workspace-dock,
+body.chat-embedded #workspace-welcome,
+body.chat-embedded #workspace-windows,
+body.chat-embedded .chat-drawer-btn,
+body.chat-embedded .chat-sidebar { display: none !important; }
+body.chat-embedded .workspace-shell { grid-template-rows: minmax(0, 1fr); }
+body.chat-embedded .workspace-stage { padding: 0; display: flex; min-height: 0; }
+body.chat-embedded #tab-chat { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; margin: 0; border: 0; padding: 0; }
+body.chat-embedded #tab-chat > .chat-workspace { flex: 1 1 auto; height: auto; min-height: 0; }
 
 @container workspace-window (max-width: 640px) {
   .workspace-window-body > .panel:not(#tab-chat) { padding: 1rem; }

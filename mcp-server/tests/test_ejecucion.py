@@ -12,6 +12,8 @@ legítimas — ver docs/EJECUCION.md:
     build el veredicto (`exit=1`, el traceback) vive al final.
 """
 from __future__ import annotations
+from relay import (config, expert_history, expert_iteration, expert_result,
+                   expert_runner, expert_stage_prompts, expert_toolsets)
 
 import asyncio
 import contextlib
@@ -20,6 +22,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+from pydantic_ai.exceptions import ModelRetry
 
 from relay import config, experts, mcp_pool
 from relay.db import Database
@@ -38,7 +41,7 @@ async def db(tmp_path):
 def test_cap_general_sigue_quedandose_con_la_cabeza():
     """El resto de las tools se paginan solas: la cabeza + el aviso basta."""
     texto = "a" * 20_000
-    out = experts._cap_text(texto, 16_000)
+    out = expert_history._cap_text(texto, 16_000)
     assert out.startswith("a" * 100)
     assert "TRUNCADO" in out
     assert len(out) < len(texto)
@@ -47,7 +50,7 @@ def test_cap_general_sigue_quedandose_con_la_cabeza():
 def test_cap_de_consola_conserva_el_final():
     """El caso que motivó el cambio: el exit code vive al final."""
     salida = ("banner del build\n" + "x" * 60_000 + "\nFAILED: 3 tests\n(exit=1)")
-    out = experts._cap_text(salida, 48_000, keep_tail=12_000)
+    out = expert_history._cap_text(salida, 48_000, keep_tail=12_000)
     assert out.startswith("banner del build")
     assert "(exit=1)" in out
     assert "FAILED: 3 tests" in out
@@ -56,36 +59,36 @@ def test_cap_de_consola_conserva_el_final():
 
 def test_cap_de_consola_no_pasa_el_presupuesto():
     salida = "y" * 200_000
-    out = experts._cap_text(salida, 48_000, keep_tail=12_000)
+    out = expert_history._cap_text(salida, 48_000, keep_tail=12_000)
     # cap + el texto del marcador; nunca el original entero.
     assert len(out) < 49_000
 
 
 def test_caps_for_run_shell_es_mas_grande():
-    cap_shell, tail_shell = experts._caps_for("run_shell")
-    cap_otro, tail_otro = experts._caps_for("read_file")
+    cap_shell, tail_shell = expert_history._caps_for("run_shell")
+    cap_otro, tail_otro = expert_history._caps_for("read_file")
     assert cap_shell > cap_otro
     assert tail_shell > 0 and tail_otro == 0
 
 
 def test_cap_tool_result_usa_el_cap_de_la_tool():
     salida = "z" * 40_000 + "\n(exit=1)"
-    capeado = experts._cap_tool_result(salida, tool_name="run_shell")
+    capeado = expert_history._cap_tool_result(salida, tool_name="run_shell")
     assert "(exit=1)" in capeado          # cabe entero en el cap de consola
-    otro = experts._cap_tool_result(salida, tool_name="read_file")
+    otro = expert_history._cap_tool_result(salida, tool_name="read_file")
     assert "(exit=1)" not in otro         # el cap general lo corta antes
     assert "TRUNCADO" in otro
 
 
 def test_cap_tool_result_sin_nombre_usa_el_default():
     """Los callers viejos (y los tests) no pasan tool_name."""
-    assert experts._cap_tool_result("x" * 100) == "x" * 100
-    assert "TRUNCADO" in experts._cap_tool_result("x" * 20_000)
+    assert expert_history._cap_tool_result("x" * 100) == "x" * 100
+    assert "TRUNCADO" in expert_history._cap_tool_result("x" * 20_000)
 
 
 def test_cap_de_texto_corto_no_toca_nada():
     for name in ("run_shell", "read_file", ""):
-        assert experts._cap_tool_result("ok", tool_name=name) == "ok"
+        assert expert_history._cap_tool_result("ok", tool_name=name) == "ok"
 
 
 # ---------- 2. techo propio de la tool-call ----------
@@ -167,10 +170,10 @@ async def test_capped_toolset_marca_la_tool_en_vuelo():
     class _Watcher(_StubToolset):
         async def call_tool(self, name, tool_args, ctx, tool):
             # Mientras la tool corre, el watchdog tiene que ver esto.
-            visto["tool"], visto["since"] = experts.tool_en_vuelo(inflight)
+            visto["tool"], visto["since"] = expert_toolsets.tool_en_vuelo(inflight)
             return "ok"
 
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_Watcher(), timeout=5.0, inflight=inflight)
     await capped.call_tool("run_shell", {}, _Ctx(), None)
     assert visto["tool"] == "run_shell"
@@ -186,7 +189,7 @@ async def test_capped_toolset_limpia_el_inflight_si_la_tool_revienta():
         async def call_tool(self, name, tool_args, ctx, tool):
             raise RuntimeError("la tool explotó")
 
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_Boom(), timeout=5.0, inflight=inflight)
     with pytest.raises(RuntimeError):
         await capped.call_tool("run_shell", {}, _Ctx(), None)
@@ -196,9 +199,9 @@ async def test_capped_toolset_limpia_el_inflight_si_la_tool_revienta():
 async def test_capped_toolset_corta_por_su_propio_timeout():
     """El corte sigue existiendo: el mensaje tiene que ser accionable."""
     inflight: dict = {}
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_StubToolset(delay=5.0), timeout=0.05, inflight=inflight)
-    with pytest.raises(experts.ModelRetry) as e:
+    with pytest.raises(ModelRetry) as e:
         await capped.call_tool("run_shell", {}, _Ctx(), None)
     assert "no devolvió" in str(e.value)
     assert "background" in str(e.value)     # dice qué hacer
@@ -232,9 +235,9 @@ async def test_error_de_mcp_no_mata_el_run_y_llega_como_retry():
             raise _mcp_error(
                 "Failed to generate mermaid: Parse error on line 83")
 
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_MalFormado(), timeout=5.0, inflight=inflight)
-    with pytest.raises(experts.ModelRetry) as e:
+    with pytest.raises(ModelRetry) as e:
         await capped.call_tool("generate_mermaid", {}, _Ctx(), None)
     texto = str(e.value)
     # El mensaje del server va entero: el número de línea es lo único que
@@ -251,16 +254,16 @@ async def test_error_de_mcp_tambien_sin_timeout_configurado():
         async def call_tool(self, name, tool_args, ctx, tool):
             raise _mcp_error("boom")
 
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_MalFormado(), timeout=None, inflight={})
-    with pytest.raises(experts.ModelRetry):
+    with pytest.raises(ModelRetry):
         await capped.call_tool("x", {}, _Ctx(), None)
 
 
 async def test_el_guard_no_se_traga_cualquier_excepcion():
     """No es un `except Exception`: un bug nuestro tiene que seguir
     explotando, y una cancelación tiene que seguir cancelando."""
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_StubToolset(), timeout=5.0, inflight={})
 
     class _Bug(_StubToolset):
@@ -293,11 +296,11 @@ async def test_capped_toolset_comparte_el_inflight_entre_copias():
     import dataclasses
 
     inflight: dict = {}
-    capped = experts.CappedToolset(
+    capped = expert_toolsets.CappedToolset(
         wrapped=_StubToolset(), timeout=5.0, inflight=inflight)
     copia = dataclasses.replace(capped)
-    experts._anotar_en_vuelo(copia.inflight, "run_shell")
-    assert experts.tool_en_vuelo(inflight)[0] == "run_shell"
+    expert_toolsets._anotar_en_vuelo(copia.inflight, "run_shell")
+    assert expert_toolsets.tool_en_vuelo(inflight)[0] == "run_shell"
 
 
 async def test_dos_tools_en_paralelo_no_se_borran_la_marca():
@@ -320,14 +323,14 @@ async def test_dos_tools_en_paralelo_no_se_borran_la_marca():
     todavia corriendo el watchdog tiene que decir `tool_wait`.
     """
     inflight: dict = {}
-    async with experts._tool_en_vuelo(inflight, "shell"):        # A (lenta)
-        async with experts._tool_en_vuelo(inflight, "shell"):    # B (rapida)
+    async with expert_toolsets._tool_en_vuelo(inflight, "shell"):        # A (lenta)
+        async with expert_toolsets._tool_en_vuelo(inflight, "shell"):    # B (rapida)
             assert len(inflight) == 2, "cada llamada necesita su propia marca"
         # B termino; A sigue viva y el watchdog TIENE que verla.
-        nombre, desde = experts.tool_en_vuelo(inflight)
+        nombre, desde = expert_toolsets.tool_en_vuelo(inflight)
         assert nombre == "shell"
         assert desde is not None
-        assert experts._watchdog_verdict(
+        assert expert_toolsets._watchdog_verdict(
             idle_s=200.0, idle_timeout=180.0,
             tool_s=0.0, tool_timeout=300.0) == "tool_wait"
     assert inflight == {}, "las dos se dieron de baja"
@@ -337,11 +340,11 @@ async def test_tool_en_vuelo_devuelve_la_mas_vieja():
     """La que decide si esto avanza o esta trabado es la que arranco
     primero: una hermana rapida no dice nada sobre la que sigue."""
     inflight: dict = {}
-    experts._anotar_en_vuelo(inflight, "vieja")
+    expert_toolsets._anotar_en_vuelo(inflight, "vieja")
     await asyncio.sleep(0.01)
-    experts._anotar_en_vuelo(inflight, "nueva")
-    assert experts.tool_en_vuelo(inflight)[0] == "vieja"
-    assert experts.tool_en_vuelo({}) == (None, None)
+    expert_toolsets._anotar_en_vuelo(inflight, "nueva")
+    assert expert_toolsets.tool_en_vuelo(inflight)[0] == "vieja"
+    assert expert_toolsets.tool_en_vuelo({}) == (None, None)
 
 
 async def test_el_shell_nativo_se_anuncia_al_watchdog():
@@ -355,11 +358,11 @@ async def test_el_shell_nativo_se_anuncia_al_watchdog():
     import inspect
 
     inflight: dict = {}
-    async with experts._tool_en_vuelo(inflight, "shell"):
-        nombre, desde = experts.tool_en_vuelo(inflight)
+    async with expert_toolsets._tool_en_vuelo(inflight, "shell"):
+        nombre, desde = expert_toolsets.tool_en_vuelo(inflight)
         assert nombre == "shell"
         # Lo que el watchdog decide con eso puesto: esperar, no matar.
-        assert experts._watchdog_verdict(
+        assert expert_toolsets._watchdog_verdict(
             idle_s=200.0, idle_timeout=180.0,
             tool_s=time.monotonic() - desde,
             tool_timeout=300.0) == "tool_wait"
@@ -407,7 +410,7 @@ async def test_el_shell_nativo_se_desanuncia_aunque_falle():
     que hay una tool corriendo para siempre y deja de ser una red."""
     inflight: dict = {}
     with contextlib.suppress(RuntimeError):
-        async with experts._tool_en_vuelo(inflight, "shell"):
+        async with expert_toolsets._tool_en_vuelo(inflight, "shell"):
             raise RuntimeError("el comando reventó")
     assert inflight == {}
 
@@ -417,39 +420,39 @@ async def test_el_shell_nativo_se_desanuncia_aunque_falle():
 
 def test_watchdog_espera_a_una_tool_en_vuelo():
     """El caso central: 10 minutos de `dotnet test` NO son idle."""
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=600.0, idle_timeout=180.0, tool_s=600.0, tool_timeout=900.0)
     assert v == "tool_wait"
 
 
 def test_watchdog_mata_si_no_hay_tool_y_pasa_el_cap():
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=200.0, idle_timeout=180.0, tool_s=None, tool_timeout=300.0)
     assert v == "kill"
 
 
 def test_watchdog_mata_si_la_tool_paso_su_propio_techo():
     """Red de seguridad: el corte de la tool falló (subprocess zombie)."""
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=400.0, idle_timeout=180.0, tool_s=400.0, tool_timeout=300.0)
     assert v == "kill"
 
 
 def test_watchdog_le_da_gracia_a_la_tool_antes_de_matar():
     """Justo pasado el techo, el corte propio de la tool va primero."""
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=310.0, idle_timeout=180.0, tool_s=310.0, tool_timeout=300.0)
     assert v == "tool_wait"
 
 
 def test_watchdog_late_cuando_el_modelo_piensa():
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=60.0, idle_timeout=180.0, tool_s=None, tool_timeout=300.0)
     assert v == "beat"
 
 
 def test_watchdog_callado_en_un_run_normal():
-    v = experts._watchdog_verdict(
+    v = expert_toolsets._watchdog_verdict(
         idle_s=5.0, idle_timeout=180.0, tool_s=None, tool_timeout=300.0)
     assert v == "ok"
 
@@ -498,7 +501,7 @@ async def test_retire_obscura_no_resucita(db):
 
 def test_pensando_no_es_idle_dentro_del_cap_grande():
     """El caso que mataba runs sanos."""
-    assert experts._watchdog_verdict(
+    assert expert_toolsets._watchdog_verdict(
         idle_s=200, idle_timeout=180, tool_s=None, tool_timeout=None,
         pensando=True, think_timeout=600) == "beat"
 
@@ -506,7 +509,7 @@ def test_pensando_no_es_idle_dentro_del_cap_grande():
 def test_pensando_igual_se_corta_si_pasa_su_propio_cap():
     """El margen es más grande, no infinito: un provider colgado se
     detecta igual, con el tope global de 600s como segundo anillo."""
-    assert experts._watchdog_verdict(
+    assert expert_toolsets._watchdog_verdict(
         idle_s=700, idle_timeout=180, tool_s=None, tool_timeout=None,
         pensando=True, think_timeout=600) == "kill"
 
@@ -514,13 +517,13 @@ def test_pensando_igual_se_corta_si_pasa_su_propio_cap():
 def test_sin_pensar_el_cap_de_siempre_sigue_valiendo():
     """Dos caps y no uno solo más grande: subir el idle general
     retrasaría 10 minutos la detección en CUALQUIER otra fase."""
-    assert experts._watchdog_verdict(
+    assert expert_toolsets._watchdog_verdict(
         idle_s=200, idle_timeout=180, tool_s=None, tool_timeout=None,
         pensando=False, think_timeout=600) == "kill"
 
 
 def test_pensando_calladito_al_principio_no_spamea():
-    assert experts._watchdog_verdict(
+    assert expert_toolsets._watchdog_verdict(
         idle_s=10, idle_timeout=180, tool_s=None, tool_timeout=None,
         pensando=True, think_timeout=600) == "ok"
 
@@ -528,7 +531,7 @@ def test_pensando_calladito_al_principio_no_spamea():
 def test_una_tool_en_vuelo_le_gana_a_todo():
     """El orden importa: si hay una tool corriendo, su propio techo manda
     aunque la fase diga que está pensando."""
-    assert experts._watchdog_verdict(
+    assert expert_toolsets._watchdog_verdict(
         idle_s=500, idle_timeout=180, tool_s=10, tool_timeout=300,
         pensando=True, think_timeout=600) == "tool_wait"
 
@@ -541,16 +544,16 @@ def test_el_default_del_cap_de_pensar_es_mas_grande_que_el_idle():
 def test_un_idle_apretado_a_mano_manda_sobre_el_cap_de_pensar():
     """Un humano que puso `idle_timeout_s: 5` no quiere que el modelo
     tenga 600s por otra puerta. Lo destapó un test que ya existía."""
-    assert experts._think_cap({"idle_timeout_s": 5}, 5.0) == 5.0
+    assert expert_toolsets._think_cap({"idle_timeout_s": 5}, 5.0) == 5.0
 
 
 def test_sin_config_del_proyecto_vale_el_cap_grande():
-    assert experts._think_cap({}, 180.0) == experts.config.expert_think_timeout_s()
+    assert expert_toolsets._think_cap({}, 180.0) == config.expert_think_timeout_s()
 
 
 def test_el_proyecto_puede_fijar_su_propio_cap_de_pensar():
     """Una tarea de auditoría con un razonador puede querer más aún."""
-    assert experts._think_cap({"idle_timeout_s": 5, "think_timeout_s": 900},
+    assert expert_toolsets._think_cap({"idle_timeout_s": 5, "think_timeout_s": 900},
                               5.0) == 900.0
 
 
@@ -578,7 +581,7 @@ def test_el_verificador_tiene_regla_para_budget_exceeded():
     lista de reglas, que es lo único que le dice al modelo qué votar."""
     import re
 
-    reglas = experts.VERIFIER_INSTRUCTIONS
+    reglas = expert_stage_prompts.VERIFIER_INSTRUCTIONS
     bullet = re.search(
         r"^- `budget_exceeded`.*?(?=^- `|\Z)", reglas, re.M | re.S)
     assert bullet, (
@@ -597,7 +600,7 @@ def test_la_regla_nombra_la_fase_que_el_codigo_manda_de_verdad():
     muerta y el veredicto vuelve a ser off_plan sin que nadie se entere."""
     import inspect
 
-    src = inspect.getsource(experts)
+    src = inspect.getsource(expert_iteration)
     assert 'last_phase = "budget_exceeded"' in src, (
         "cambió el nombre de la fase; actualizá VERIFIER_INSTRUCTIONS o la "
         "regla de budget_exceeded deja de matchear")
@@ -609,6 +612,6 @@ def test_off_plan_sigue_siendo_el_unico_veredicto_que_poda():
     sentido y hay que repensarla."""
     import inspect
 
-    src = inspect.getsource(experts)
-    assert 'if last_phase == "off_plan" and messages_json:' in src
+    src = inspect.getsource(expert_result)
+    assert 'if state.last_phase == "off_plan" and state.messages_json:' in src
     assert 'if last_phase == "needs_more"' not in src

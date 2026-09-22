@@ -98,16 +98,13 @@ async def _run(app) -> None:
     except ImportError:
         logger.warning("cbm_watcher: watchdog no instalado; auto-reindex off")
         return
-    from . import admin
-    from .experts import cbm_binary_path
+    from . import admin_common, admin_workspace
+    from .app_state import DB_KEY
+    from .cbm_runtime import cbm_binary_path
     if not cbm_binary_path():
         logger.warning("cbm_watcher: binario cbm no encontrado; auto-reindex off")
         return
-    # OJO: NO importar DB_KEY de .server — con `python -m relay.server`
-    # hay DOS copias del módulo (__main__ y relay.server) con AppKeys
-    # distintas, y la del import no matchea el app state. admin.py ya
-    # re-bindea las AppKeys de __main__; usamos la suya.
-    db = app[admin.DB_KEY]
+    db = app[DB_KEY]
     projects = [p for p in await db.list_projects(enabled_only=True)
                 if p.get("include_in_index", 1) and p.get("repo_path")
                 and Path(p["repo_path"]).is_dir()]
@@ -154,12 +151,12 @@ async def _run(app) -> None:
                     continue
                 job_id = running.get(slug)
                 if job_id is not None:
-                    val = admin._get_job(job_id)
+                    val = admin_common._get_job(job_id)
                     if isinstance(val, asyncio.Task) and not val.done():
                         continue  # job previo sigue; reintento próximo tick
                     running.pop(slug, None)
                 pending.pop(slug, None)
-                running[slug] = admin._start_index_job(slug, watched[slug])
+                running[slug] = admin_workspace._start_index_job(slug, watched[slug])
                 logger.info("cbm_watcher: reindex incremental %s (job %s)",
                             slug, running[slug])
     finally:

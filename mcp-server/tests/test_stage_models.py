@@ -16,6 +16,7 @@ Como correr:
     python -m pytest tests/test_stage_models.py -q
 """
 from __future__ import annotations
+from relay import expert_history, expert_runner, expert_staged_runner, expert_stages
 
 import tempfile
 import unittest
@@ -40,7 +41,7 @@ def _historial_con_tool() -> str:
     `read_file` — estos tests son sobre que modelo corre cada etapa, no
     sobre la guarda.
     """
-    return experts._dump_messages([
+    return expert_history._dump_messages([
         ModelRequest(parts=[UserPromptPart(content="hace algo")]),
         ModelResponse(parts=[ToolCallPart("edit_file", {"path": "x.py"})]),
     ])
@@ -80,11 +81,11 @@ class TestStageModels(unittest.IsolatedAsyncioTestCase):
                     "last_tool": "read_file", "legs": 1, "steers": 0,
                     "steer_texts": [], "progress_events": []}
 
-        with patch.object(experts, "_run_planner", _planner), \
-                patch.object(experts, "_run_verifier", _verifier), \
-                patch.object(experts, "_run_documenter", _documenter), \
-                patch.object(experts, "run_expert", _ejecutor):
-            await experts.run_expert_staged(proyecto, "hace algo", **kwargs)
+        with patch.object(expert_stages, "_run_planner", _planner), \
+                patch.object(expert_stages, "_run_verifier", _verifier), \
+                patch.object(expert_stages, "_run_documenter", _documenter), \
+                patch.object(expert_runner, "run_expert", _ejecutor):
+            await expert_staged_runner.run_expert_staged(proyecto, "hace algo", **kwargs)
         return vistos
 
     async def test_stage_models_gana_sobre_el_default_del_proyecto(self):
@@ -118,8 +119,8 @@ class TestStageModels(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             proyecto = _proyecto(tmp, three_stage=False)
-            with patch.object(experts, "run_expert", _ejecutor):
-                r = await experts.run_expert_staged(
+            with patch.object(expert_runner, "run_expert", _ejecutor):
+                r = await expert_staged_runner.run_expert_staged(
                     proyecto, "hace algo",
                     stage_models={"planner": "run:planner"})
         self.assertNotIn("stage_models", recibido)

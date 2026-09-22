@@ -4,6 +4,7 @@ import { $, $$, api, escape, onClick } from "./api.js";
 import { toast, emptyRow } from "./ui.js";
 import { registerPoller } from "./pollers.js";
 import { refreshStatus } from "./tab-status.js";
+import { taskWorkspaceQuery } from "./workspace.js";
 
 let _currentSlug = null;
 let _pollHandle = null;
@@ -193,7 +194,8 @@ async function reindexCurrent() {
   btn.disabled = true;
   $("#reindex-status").textContent = "disparando...";
   try {
-    const r = await api(`projects/${_currentSlug}/reindex`, { method: "POST" });
+    const r = await api(`projects/${_currentSlug}/reindex${taskWorkspaceQuery(_currentSlug)}`,
+      { method: "POST" });
     $("#reindex-status").textContent = `job ${r.job_id} corriendo...`;
     pollJob(r.job_id);
   } catch (e) {
@@ -225,7 +227,8 @@ async function loadFiles() {
   if (!_currentSlug) return;
   try {
     const limit = 200;
-    const r = await api(`projects/${_currentSlug}/index/files?limit=${limit}&sort=path`);
+    const r = await api(`projects/${_currentSlug}/index/files`
+      + taskWorkspaceQuery(_currentSlug, { limit, sort: "path" }));
     const tbody = $("#files-table tbody");
     tbody.innerHTML = r.files.length
       ? r.files.map((f) => `<tr>

@@ -5,8 +5,9 @@ configuración real del usuario.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -197,5 +198,129 @@ async def test_member_cannot_read_effective_system_prompt_owner_can(
         assert owner_response.status == 200
         owner_body = await owner_response.json()
         assert owner_body["blocks"]["system_prompt"] == "SYNTHETIC_PRIVATE_PROMPT"
+    finally:
+        await client.close()
+
+
+def _task_payload(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value or {}
+
+
+def _conversation_task(value):
+    if not isinstance(value, dict):
+        return {}
+    return _task_payload(value.get("task_json", value.get("task", {})))
+
+
+@pytest.mark.asyncio
+async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client, db, _app = await _make_client(tmp_path, monkeypatch)
+    conv_id = await db.create_conversation(project_slug="fixture")
+    await db.update_conversation_task(
+        conv_id,
+        mode="write",
+        state="blocked",
+        source_repo="PRIVATE_SOURCE_REPO",
+        workspace_path=str(tmp_path / "PRIVATE_WORKSPACE"),
+        origin_url="https://fixture:FAKE_SECRET@example.test/repo.git",
+        requested_by="PRIVATE_REQUESTED_BY_EMAIL",
+        email="PRIVATE_EMAIL",
+        futurefield="PRIVATE_FUTURE_FIELD",
+        error="PRIVATE_ERROR_DETAIL",
+        validation={
+            "status": "passed",
+            "head_sha": "synthetic-sha",
+            "detail": "PRIVATE_VALIDATION_DETAIL",
+        },
+    )
+    member_headers = {"Cf-Access-Jwt-Assertion": "fixture-jwt"}
+    inspect = AsyncMock(return_value=None)
+    try:
+        with patch("relay.task_workspace.inspect_workspace", inspect):
+            with patch("relay.identity.verify", return_value="member@example.test"):
+                list_response = await client.get(
+                    "/conversations", headers=member_headers
+                )
+                detail_response = await client.get(
+                    f"/conversations/{conv_id}", headers=member_headers
+                )
+                task_response = await client.get(
+                    f"/conversations/{conv_id}/task", headers=member_headers
+                )
+                pr_response = await client.post(
+                    f"/conversations/{conv_id}/git/pr",
+                    headers=member_headers,
+                    json={},
+                )
+
+        assert list_response.status == 200
+        assert detail_response.status == 200
+        assert task_response.status == 200
+        assert pr_response.status == 403
+        assert not inspect.await_args_list or all(
+            call.args[2] == conv_id for call in inspect.await_args_list
+        )
+
+        listed = next(
+            item
+            for item in (await list_response.json())["conversations"]
+            if item["id"] == conv_id
+        )
+        member_views = [
+            await list_response.json(),
+            await detail_response.json(),
+            await task_response.json(),
+        ]
+        listed_task = _conversation_task(listed)
+        detailed_task = _conversation_task(await detail_response.json())
+        task_body = await task_response.json()
+        task_view = _task_payload(
+            task_body.get("task_json", task_body.get("task", task_body))
+        )
+        assert listed_task
+        assert detailed_task
+        assert task_view
+        private_markers = (
+            "PRIVATE_SOURCE_REPO",
+            "PRIVATE_WORKSPACE",
+            "FAKE_SECRET",
+            "PRIVATE_REQUESTED_BY_EMAIL",
+            "PRIVATE_EMAIL",
+            "PRIVATE_FUTURE_FIELD",
+            "PRIVATE_ERROR_DETAIL",
+            "PRIVATE_VALIDATION_DETAIL",
+        )
+        serialized_member_views = json.dumps(member_views, sort_keys=True)
+        assert all(marker not in serialized_member_views for marker in private_markers)
+        for task_view in (listed_task, detailed_task, task_view):
+            if task_view:
+                assert task_view.get("can_control") is False
+                assert task_view.get("validation") == {
+                    "status": "passed",
+                    "head_sha": "synthetic-sha",
+                }
+
+        # La identidad local conserva el snapshot completo para el owner.
+        with patch("relay.task_workspace.inspect_workspace", inspect):
+            owner_task_response = await client.get(
+                f"/conversations/{conv_id}/task"
+            )
+        assert owner_task_response.status == 200
+        owner_body = await owner_task_response.json()
+        owner_task = _task_payload(
+            owner_body.get("task_json", owner_body.get("task", owner_body))
+        )
+        assert owner_task["source_repo"] == "PRIVATE_SOURCE_REPO"
+        assert owner_task["workspace_path"].endswith("PRIVATE_WORKSPACE")
+        assert owner_task["origin_url"].endswith("FAKE_SECRET@example.test/repo.git")
+        assert owner_task["requested_by"] == "PRIVATE_REQUESTED_BY_EMAIL"
+        assert owner_task["email"] == "PRIVATE_EMAIL"
+        assert owner_task["futurefield"] == "PRIVATE_FUTURE_FIELD"
+        assert owner_task["error"] == "PRIVATE_ERROR_DETAIL"
+        assert owner_task["validation"]["detail"] == "PRIVATE_VALIDATION_DETAIL"
     finally:
         await client.close()

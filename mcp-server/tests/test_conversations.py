@@ -12,6 +12,7 @@ Cómo correr:
     python -m pytest tests/test_conversations.py -q
 """
 from __future__ import annotations
+from relay import expert_runner
 
 import asyncio
 import json
@@ -446,7 +447,7 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
     async def _instructions(self, project, db):
         """Corre el experto capturando las instructions que se armaron."""
         sink = {}
-        real = experts.Agent
+        real = expert_runner.Agent
 
         class _Spy:
             def __init__(self, *a, **kw):
@@ -460,7 +461,7 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
             def __getattr__(self, n):
                 return getattr(self._inner, n)
 
-        with patch.object(experts, "Agent", _Spy):
+        with patch.object(expert_runner, "Agent", _Spy):
             await run_expert(project, "hola", model_override="test", db=db)
         return sink["instructions"]
 

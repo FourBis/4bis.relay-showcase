@@ -10,6 +10,7 @@ turnos de la conversación, con `sintetico: True`. Esto reescribe los
 tests que afirmaban `modo == "lineal"` y `modo == "ninguno"`.
 """
 from __future__ import annotations
+from relay import expert_planning
 
 import json
 import os
@@ -32,41 +33,41 @@ _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
 class TestPasosDelPlan(unittest.TestCase):
     def test_pasos_numerados(self) -> None:
         self.assertEqual(
-            experts.pasos_del_plan("1. Leer\n2. Migrar\n3. Cargar"),
+            expert_planning.pasos_del_plan("1. Leer\n2. Migrar\n3. Cargar"),
             ["Leer", "Migrar", "Cargar"])
 
     def test_la_numeracion_no_queda_dentro_del_texto(self) -> None:
         """Si no, la UI numera sola y sale '1. 1. Leer el esquema'."""
-        for p in experts.pasos_del_plan("1) Leer\n2) Migrar"):
+        for p in expert_planning.pasos_del_plan("1) Leer\n2) Migrar"):
             self.assertFalse(p[0].isdigit(), p)
 
     def test_una_linea_suelta_se_pega_al_paso_anterior(self) -> None:
         """Un modelo que parte un paso en dos renglones no debería
         inventar un paso de más."""
-        pasos = experts.pasos_del_plan(
+        pasos = expert_planning.pasos_del_plan(
             "1. Leer el esquema\n   y anotar las FK\n2. Migrar")
         self.assertEqual(len(pasos), 2)
         self.assertIn("FK", pasos[0])
 
     def test_tolera_el_markdown_de_cada_modelo(self) -> None:
-        pasos = experts.pasos_del_plan(
+        pasos = expert_planning.pasos_del_plan(
             "- **Paso 1:** Leer\n> 2. Migrar\n  3) Cargar")
         self.assertEqual(len(pasos), 3, pasos)
 
     def test_una_senal_no_es_un_plan(self) -> None:
         """`TRIVIAL:` y `DEMASIADO_GRANDE:` son salidas válidas SIN pasos:
         el panel tiene que caer a 'sin plan', no inventar uno."""
-        self.assertEqual(experts.pasos_del_plan("TRIVIAL: es una línea"), [])
+        self.assertEqual(expert_planning.pasos_del_plan("TRIVIAL: es una línea"), [])
         self.assertEqual(
-            experts.pasos_del_plan("DEMASIADO_GRANDE: son seis cosas"), [])
+            expert_planning.pasos_del_plan("DEMASIADO_GRANDE: son seis cosas"), [])
 
     def test_prosa_sin_pasos_no_da_pasos(self) -> None:
-        self.assertEqual(experts.pasos_del_plan("Voy a mirar el repo"), [])
-        self.assertEqual(experts.pasos_del_plan(""), [])
+        self.assertEqual(expert_planning.pasos_del_plan("Voy a mirar el repo"), [])
+        self.assertEqual(expert_planning.pasos_del_plan(""), [])
 
     def test_un_plan_absurdo_se_recorta(self) -> None:
         largo = "\n".join(f"{i}. paso" for i in range(1, 60))
-        self.assertLessEqual(len(experts.pasos_del_plan(largo)), 30)
+        self.assertLessEqual(len(expert_planning.pasos_del_plan(largo)), 30)
 
 
 # ---------- _estado_del_turno (puro) ----------

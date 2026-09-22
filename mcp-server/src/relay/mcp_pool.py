@@ -125,7 +125,9 @@ def make_toolset(
         env = resolve_env_refs(cfg.get("env", {}))
         for k, v in _toolchain_env().items():
             env.setdefault(k, v)
-        env.setdefault("FOURBIS_WORKSPACE", repo_path)
+        # La raíz la decide la tarea, no la config del MCP. ``setdefault``
+        # permitía que una fila vieja siguiera apuntando al checkout global.
+        env["FOURBIS_WORKSPACE"] = repo_path
         # `@playwright/mcp` no escribe donde le pidas: su sandbox permite
         # SOLO dos raíces, el output dir y el cwd. Medido el 19/8 con el
         # server real:
@@ -148,7 +150,7 @@ def make_toolset(
         # resuelve contra el output dir sino contra el cwd. El prompt le
         # pide al experto ruta absoluta (ver `EVIDENCE_BLOCK`).
         if repo_path:
-            env.setdefault("PLAYWRIGHT_MCP_OUTPUT_DIR", repo_path)
+            env["PLAYWRIGHT_MCP_OUTPUT_DIR"] = repo_path
         st = StdioTransport(
             command=command,
             args=list(cfg.get("args", [])),

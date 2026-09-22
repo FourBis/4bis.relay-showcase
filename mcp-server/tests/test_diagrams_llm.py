@@ -134,7 +134,7 @@ async def test_diagrams_llm_proyecto_inexistente(env):
 
 async def test_diagrams_llm_sequence_sin_funcion(env):
     cli, db, tmp = env
-    with patch("relay.admin.cbm_binary_path", return_value="/fake/cbm"):
+    with patch("relay.admin_diagrams.cbm_binary_path", return_value="/fake/cbm"):
         r = await cli.post("/admin/api/projects/test/diagrams/llm",
                            json={"type": "sequence"})
         assert r.status == 400
@@ -176,8 +176,8 @@ async def test_diagrams_llm_happy_path(env):
     async def fake_cbm(*args):
         return ("## rows\nA\tB\n", None)
 
-    with patch("relay.admin.cbm_binary_path", return_value="/fake/cbm"), \
-            patch("relay.admin._cbm_cli_text", fake_cbm), \
+    with patch("relay.admin_diagrams.cbm_binary_path", return_value="/fake/cbm"), \
+            patch("relay.admin_diagrams._cbm_cli_text", fake_cbm), \
             patch("relay.experts.run_consult", fake_consult):
         r = await cli.post("/admin/api/projects/test/diagrams/llm",
                            json={"type": "architecture"})

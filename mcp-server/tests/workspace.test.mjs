@@ -48,3 +48,26 @@ test('conserva referencias a resultados y estado de ventanas, nunca su contenido
   assert.equal(saved[0].maximized, true);
   assert(!JSON.stringify(saved).includes('No guardar esta respuesta'));
 });
+
+test('los chats separados se restauran solo con identificadores válidos y consistentes', () => {
+  const saved = readLayout(JSON.stringify({ version: 1, windows: [
+    { id: 'object:conversation:conv-1', restore: { kind: 'conversation', conversationId: 'conv-1' } },
+    { id: 'object:conversation:conv-2', restore: { kind: 'conversation', conversationId: 'conv-1' } },
+    { id: 'object:conversation:../bad', restore: { kind: 'conversation', conversationId: '../bad' } },
+    { id: 'object:conversation:', restore: { kind: 'conversation', conversationId: '' } },
+  ] }), ['chat']);
+  assert.deepEqual(saved.map(w => w.id), ['object:conversation:conv-1']);
+});
+
+test('restaurar oculta IDs antiguos y conserva nombres editados sin cambiar la conversación', () => {
+  const entry = { id: 'object:conversation:12345678-abcd', title: 'proyecto · 12345678',
+    restore: { kind: 'conversation', conversationId: '12345678-abcd' } };
+  const restore = customTitle => readLayout(JSON.stringify({ version: 1,
+    windows: [{ ...entry, customTitle }] }), ['chat'])[0];
+  assert.equal(restore().title, 'proyecto');
+  const renamed = restore('  Entrega · 12345678  ');
+  assert.equal(renamed.title, 'Entrega · 12345678');
+  assert.equal(renamed.customTitle, 'Entrega · 12345678');
+  assert.equal(renamed.id, entry.id);
+  assert.equal(renamed.restore.conversationId, entry.restore.conversationId);
+});

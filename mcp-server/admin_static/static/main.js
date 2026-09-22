@@ -11,7 +11,8 @@ import { initRunning, loadRunning } from "./tab-running.js";
 // tab Chats con filtro target=notes + un mini-editor inline. El
 // endpoint legacy /admin/api/consults queda como alias por compat
 // con clientes viejos (Discord bot). Ver docs/CHANGELOG.md iter 9.8.
-import { initChats, loadChats } from "./tab-chats.js";
+import { initChats, loadChats, selectConversation } from "./tab-chats.js";
+import { bootEmbeddedChat, getEmbeddedConversation } from "./chat-window.js";
 import { initVoice, loadVoice } from "./tab-voice.js";
 import { initProjects, loadProjects } from "./tab-projects.js";
 import { initOrphans, loadOrphans, loadIgnored } from "./tab-orphans.js";
@@ -76,6 +77,18 @@ wireModals();
 wireSidePanel();
 wirePanelResize();
 
+const embeddedConversation = getEmbeddedConversation();
+if (embeddedConversation) {
+  bootEmbeddedChat({ initChats, selectConversation, initPollers }).catch(error => {
+    console.error("No se pudo abrir la conversación", error);
+    const message = document.createElement('p'); message.className = 'chat-task-error';
+    message.textContent = `No se pudo abrir el chat: ${error.message}. `;
+    const retry = document.createElement('button'); retry.className = 'btn btn-xs'; retry.textContent = 'Reintentar';
+    retry.onclick = () => location.reload(); message.append(retry);
+    document.getElementById('main').prepend(message);
+  });
+} else {
+
 // Cada init se wirea aislado. Antes eran llamadas sueltas al top-level
 // del módulo: un `$("#id-que-no-existe").onclick = ...` en CUALQUIERA
 // tiraba TypeError y abortaba el resto del archivo, dejando muertos los
@@ -118,3 +131,4 @@ registerPoller(refreshStatus, 15000);
 // (showTab/initPollers de arriba tocan elementos).
 initSearch();
 initWatcher();
+}

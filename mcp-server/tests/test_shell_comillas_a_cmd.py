@@ -30,6 +30,7 @@ Cómo correr:
     python -m pytest tests/test_shell_comillas_a_cmd.py -q
 """
 from __future__ import annotations
+from relay import shell_syntax
 
 import asyncio
 import sys
@@ -53,7 +54,7 @@ def _corre(cmd: str, **kw) -> dict:
 def test_las_comillas_sobreviven_al_ruteo_a_cmd(tmp_path):
     """Un comando ruteado a `cmd` no puede perder sus comillas."""
     cmd = f'cd /d "{tmp_path}" && {sys.executable} -c "print(2+2)"'
-    argv, kind = shell.build_argv(cmd)
+    argv, kind = shell_syntax.build_argv(cmd)
     assert kind == "cmd", "precondición: este comando rutea a cmd"
     res = _corre(cmd)
     assert res["exit"] == 0, res["out"]
@@ -63,7 +64,7 @@ def test_las_comillas_sobreviven_al_ruteo_a_cmd(tmp_path):
 def test_payload_sin_espacios_no_falla_en_silencio(tmp_path):
     """El caso peor: exit=0 y salida vacía, que el modelo lee como éxito."""
     cmd = f'cd /d "{tmp_path}" && {sys.executable} -c "print(7*6)"'
-    assert shell.build_argv(cmd)[1] == "cmd"
+    assert shell_syntax.build_argv(cmd)[1] == "cmd"
     res = _corre(cmd)
     assert "42" in res["out"], f"exit={res['exit']} out={res['out']!r}"
 
@@ -77,5 +78,5 @@ def test_el_punto_y_coma_no_se_rutea_a_cmd():
     existe.
     """
     cmd = r"cd C:\Users\demo\source\repos\AuroraDemo; git status"
-    _, kind = shell.build_argv(cmd)
+    _, kind = shell_syntax.build_argv(cmd)
     assert kind != "cmd", f"un `;` no puede ir a cmd.exe (fue a {kind})"

@@ -19,6 +19,7 @@ configurables (`extras`), que es donde una vuelta de más abre una puerta
 que nadie pidió.
 """
 from __future__ import annotations
+from relay import config
 
 import os
 from pathlib import Path
@@ -412,7 +413,7 @@ def test_rutas_extra_expande_el_token_repos(monkeypatch):
     """`repos` en vez de la ruta a mano: escribirla en cada proyecto envejece mal."""
     from relay import experts
     monkeypatch.delenv("FOURBIS_EXTRA_ROOTS", raising=False)
-    monkeypatch.setattr(experts.config, "repos_root", lambda: "/src/repos")
+    monkeypatch.setattr(config, "repos_root", lambda: "/src/repos")
     assert "/src/repos" in file_tools.rutas_extra({"rutas_extra": ["repos"]})
 
 

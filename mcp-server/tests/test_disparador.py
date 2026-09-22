@@ -16,6 +16,7 @@ El modelo se reemplaza por uno falso: acá se prueba el cableado, no el
 criterio del planificador (eso está en test_planificador.py).
 """
 from __future__ import annotations
+from relay import expert_models, expert_runner, expert_staged_runner, expert_stages
 
 import asyncio
 import json
@@ -158,6 +159,9 @@ class TestEndpoints(_Base):
     async def test_un_hilo_no_puede_tener_dos_grafos(self) -> None:
         """Dos planes sobre el mismo repo se pisan los archivos y el
         humano ve dos avances a los tumbos."""
+        await self.db.create_conversation(
+            project_slug="demo", conversation_id="c1")
+
         async def fake_lanzar(db, project, graph_id, **kw):
             await asyncio.sleep(5)
 

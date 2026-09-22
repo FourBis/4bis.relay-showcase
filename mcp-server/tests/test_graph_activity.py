@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from relay import logctx, orquestador, server
+from relay import logctx, orquestador, server, server_common
 
 
 @pytest.mark.parametrize("node_error", [False, True])
@@ -13,7 +13,7 @@ async def test_graph_activity_tracks_node_lifecycle(monkeypatch, node_error):
     app = {server.DB_KEY: object(), server.NOTIFY_KEY: None,
            server.PROGRESS_KEY: {}, server.RUNNING_KEY: {}, server.GRAFOS_KEY: {}}
     ready, release_node, verifying, release_graph = (asyncio.Event() for _ in range(4))
-    monkeypatch.setattr(server, "_get_api_key", lambda: "")
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
 
     async def lanzar(db, project, graph_id, *, progreso_de):
         async def node():

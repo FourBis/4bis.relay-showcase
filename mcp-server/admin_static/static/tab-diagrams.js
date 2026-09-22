@@ -29,6 +29,7 @@
 
 import { escape, api, _dbg } from "./api.js";
 import { toast } from "./ui.js";
+import { taskWorkspaceQuery } from "./workspace.js";
 
 // Los tipos sequence / class / state ya NO son plantillas en blanco: son
 // autogeneradores con datos reales del grafo de cbm, disponibles para
@@ -438,7 +439,7 @@ async function fetchArchitecture(p, aspects) {
     // El spawn de cbm puede tardar; el default de 15s del fetch es justo.
     return await api(
       `projects/${encodeURIComponent(p.slug)}/architecture`
-      + `?aspects=${encodeURIComponent(aspects.join(","))}`,
+      + taskWorkspaceQuery(p.slug, { aspects: aspects.join(",") }),
       undefined, 45_000);
   } catch (e) {
     toast(`No se pudo leer la arquitectura: ${e.message}`, "err");
@@ -477,7 +478,7 @@ async function loadSavedDiagrams() {
   if (p) {
     try {
       const r = await api(`projects/${encodeURIComponent(p.slug)}`
-        + `/workspace/files?subdir=${encodeURIComponent(DIAG_DIR)}`);
+        + `/workspace/files${taskWorkspaceQuery(p.slug, { subdir: DIAG_DIR })}`);
       _saved = (r.entries || [])
         .filter((e) => !e.is_dir && e.name.endsWith(".md"))
         .map((e) => ({ name: e.name.replace(/\.md$/, ""), path: e.path,
@@ -518,7 +519,7 @@ async function openSavedDiagram(path, kind) {
   if (!p) return;
   try {
     const r = await api(`projects/${encodeURIComponent(p.slug)}`
-      + `/workspace/file?path=${encodeURIComponent(path)}`);
+      + `/workspace/file${taskWorkspaceQuery(p.slug, { path })}`);
     if (!_state) return;
     _state.code = extractMermaid(r.content);
     _state.name = path.split("/").pop().replace(/\.md$/, "");
@@ -718,7 +719,7 @@ async function autoRoutes() {
 async function fetchGraph(p, kind, qs) {
   try {
     return await api(`projects/${encodeURIComponent(p.slug)}/graph/${kind}`
-      + (qs || ""), undefined, 60_000);
+      + taskWorkspaceQuery(p.slug, Object.fromEntries(new URLSearchParams(qs || ""))), undefined, 60_000);
   } catch (e) {
     toast(`No se pudo leer el grafo (${kind}): ${e.message}`, "err");
     return null;
@@ -973,7 +974,7 @@ async function saveCurrentDiagram(kind /* "md" | "svg" */) {
     kind === "md" ? "diag-save-md" : "diag-save-svg");
   if (btn) btn.disabled = true;
   const put = (overwrite) => api(
-    `projects/${encodeURIComponent(p.slug)}/workspace/file`,
+    `projects/${encodeURIComponent(p.slug)}/workspace/file${taskWorkspaceQuery(p.slug)}`,
     { method: "PUT", body: { path, content, overwrite } });
   try {
     let r;
@@ -1290,7 +1291,7 @@ export function loadDiagrams() {
         body.function = fn;
       }
       if (status) status.textContent = 'LLM interpretando…';
-      const r = await api(`projects/${encodeURIComponent(p.slug)}/diagrams/llm`,
+      const r = await api(`projects/${encodeURIComponent(p.slug)}/diagrams/llm${taskWorkspaceQuery(p.slug)}`,
         { method: "POST", body }, 90_000);
       if (!_state) return;
       _state.code = r.mermaid || '';
