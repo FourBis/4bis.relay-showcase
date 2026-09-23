@@ -374,6 +374,7 @@
                 <!-- Solo en borrador (➕ Nuevo): el proyecto se elige acá y la
                      conversación recién se crea al mandar el primer mensaje. -->
                 <select id="chat-draft-project" class="select chat-proj-select text-xs" hidden></select>
+                <span id="chat-task-mode" class="badge dim" hidden></span>
                 <span id="chat-panel-meta" class="ml-auto hidden truncate text-[11px] text-zinc-400 md:inline"></span>
                 <button id="chat-panel-vscode" class="btn btn-xs" hidden
                         title="Abrir el repo en VS Code">🧠 VS Code</button>
@@ -432,6 +433,7 @@
                   🔒 Cerrar</button>
               </header>
               <div id="chat-summary" class="chat-summary" hidden></div>
+              <section id="chat-task-panel" class="chat-task-panel card" hidden aria-live="polite"></section>
               <div id="chat-panel-messages" class="chat-messages"></div>
               <!-- Sugerencias de continuación: un tap manda el próximo paso
                    sin escribir. Se llenan al terminar cada run. -->

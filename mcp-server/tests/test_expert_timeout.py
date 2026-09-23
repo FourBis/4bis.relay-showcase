@@ -16,6 +16,7 @@ Cómo correr:
     python -m pytest tests/test_expert_timeout.py -q
 """
 from __future__ import annotations
+from relay import expert_runner, progress
 
 import asyncio
 import os
@@ -48,7 +49,7 @@ class TestDurationMsSanity(unittest.IsolatedAsyncioTestCase):
                 "system_prompt": "", "mcp_servers": [],
                 "defaults_json": {}, "native_tools": [],
             }
-            r = await experts.run_expert(project, "hola", model_override="test")
+            r = await expert_runner.run_expert(project, "hola", model_override="test")
             self.assertIsInstance(r["duration_ms"], int)
             self.assertGreaterEqual(r["duration_ms"], 0,
                 f"duration_ms negativo: {r['duration_ms']}")
@@ -92,8 +93,8 @@ class TestDurationMsSanity(unittest.IsolatedAsyncioTestCase):
                 # Default 600s. El test captura ese orden de magnitud.
                 "defaults_json": {}, "native_tools": [],
             }
-            with patch("relay.experts.asyncio.wait_for", spy_wait_for):
-                r = await experts.run_expert(
+            with patch("relay.expert_runner.asyncio.wait_for", spy_wait_for):
+                r = await expert_runner.run_expert(
                     project, "hola", model_override="test")
 
             # Soft-cut: no explota, devuelve resultado reanudable.
@@ -164,8 +165,8 @@ class TestIdleWatchdogCuts(unittest.IsolatedAsyncioTestCase):
                 # el test falla a los ~8s en vez de colgar la suite.
                 "defaults_json": {"timeout": 8, "idle_timeout_s": 0.5},
             }
-            with patch("relay.experts.Agent", _HangingAgent):
-                r = await experts.run_expert(
+            with patch("relay.expert_runner.Agent", _HangingAgent):
+                r = await expert_runner.run_expert(
                     project, "hola", model_override="test")
             # Soft-cut por idle: resultado reanudable, no excepción.
             self.assertEqual(r["phase_at_end"], "idle_timeout",
@@ -191,7 +192,7 @@ class TestHeartbeatCallback(unittest.IsolatedAsyncioTestCase):
                 return True
 
         store: dict = {}
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=_FakeNotify(),
             chat_id="c1", target="demo", model="test")
         rp = store["c1"]

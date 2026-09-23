@@ -19,6 +19,7 @@ Cómo correr:
     python -m pytest tests/test_ask_human_evidencia.py -q
 """
 from __future__ import annotations
+from relay import cbm_runtime, expert_evidence, expert_models, expert_runner
 
 import json
 import tempfile
@@ -52,30 +53,30 @@ async def db(tmp_path):
 
 
 def test_evidencia_vacia_rechaza():
-    assert experts._evidencia_insuficiente("") is not None
-    assert experts._evidencia_insuficiente("   ") is not None
+    assert expert_evidence._evidencia_insuficiente("") is not None
+    assert expert_evidence._evidencia_insuficiente("   ") is not None
 
 
 def test_evidencia_muy_corta_rechaza():
-    assert experts._evidencia_insuficiente("está bien") is not None
+    assert expert_evidence._evidencia_insuficiente("está bien") is not None
 
 
 def test_evidencia_sin_archivo_rechaza():
-    motivo = experts._evidencia_insuficiente(
+    motivo = expert_evidence._evidencia_insuficiente(
         "revisé el código y las pruebas pasan, todo funciona correctamente "
         "según lo esperado")
     assert motivo is not None
 
 
 def test_evidencia_pura_especulacion_rechaza():
-    motivo = experts._evidencia_insuficiente(
+    motivo = expert_evidence._evidencia_insuficiente(
         "asumo que aparentemente supongo que no leí el resto del código "
         "pero creo que está bien igual, sin dudas")
     assert motivo is not None
 
 
 def test_evidencia_con_archivo_concreto_pasa():
-    assert experts._evidencia_insuficiente(
+    assert expert_evidence._evidencia_insuficiente(
         "leí Service/Foo.cs y el método Bar no valida null antes de "
         "usarlo, por eso tira NullReferenceException") is None
 
@@ -88,15 +89,15 @@ def test_un_archivo_pegado_a_nada_no_alcanza():
     deja al humano exactamente donde estaba: teniendo que abrir el repo
     para poder contestar. El piso de largo es lo que lo ataja.
     """
-    assert experts._evidencia_insuficiente("leí Foo.cs y está mal") is not None
-    assert experts._evidencia_insuficiente(
+    assert expert_evidence._evidencia_insuficiente("leí Foo.cs y está mal") is not None
+    assert expert_evidence._evidencia_insuficiente(
         "revisé el archivo config.json y todo parece estar bien") is not None
 
 
 def test_evidencia_caso_real_con_hedge_y_archivo_pasa():
     """El caso real del pedido: un hedge NO invalida si cita el archivo
     donde de verdad está ese hedge — reportarlo es evidencia legítima."""
-    assert experts._evidencia_insuficiente(CASO_REAL) is None
+    assert expert_evidence._evidencia_insuficiente(CASO_REAL) is None
 
 
 # ---------- wiring de la tool ----------
@@ -121,9 +122,11 @@ async def test_ask_human_sin_evidencia_reintenta_y_no_registra_pregunta(db):
         return ModelResponse(parts=[TextPart("listo, quedé esperando")])
 
     proj = _project(str(tempfile.mkdtemp()))
-    with patch.object(experts, "build_model", lambda s: FunctionModel(act)), \
-         patch.object(experts, "cbm_binary_path", lambda: None):
-        await experts.run_expert(
+    await db.create_conversation(
+        project_slug="demo", conversation_id="conv-sin-evidencia")
+    with patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+        await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
             chat_id="chat-sin-evidencia", conversation_id="conv-sin-evidencia")
 
@@ -145,9 +148,11 @@ async def test_ask_human_con_evidencia_valida_la_persiste(db):
             "evidencia": CASO_REAL})])
 
     proj = _project(str(tempfile.mkdtemp()))
-    with patch.object(experts, "build_model", lambda s: FunctionModel(act)), \
-         patch.object(experts, "cbm_binary_path", lambda: None):
-        await experts.run_expert(
+    await db.create_conversation(
+        project_slug="demo", conversation_id="conv-con-evidencia")
+    with patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+        await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
             chat_id="chat-con-evidencia", conversation_id="conv-con-evidencia")
 

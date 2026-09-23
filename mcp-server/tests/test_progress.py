@@ -17,6 +17,7 @@ Cómo correr:
     python -m pytest tests/test_progress.py -q
 """
 from __future__ import annotations
+from relay import cbm_runtime, expert_models, expert_runner, progress
 
 import asyncio
 import json
@@ -76,7 +77,7 @@ class TestRunExpertProgress(unittest.IsolatedAsyncioTestCase):
                 "system_prompt": "", "mcp_servers": [],
                 "defaults_json": {}, "native_tools": [],
             }
-            r = await experts.run_expert(project, "hola", model_override="test")
+            r = await expert_runner.run_expert(project, "hola", model_override="test")
             # TestModel con call_tools=[]: no ejecuta tools. phase queda
             # en "writing" (ModelResponseNode) — suficiente para validar
             # que el campo se está devolviendo.
@@ -99,7 +100,7 @@ class TestRunExpertProgress(unittest.IsolatedAsyncioTestCase):
                 calls.append({"phase": phase, "tool": tool,
                               "tool_calls": tool_calls})
 
-            r = await experts.run_expert(project, "hola",
+            r = await expert_runner.run_expert(project, "hola",
                                          model_override="test",
                                          on_progress=cb)
             # Mínimo 1 llamada (el "thinking" inicial).
@@ -120,14 +121,14 @@ class TestRunExpertProgress(unittest.IsolatedAsyncioTestCase):
                 "system_prompt": "", "mcp_servers": [],
                 "defaults_json": {}, "native_tools": [],
             }
-            r1 = await experts.run_expert(project, "primer turno",
+            r1 = await expert_runner.run_expert(project, "primer turno",
                                           model_override="test")
             self.assertTrue(r1["messages_json"])
             # Re-validable
             history = ModelMessagesTypeAdapter.validate_json(r1["messages_json"])
             self.assertGreater(len(history), 0)
             # Replay crece el historial (igual que test_conversations)
-            r2 = await experts.run_expert(project, "segundo turno",
+            r2 = await expert_runner.run_expert(project, "segundo turno",
                                           model_override="test",
                                           message_history_json=r1["messages_json"])
             self.assertGreater(len(r2["messages_json"]),
@@ -148,7 +149,7 @@ class TestMakeProgressCallback(unittest.IsolatedAsyncioTestCase):
                                       "metadata": metadata or {}})
                 return True
 
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=FakeNotify(),
             chat_id="cid-1", target="demo", model="test",
         )
@@ -183,7 +184,7 @@ class TestMakeProgressCallback(unittest.IsolatedAsyncioTestCase):
                                       "metadata": metadata or {}})
                 return True
 
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=FakeNotify(),
             chat_id="cid-2", target="demo", model="test")
 
@@ -207,7 +208,7 @@ class TestMakeProgressCallback(unittest.IsolatedAsyncioTestCase):
         Sin notify (el bot puede estar caído): los steps se guardan igual.
         """
         store: dict = {}
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=None,
             chat_id="cid-3", target="demo", model="test")
         rp = store["cid-3"]
@@ -238,18 +239,18 @@ class TestMakeProgressCallback(unittest.IsolatedAsyncioTestCase):
         """El relay guarda solo los últimos STEPS_KEEP: un run de 200 tool
         calls no puede inflar el payload de /experts/status."""
         store: dict = {}
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=None,
             chat_id="cid-4", target="demo", model="test")
         rp = store["cid-4"]
-        total = experts.STEPS_KEEP + 15
+        total = progress.STEPS_KEEP + 15
         for i in range(1, total + 1):
             await cb(phase="tool_call", tool="read_file", tool_calls=i,
                      message=f"paso {i}")
-        self.assertEqual(len(rp.steps), experts.STEPS_KEEP)
+        self.assertEqual(len(rp.steps), progress.STEPS_KEEP)
         # Conserva los MÁS NUEVOS (el web ya renderizó los viejos).
         self.assertEqual(rp.steps[-1]["n"], total)
-        self.assertEqual(rp.steps[0]["n"], total - experts.STEPS_KEEP + 1)
+        self.assertEqual(rp.steps[0]["n"], total - progress.STEPS_KEEP + 1)
 
     def test_narracion_corta_pasa_intacta(self) -> None:
         """Caso real (website-demo, 2026-08-01): una tabla de opciones A/B/C/D
@@ -258,22 +259,22 @@ class TestMakeProgressCallback(unittest.IsolatedAsyncioTestCase):
         pasa entera."""
         tabla = "| opción | qué necesitás |\n" + ("| A. Reviso local | nada |\n" * 40)
         self.assertGreater(len(tabla), 1000)
-        self.assertLess(len(tabla), experts.SAY_MAX_CHARS)
-        self.assertEqual(experts._clip_say(tabla), tabla)
-        self.assertNotIn(experts.SAY_CLIP_MARK, experts._clip_say(tabla))
+        self.assertLess(len(tabla), progress.SAY_MAX_CHARS)
+        self.assertEqual(progress._clip_say(tabla), tabla)
+        self.assertNotIn(progress.SAY_CLIP_MARK, progress._clip_say(tabla))
 
     def test_narracion_larga_se_corta_con_marca(self) -> None:
         """El corte tiene que ser VISIBLE: sin marca parece que el modelo
         escribe frases truncadas (así se manifestó el bug)."""
-        largo = "x" * (experts.SAY_MAX_CHARS + 500)
-        out = experts._clip_say(largo)
-        self.assertTrue(out.endswith(experts.SAY_CLIP_MARK))
-        self.assertEqual(len(out), experts.SAY_MAX_CHARS + len(experts.SAY_CLIP_MARK))
+        largo = "x" * (progress.SAY_MAX_CHARS + 500)
+        out = progress._clip_say(largo)
+        self.assertTrue(out.endswith(progress.SAY_CLIP_MARK))
+        self.assertEqual(len(out), progress.SAY_MAX_CHARS + len(progress.SAY_CLIP_MARK))
 
     async def test_snapshot_serializable(self) -> None:
         import json
         store: dict = {}
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=None,
             chat_id="cid-x", target="t", model="m",
         )
@@ -410,9 +411,9 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
             return '{"results": []}'
 
         with patch.object(NotifyClient, "send", fake_send), \
-             patch.object(experts, "cbm_binary_path", lambda: "cbm"), \
-             patch.object(experts, "cbm_call", fake_cbm), \
-             patch.object(experts, "build_model",
+             patch.object(cbm_runtime, "cbm_binary_path", lambda: "cbm"), \
+             patch.object(cbm_runtime, "cbm_call", fake_cbm), \
+             patch.object(expert_models, "build_model",
                           lambda spec: TestModel(call_tools=["cbm_query"])):
             app = create_app()
             async with TestClient(TestServer(app)) as client:

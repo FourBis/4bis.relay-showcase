@@ -13,6 +13,7 @@ Una skill del repo gana sobre la global del mismo nombre: es mas
 especifica por construccion y se versiona junto al codigo que describe.
 """
 from __future__ import annotations
+from relay import skills_index as SI  # noqa: E402
 
 import sys
 from pathlib import Path
@@ -38,7 +39,7 @@ def test_sin_repo_solo_esta_la_global(tmp_path, monkeypatch):
     """El comportamiento de antes queda intacto: sin repo, una sola ruta."""
     global_dir = tmp_path / "global"
     global_dir.mkdir()
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     assert S.skills_dirs("") == [global_dir]
     # Un repo que existe pero no tiene `.claude/skills` tampoco suma.
@@ -50,7 +51,7 @@ def test_sin_repo_solo_esta_la_global(tmp_path, monkeypatch):
 def test_el_repo_va_primero(tmp_path, monkeypatch):
     global_dir = tmp_path / "global"
     global_dir.mkdir()
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "repo"
     propio = repo / ".claude" / "skills"
@@ -65,7 +66,7 @@ def test_la_skill_del_repo_se_ve_ademas_de_las_globales(tmp_path, monkeypatch):
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _skill(global_dir, "unocss", "unocss", "CSS atomico")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "repo"
     propio = repo / ".claude" / "skills"
@@ -84,7 +85,7 @@ def test_ante_el_mismo_nombre_gana_la_del_repo(tmp_path, monkeypatch):
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _skill(global_dir, "estilo", "estilo", "la global", cuerpo="GLOBAL")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "repo"
     propio = repo / ".claude" / "skills"
@@ -109,7 +110,7 @@ def test_read_skill_multi_cae_a_la_global(tmp_path, monkeypatch):
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _skill(global_dir, "vite", "vite", "bundler", cuerpo="VITE")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills").mkdir(parents=True)
@@ -123,7 +124,7 @@ def test_un_repo_path_invalido_no_rompe(tmp_path, monkeypatch):
     """La fila del proyecto puede traer basura: no puede voltear el run."""
     global_dir = tmp_path / "global"
     global_dir.mkdir()
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     for basura in ("\x00raro", "   ", "C:/no/existe/en/ningun/lado"):
         assert S.skills_dirs(basura)[-1] == global_dir, (
@@ -139,7 +140,7 @@ def _dos_mundos(tmp_path, monkeypatch):
     _skill(global_dir, "unocss", "unocss", "CSS atomico")
     _skill(global_dir, "vite", "vite", "bundler")
     _skill(global_dir, "csharp-async", "csharp-async", "async en C#")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "repo"
     propio = repo / ".claude" / "skills"
@@ -211,7 +212,7 @@ def test_un_proyecto_sin_skills_propias_solo_filtra_las_globales(tmp_path,
     global_dir.mkdir()
     _skill(global_dir, "vite", "vite", "bundler")
     _skill(global_dir, "unocss", "unocss", "CSS atomico")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     repo = tmp_path / "pelado"
     repo.mkdir()
@@ -240,7 +241,7 @@ def test_una_skill_manual_ya_no_viaja_como_nombre_pelado(tmp_path,
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _manual(global_dir, "tsdown", "tsdown", "Empaqueta librerias TypeScript")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     bloque = S.bloque_del_proyecto("", None)
     assert "tsdown" in bloque
@@ -258,7 +259,7 @@ def test_la_seccion_on_demand_sigue_diciendo_como_pedir_el_cuerpo(
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _manual(global_dir, "vite", "vite", "bundler")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     bloque = S.bloque_del_proyecto("", None)
     assert "read_skill" in bloque, (
@@ -272,7 +273,7 @@ def test_las_auto_y_las_manual_siguen_separadas(tmp_path, monkeypatch):
     global_dir.mkdir()
     _skill(global_dir, "auto-una", "auto-una", "se lee siempre")
     _manual(global_dir, "manual-una", "manual-una", "se lee si aplica")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     bloque = S.bloque_del_proyecto("", None)
     assert "## Skills disponibles" in bloque
@@ -285,7 +286,7 @@ def test_sin_manual_no_queda_un_encabezado_vacio(tmp_path, monkeypatch):
     global_dir = tmp_path / "global"
     global_dir.mkdir()
     _skill(global_dir, "sola", "sola", "la unica")
-    monkeypatch.setattr(S, "resolve_skills_dir", lambda: global_dir)
+    monkeypatch.setattr(SI, "resolve_skills_dir", lambda: global_dir)
 
     bloque = S.bloque_del_proyecto("", None)
     assert "on-demand" not in bloque, (

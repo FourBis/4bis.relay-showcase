@@ -36,7 +36,7 @@ async def cliente(monkeypatch):
     """
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
-    from relay import admin
+    from relay import admin_config_models as model_test
 
     async def _get_model(spec):
         return None if spec == "no:existe" else {"spec": spec}
@@ -45,10 +45,10 @@ async def cliente(monkeypatch):
         return None
 
     app = web.Application()
-    app[admin.DB_KEY] = type(
+    app[model_test.DB_KEY] = type(
         "_Db", (), {"get_model": staticmethod(_get_model)})()
-    app.router.add_post("/admin/api/models/{spec}/test", admin.api_model_test)
-    monkeypatch.setattr(admin, "_refrescar_catalogo", _noop)
+    app.router.add_post("/admin/api/models/{spec}/test", model_test.api_model_test)
+    monkeypatch.setattr(model_test, "_refrescar_catalogo", _noop)
 
     c = TestClient(TestServer(app))
     await c.start_server()
@@ -66,9 +66,9 @@ async def test_modelo_desconocido_da_404(cliente):
 async def test_sin_key_se_distingue_del_fallo_del_proveedor(cliente, monkeypatch):
     """`sin_key` es config nuestra; un HTTP del proveedor es del otro
     lado. Se arreglan en lugares distintos, así que no pueden confundirse."""
-    from relay import admin
-    monkeypatch.setattr(admin, "build_model", _que_tira(
-        admin.ModelUnavailable("grok:x no tiene API key: cargala en la fila")))
+    from relay import admin_config_models as model_test
+    monkeypatch.setattr(model_test, "build_model", _que_tira(
+        model_test.ModelUnavailable("grok:x no tiene API key: cargala en la fila")))
     r = await cliente.post("/admin/api/models/grok%3Ax/test")
     assert r.status == 200          # el test corrió; lo que falló es el modelo
     body = await r.json()
@@ -81,12 +81,12 @@ async def test_sin_key_se_distingue_del_fallo_del_proveedor(cliente, monkeypatch
 async def test_el_error_del_proveedor_llega_crudo_con_status(cliente, monkeypatch):
     """EL test de este archivo: el caso xAI, tal cual pasó."""
     from pydantic_ai.exceptions import ModelHTTPError
-    from relay import admin
+    from relay import admin_config_models as model_test
 
     cuerpo = ('{"code":"permission-denied","error":"Your newly created team '
               'doesn\'t have any credits or licenses yet. You can purchase '
               'those on https://console.x.ai/team/b386e98f."}')
-    monkeypatch.setattr(admin, "build_model", lambda _s: object())
+    monkeypatch.setattr(model_test, "build_model", lambda _s: object())
     _parchar_agent(monkeypatch, ModelHTTPError(
         status_code=403, model_name="grok-4.6", body=cuerpo))
 
@@ -102,9 +102,9 @@ async def test_el_error_del_proveedor_llega_crudo_con_status(cliente, monkeypatc
 @pytest.mark.asyncio
 async def test_timeout_no_se_reporta_como_error_del_proveedor(cliente, monkeypatch):
     import asyncio
-    from relay import admin
-    monkeypatch.setattr(admin, "build_model", lambda _s: object())
-    monkeypatch.setattr(admin, "_TEST_TIMEOUT_S", 0.05)
+    from relay import admin_config_models as model_test
+    monkeypatch.setattr(model_test, "build_model", lambda _s: object())
+    monkeypatch.setattr(model_test, "_TEST_TIMEOUT_S", 0.05)
     _parchar_agent(monkeypatch, asyncio.TimeoutError(), demora=1.0)
     body = await (await cliente.post("/admin/api/models/lento%3Ax/test")).json()
     assert body["ok"] is False and body["kind"] == "timeout"
@@ -117,8 +117,8 @@ async def test_exito_informa_tokens(cliente, monkeypatch):
     Cubre además el bug que ya me comí una vez: `usage` es PROPIEDAD en
     pydantic-ai 2.x, y con paréntesis el éxito reportaba error.
     """
-    from relay import admin
-    monkeypatch.setattr(admin, "build_model", lambda _s: object())
+    from relay import admin_config_models as model_test
+    monkeypatch.setattr(model_test, "build_model", lambda _s: object())
     _parchar_agent(monkeypatch, None)
     body = await (await cliente.post("/admin/api/models/ok%3Ax/test")).json()
     assert body["ok"] is True

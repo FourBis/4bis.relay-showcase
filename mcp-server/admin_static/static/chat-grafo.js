@@ -22,6 +22,7 @@
 import { $, apiRoot, escape } from "./api.js";
 import { toast, confirmModal } from "./ui.js";
 import { verTiradorGrafo } from "./panel-resize.js";
+import { isChatViewVisible } from "./chat-window.js";
 
 const POLL_MS = 2500;
 
@@ -124,6 +125,7 @@ export async function pokeGrafo() {
 async function refrescar() {
   const propio = estado;
   if (!propio) return;
+  if (!isChatViewVisible()) { programar(propio); return; }
   let r = null;
   try {
     // UN pedido. El servidor decide qué mostrar: grafo si el pedido se

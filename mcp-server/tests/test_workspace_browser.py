@@ -89,7 +89,11 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             await page.locator("button.chat-drawer-btn:visible").first.click()
             await expect(page.locator(".chat-sidebar.mobile-open")).to_be_visible()
             await page.locator(f'.chat-conv-item[data-id="{conv}"]').click()
-            await expect(page.locator("#chat-panel-messages")).to_contain_text(
+            conversation_window = page.locator(
+                f'article.workspace-window[data-window-id="object:conversation:{conv}"]')
+            await expect(conversation_window).to_be_visible(timeout=10_000)
+            conversation = conversation_window.frame_locator("iframe")
+            await expect(conversation.locator("#chat-panel-messages")).to_contain_text(
                 "Resultado verificable", timeout=10_000)
 
             async def open_tool(name):
@@ -185,11 +189,14 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             assert saved_rect and restored_rect
             for key in ("x", "y", "width", "height"):
                 assert abs(restored_rect[key] - saved_rect[key]) <= 3, (key, saved_rect, restored_rect)
-            # La recarga conserva ventanas y geometría, pero el hilo activo
-            # se vuelve a elegir desde el drawer para cargar sus mensajes.
+            # La recarga restaura el iframe; elegir el hilo otra vez reutiliza
+            # la misma ventana y recupera sus mensajes.
             await page.locator("button.chat-drawer-btn:visible").first.click()
             await page.locator(f'.chat-conv-item[data-id="{conv}"]').click()
-            await expect(page.locator("#chat-panel-messages")).to_contain_text(
+            await expect(conversation_window).to_be_visible(timeout=10_000)
+            assert await page.locator(
+                f'article.workspace-window[data-window-id="object:conversation:{conv}"]').count() == 1
+            await expect(conversation.locator("#chat-panel-messages")).to_contain_text(
                 "Resultado verificable", timeout=10_000)
 
             # Mosaico: todas las ventanas abiertas ocupan rectángulos distintos.
@@ -215,11 +222,11 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             # Abrir la respuesta completa, separar la tabla, filtrarla y
             # volver al chat sin destruir ninguno de los dos objetos.
             await page.locator(
-                '#workspace-items button[data-window-id="chat"]').click()
-            grafo = page.locator("#chat-grafo")
+                f'#workspace-items button[data-window-id="object:conversation:{conv}"]').click()
+            grafo = conversation.locator("#chat-grafo")
             if await grafo.is_visible():
                 await grafo.locator("#chat-grafo-cerrar").click()
-            await page.locator('button.chat-open-object').click()
+            await conversation.locator('button.chat-open-object').click()
             response_window = page.locator(
                 'article.workspace-window[data-window-id*="response:0"]')
             await expect(response_window).to_be_visible(timeout=10_000)
@@ -265,8 +272,8 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             # El retorno explícito activa Chat y conserva la tabla abierta.
             await table_window.get_by_role(
                 "button", name="Ir a la conversación", exact=True).click()
-            await expect(chat_window).to_be_visible(timeout=10_000)
-            await expect(page.locator("#chat-panel-messages")).to_contain_text(
+            await expect(conversation_window).to_be_visible(timeout=10_000)
+            await expect(conversation.locator("#chat-panel-messages")).to_contain_text(
                 "Resultado verificable")
             await expect(table_window).to_be_visible()
             # Cerrar el objeto no cambia el módulo activo ni destruye el chat.
@@ -313,6 +320,8 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
                 await page.locator("#workspace-launcher-close").click()
                 await page.wait_for_timeout(80)
             await page.set_viewport_size({"width": 1440, "height": 1000})
+            await page.evaluate(
+                "Promise.all(document.getAnimations().map(a => a.finished.catch(() => {})))")
             restored_desktop = await chat_window.bounding_box()
             assert restored_desktop
             for key in ("x", "y", "width", "height"):

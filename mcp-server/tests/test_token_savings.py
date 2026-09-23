@@ -9,6 +9,7 @@ Cómo correr:
     python -m pytest tests/test_token_savings.py -q
 """
 from __future__ import annotations
+from relay import expert_history, expert_toolsets
 
 import json
 import unittest
@@ -44,39 +45,39 @@ class TestCapToolResult(unittest.TestCase):
     def test_sdk_mapped_text_is_capped_and_images_survive(self):
         from pydantic_ai.messages import BinaryImage
         image = BinaryImage(data=b"png", media_type="image/png")
-        result = ["x" * (experts.TOOL_RESULT_CAP + 5000), "more text", image]
-        out = experts._cap_tool_result(result)
+        result = ["x" * (expert_history.TOOL_RESULT_CAP + 5000), "more text", image]
+        out = expert_history._cap_tool_result(result)
         self.assertLess(sum(len(x) for x in out if isinstance(x, str)),
-                        experts.TOOL_RESULT_CAP + 500)
+                        expert_history.TOOL_RESULT_CAP + 500)
         self.assertIn(image, out)
         self.assertIn("TRUNCADO", out[0])
 
     def test_short_passthrough(self) -> None:
-        self.assertEqual(experts._cap_tool_result("hola"), "hola")
+        self.assertEqual(expert_history._cap_tool_result("hola"), "hola")
 
     def test_long_str_truncated_with_marker(self) -> None:
-        fat = "x" * (experts.TOOL_RESULT_CAP + 5000)
-        out = experts._cap_tool_result(fat)
+        fat = "x" * (expert_history.TOOL_RESULT_CAP + 5000)
+        out = expert_history._cap_tool_result(fat)
         self.assertLess(len(out), len(fat))
         self.assertIn("TRUNCADO", out)
 
     def test_unknown_type_passthrough(self) -> None:
         obj = {"a": 1}
-        self.assertIs(experts._cap_tool_result(obj), obj)
+        self.assertIs(expert_history._cap_tool_result(obj), obj)
 
 
 class TestElide(unittest.TestCase):
     def test_keeps_last_k_and_stubs_old(self) -> None:
-        n = experts.TOOL_KEEP_FULL + 3
+        n = expert_history.TOOL_KEEP_FULL + 3
         fat = "y" * 2000
         msgs = _turn("hola", [(f"t{i}", fat) for i in range(n)], "listo")
-        experts._elide_old_tool_returns(msgs)
+        expert_history._elide_old_tool_returns(msgs)
         returns = [p for m in msgs if isinstance(m, ModelRequest)
                    for p in m.parts if isinstance(p, ToolReturnPart)]
-        stubbed = [p for p in returns if experts._ELIDE_MARK in p.content]
+        stubbed = [p for p in returns if expert_history._ELIDE_MARK in p.content]
         self.assertEqual(len(stubbed), 3)
         # los últimos K intactos
-        for p in returns[-experts.TOOL_KEEP_FULL:]:
+        for p in returns[-expert_history.TOOL_KEEP_FULL:]:
             self.assertEqual(p.content, fat)
 
     def test_conserva_el_veredicto_del_final(self) -> None:
@@ -84,26 +85,26 @@ class TestElide(unittest.TestCase):
         releyendo el hilo el modelo no sabe si el build pasó."""
         build = "dotnet build\n" + ("warning CS0168\n" * 200) + "(exit=1)"
         msgs = _turn("compilá", [("run_shell", build)] * 12, "listo")
-        experts._elide_old_tool_returns(msgs)
+        expert_history._elide_old_tool_returns(msgs)
         stub = [p for m in msgs if isinstance(m, ModelRequest)
                 for p in m.parts if isinstance(p, ToolReturnPart)
-                and experts._ELIDE_MARK in p.content][0]
+                and expert_history._ELIDE_MARK in p.content][0]
         self.assertTrue(stub.content.endswith("(exit=1)"), stub.content[-60:])
         self.assertIn("dotnet build", stub.content)      # cabeza intacta
-        self.assertLess(len(stub.content), experts._ELIDE_MIN_CHARS)  # idempotente
+        self.assertLess(len(stub.content), expert_history._ELIDE_MIN_CHARS)  # idempotente
         # una cola larga (no es un veredicto) no se copia
         largo = "x\n" * 400 + "y" * 300
         msgs = _turn("dale", [("read_file", largo)] * 12, "ok")
-        experts._elide_old_tool_returns(msgs)
+        expert_history._elide_old_tool_returns(msgs)
         stub = [p for m in msgs if isinstance(m, ModelRequest)
                 for p in m.parts if isinstance(p, ToolReturnPart)
-                and experts._ELIDE_MARK in p.content][0]
-        self.assertTrue(stub.content.endswith(experts._ELIDE_MARK))
+                and expert_history._ELIDE_MARK in p.content][0]
+        self.assertTrue(stub.content.endswith(expert_history._ELIDE_MARK))
 
     def test_idempotente_y_cortos_intactos(self) -> None:
         msgs = _turn("hola", [("t", "corto")] * 12, "listo")
-        experts._elide_old_tool_returns(msgs)
-        experts._elide_old_tool_returns(msgs)
+        expert_history._elide_old_tool_returns(msgs)
+        expert_history._elide_old_tool_returns(msgs)
         returns = [p for m in msgs if isinstance(m, ModelRequest)
                    for p in m.parts if isinstance(p, ToolReturnPart)]
         for p in returns:
@@ -126,34 +127,34 @@ class TestElideResponseParts(unittest.TestCase):
         return msgs
 
     def test_thinking_viejo_se_va_y_el_reciente_queda(self) -> None:
-        msgs = self._run_with_thinking(experts.THINK_KEEP_FULL + 4)
-        experts._elide_old_response_parts(msgs)
+        msgs = self._run_with_thinking(expert_history.THINK_KEEP_FULL + 4)
+        expert_history._elide_old_response_parts(msgs)
         resp = [m for m in msgs if isinstance(m, ModelResponse)]
         con_think = [m for m in resp
                      if any(isinstance(p, ThinkingPart) for p in m.parts)]
-        self.assertEqual(len(con_think), experts.THINK_KEEP_FULL)
-        self.assertEqual(con_think, resp[-experts.THINK_KEEP_FULL:])
+        self.assertEqual(len(con_think), expert_history.THINK_KEEP_FULL)
+        self.assertEqual(con_think, resp[-expert_history.THINK_KEEP_FULL:])
         # el tool call sobrevive: sacar thinking no rompe el par
         for m in resp:
             self.assertTrue(any(isinstance(p, ToolCallPart) for p in m.parts))
 
     def test_args_viejos_stubbeados_y_json_valido(self) -> None:
-        msgs = self._run_with_thinking(experts.TOOL_KEEP_FULL + 3)
-        experts._elide_old_response_parts(msgs)
+        msgs = self._run_with_thinking(expert_history.TOOL_KEEP_FULL + 3)
+        expert_history._elide_old_response_parts(msgs)
         calls = [p for m in msgs if isinstance(m, ModelResponse)
                  for p in m.parts if isinstance(p, ToolCallPart)]
-        stubbed = [p for p in calls if p.args == experts._ELIDED_ARGS]
+        stubbed = [p for p in calls if p.args == expert_history._ELIDED_ARGS]
         self.assertEqual(len(stubbed), 3)
-        json.loads(experts._ELIDED_ARGS)  # el provider tiene que poder parsearlo
-        for p in calls[-experts.TOOL_KEEP_FULL:]:
+        json.loads(expert_history._ELIDED_ARGS)  # el provider tiene que poder parsearlo
+        for p in calls[-expert_history.TOOL_KEEP_FULL:]:
             self.assertEqual(p.args, "w" * 3000)
 
     def test_call_sin_responder_nunca_se_toca(self) -> None:
         """Un par call↔return abierto roto = UserError en el turno siguiente."""
-        msgs = self._run_with_thinking(experts.TOOL_KEEP_FULL + 3)
+        msgs = self._run_with_thinking(expert_history.TOOL_KEEP_FULL + 3)
         msgs.append(ModelResponse(parts=[ToolCallPart(
             tool_name="write_file", args="z" * 3000, tool_call_id="huerfano")]))
-        experts._elide_old_response_parts(msgs)
+        expert_history._elide_old_response_parts(msgs)
         orphan = [p for m in msgs if isinstance(m, ModelResponse)
                   for p in m.parts if isinstance(p, ToolCallPart)
                   and p.tool_call_id == "huerfano"][0]
@@ -163,23 +164,23 @@ class TestElideResponseParts(unittest.TestCase):
         """Thinking solo, sin texto ni call: se deja. Un assistant sin
         contenido lo rechazan varios providers."""
         msgs = [ModelResponse(parts=[ThinkingPart(content="solo pienso")])]
-        msgs += self._run_with_thinking(experts.THINK_KEEP_FULL + 1)
-        experts._elide_old_response_parts(msgs)
+        msgs += self._run_with_thinking(expert_history.THINK_KEEP_FULL + 1)
+        expert_history._elide_old_response_parts(msgs)
         self.assertEqual(len(msgs[0].parts), 1)
 
     def test_idempotente(self) -> None:
-        msgs = self._run_with_thinking(experts.TOOL_KEEP_FULL + 3)
-        experts._elide_old_response_parts(msgs)
-        snapshot = experts._dump_messages(msgs)
-        experts._elide_old_response_parts(msgs)
-        self.assertEqual(experts._dump_messages(msgs), snapshot)
+        msgs = self._run_with_thinking(expert_history.TOOL_KEEP_FULL + 3)
+        expert_history._elide_old_response_parts(msgs)
+        snapshot = expert_history._dump_messages(msgs)
+        expert_history._elide_old_response_parts(msgs)
+        self.assertEqual(expert_history._dump_messages(msgs), snapshot)
 
 
 class TestSlimHistory(unittest.TestCase):
     def test_old_turns_lose_tools_last_turn_intact(self) -> None:
         old = _turn("pregunta 1", [("tool_a", "z" * 5000)], "respuesta 1")
         recent = _turn("pregunta 2", [("tool_b", "data")], "respuesta 2")
-        slim = experts._slim_history(old + recent)
+        slim = expert_history._slim_history(old + recent)
         # el turno viejo quedó user + text, sin partes de tools
         for m in slim[:-len(recent)]:
             for p in getattr(m, "parts", []):
@@ -189,13 +190,13 @@ class TestSlimHistory(unittest.TestCase):
 
     def test_single_turn_untouched(self) -> None:
         msgs = _turn("solo una", [("t", "r")], "ok")
-        self.assertEqual(experts._slim_history(list(msgs)), msgs)
+        self.assertEqual(expert_history._slim_history(list(msgs)), msgs)
 
     def test_shrinks_size(self) -> None:
         old = _turn("p1", [("t", "w" * 20000)] * 3, "r1")
         recent = _turn("p2", [], "r2")
         full = old + recent
-        slim = experts._slim_history(list(full))
+        slim = expert_history._slim_history(list(full))
         size = lambda ms: sum(  # noqa: E731
             len(str(getattr(p, "content", ""))) for m in ms
             for p in getattr(m, "parts", []))
@@ -214,7 +215,7 @@ class TestNativeToolsAreCapped(unittest.TestCase):
         from pydantic_ai.models.test import TestModel
         from pydantic_ai.toolsets import FunctionToolset
 
-        fat = "x" * (experts.TOOL_RESULT_CAP + 10_000)
+        fat = "x" * (expert_history.TOOL_RESULT_CAP + 10_000)
 
         async def gorda() -> str:
             """Devuelve un result gordo."""
@@ -222,7 +223,7 @@ class TestNativeToolsAreCapped(unittest.TestCase):
 
         agent = Agent(
             TestModel(call_tools=["gorda"]),
-            toolsets=[experts.CappedToolset(wrapped=FunctionToolset(
+            toolsets=[expert_toolsets.CappedToolset(wrapped=FunctionToolset(
                 [Tool(gorda, takes_ctx=False)], max_retries=3))],
         )
         res = asyncio.run(agent.run("dale"))
@@ -253,7 +254,7 @@ class TestCappedToolsetTimeout(unittest.IsolatedAsyncioTestCase):
             async def call_tool(self, name, tool_args, ctx, tool):
                 await asyncio.sleep(3600)  # nunca devuelve
 
-        capped = experts.CappedToolset(wrapped=_Hang(), timeout=0.2)
+        capped = expert_toolsets.CappedToolset(wrapped=_Hang(), timeout=0.2)
         t0 = time.monotonic()
         with self.assertRaises(ModelRetry) as cm:
             await capped.call_tool("run_shell", {}, None, None)
@@ -272,7 +273,7 @@ class TestCappedToolsetTimeout(unittest.IsolatedAsyncioTestCase):
                 return "ok"
 
         ctx = types.SimpleNamespace(messages=[])
-        capped = experts.CappedToolset(wrapped=_Fast(), timeout=None)
+        capped = expert_toolsets.CappedToolset(wrapped=_Fast(), timeout=None)
         self.assertEqual(await capped.call_tool("x", {}, ctx, None), "ok")
 
 

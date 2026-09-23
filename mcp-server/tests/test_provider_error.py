@@ -27,6 +27,7 @@ Como correr:
     python -m pytest tests/test_provider_error.py -q
 """
 from __future__ import annotations
+from relay import expert_context, expert_models, expert_runner, expert_selection
 
 import json
 import tempfile
@@ -101,10 +102,10 @@ class TestProviderError(unittest.IsolatedAsyncioTestCase):
         async def _fake_catalog(*_a, **_k):
             return (_ping_toolset(), [], [])
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model", lambda spec: model), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts, "_PROVIDER_BACKOFF_S", 0):
-                return await experts.run_expert(
+            with patch.object(expert_models, "build_model", lambda spec: model), \
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(expert_context, "_PROVIDER_BACKOFF_S", 0):
+                return await expert_runner.run_expert(
                     self._project(tmp), "haz la tarea", db=_FakeDb())
 
     async def test_5xx_reintenta_sobre_el_historial_y_termina(self) -> None:

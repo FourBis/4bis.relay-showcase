@@ -135,6 +135,7 @@ async def test_segundo_post_con_conv_id_mismo_proyecto_da_409(
     """
     spy = _PlanificadorSpy()
     monkeypatch.setattr(planificador, "armar_grafo", spy.armar_grafo)
+    await db.create_conversation(project_slug="demo", conversation_id="otra-conv")
 
     app = _app(db)
     async with TestClient(TestServer(app)) as client:

@@ -6,7 +6,7 @@ Cubre:
   - assembled = bloques en orden, sin vacíos
   - stats reporta chars por bloque + total
   - proyecto sin system_prompt propio: bloque vacío, no rompe
-  - replicabilidad: el assembled coincide con experts.build_instructions
+  - replicabilidad: el assembled coincide con expert_instructions.build_instructions
     cuando NO hay git diff (sync) — si el repo no es git, debe ser igual
 
 Cómo correr:
@@ -14,6 +14,7 @@ Cómo correr:
     python -m pytest tests/test_system_prompt.py -q
 """
 from __future__ import annotations
+from relay import expert_git, expert_instructions, expert_models
 
 import asyncio
 import os
@@ -112,7 +113,7 @@ class TestSystemPromptEndpoint(unittest.IsolatedAsyncioTestCase):
 
     async def test_replicates_experts_build_instructions_when_no_git(self) -> None:
         """El assembled tiene que coincidir exactamente con
-        experts.build_instructions (sync).
+        expert_instructions.build_instructions (sync).
 
         Esto es el guard de "no desfasamos" — si alguien edita
         build_instructions y no actualiza el endpoint, este test falla.
@@ -129,7 +130,7 @@ class TestSystemPromptEndpoint(unittest.IsolatedAsyncioTestCase):
                 # Reconstruimos con las MISMAS primitivas que usa el
                 # endpoint (SkillCache real del app).
                 project = await self.db.get_project("demo")
-                ponytail = await experts.read_ponytail()
+                ponytail = await expert_models.read_ponytail()
                 skills_block = ""
                 try:
                     skills_block = await app[SKILLS_KEY].get_block()
@@ -137,7 +138,7 @@ class TestSystemPromptEndpoint(unittest.IsolatedAsyncioTestCase):
                     pass
                 # Sin git diff, el assembled debe ser lo que arma
                 # build_instructions (sync) con los mismos inputs.
-                expected = experts.build_instructions(
+                expected = expert_instructions.build_instructions(
                     project, ponytail, skills_block)
                 self.assertEqual(body["assembled"], expected)
 
@@ -213,7 +214,7 @@ class TestSystemPromptGitBlock(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("git_diff", body["blocks"])
                 self.assertNotIn("Branch:", body["assembled"])
         # el bloque en sí sigue vivo — solo cambió quién lo pide
-        block = experts._build_git_diff_block_sync(self._tmp.name)
+        block = expert_git._build_git_diff_block_sync(self._tmp.name)
         self.assertIn("Branch:", block)
         self.assertIn("HEAD:", block)
 

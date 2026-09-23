@@ -1,6 +1,6 @@
 # Validación de la versión de portafolio
 
-Revisión local del 16 y 17 de septiembre de 2026. Relay se presenta como proyecto
+Revisiones locales del 16, 17 y 22 de septiembre de 2026. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.
@@ -173,3 +173,44 @@ Para la suite general:
 Las validaciones de esta revisión se ejecutaron con HOME, USERPROFILE,
 LOCALAPPDATA, SQLite y estado temporales. No prueban credenciales reales,
 servicios externos, despliegue remoto ni plataformas distintas de Windows.
+
+### Tareas persistentes y ventanas de chat — 22 de septiembre de 2026
+
+Se incorporaron módulos Python separados por responsabilidad, tareas con
+worktree persistente, cola durable y seguimiento opcional de PR, además de varias
+ventanas de chat con nombre editable. Las adaptaciones conservan las protecciones
+del showcase: límites del navegador, permisos de miembros, configuración vacía y
+ocultación de credenciales en remotos. Los miembros reciben sólo el estado de la
+tarea; rutas, configuración y diagnósticos completos requieren owner.
+
+La transferencia contiene código genérico, documentación, pruebas y una captura
+sintética. No importa historia Git, bases de datos, conversaciones, configuración
+de proyectos, credenciales ni registros de instalaciones reales. La captura nueva
+se revisó visualmente y no contiene metadatos de texto ni EXIF.
+
+Comprobaciones locales de esta revisión:
+
+- El mismo conjunto de pruebas de `checks.yml`: **319 passed y 6 subtests passed**.
+- Suite general: **2343 passed, 4 failed, 10 skipped y 18 subtests passed** en
+  747,06 segundos. Los cuatro fallos pertenecían a pruebas: dos usaban `main`
+  en un fixture que ahora crea `develop`, uno tenía una variable renombrada dos
+  veces y otro simulaba el runner desde un módulo que ya no lo invoca. Se
+  corrigieron sin cambiar producción ni reducir assertions. La repetición
+  `pytest mcp-server/tests --lf -q` terminó con **4 passed** en 5,51 segundos.
+  No se repitió la suite completa tras esas cuatro correcciones de pruebas.
+- Cuatro recorridos de navegador opt-in aprobados: workspace, administración,
+  workflow y sanitización de contenido. Comprueban los chats dentro de su iframe,
+  distribución del grafo, recuperación de ventanas, teclado, foco y móvil.
+- Los dos recorridos sintéticos de `docs/qa` pasaron. Se añadió una comprobación
+  de una sola consulta inicial del plan por conversación.
+- El paquete Python se construyó y se comprobó que incluye los **142 módulos**.
+- Revisión de referencias internas y escaneo del árbol exportable con Gitleaks
+  8.30.1: **407 archivos**, sin hallazgos. No se agregaron exclusiones al escaneo.
+
+Las pruebas usan repositorios Git temporales, datos ficticios y proveedores
+simulados. Los tests históricos se adaptaron a los módulos responsables y a los
+nuevos workspaces; el cierre de conversaciones históricas conserva su prueba de
+error de PR, y el cierre de tareas administradas comprueba que no borre su rama
+ni sus archivos. Los resultados no acreditan un despliegue ni un ciclo con
+proveedores reales. Detalles y reproducción en la
+[evidencia pública](qa/persistent-tasks-public-2026-09-22.md).

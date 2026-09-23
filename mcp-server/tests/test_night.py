@@ -18,6 +18,7 @@ Cómo correr:
     python -m pytest tests/test_night.py -q
 """
 from __future__ import annotations
+from relay import expert_runner
 
 import asyncio
 import json
@@ -33,7 +34,7 @@ from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import night
+from relay import night, night_generator
 from relay.db import Database
 from relay.night import (
     BranchWorker,
@@ -404,7 +405,7 @@ class TestRefValidation(unittest.IsolatedAsyncioTestCase):
         with patch.object(TaskGenerator, "indexed_files",
                           return_value=self.indexed), \
              patch.object(pydantic_ai, "Agent", SlowAgent), \
-             patch.object(night, "PLAN_TIMEOUT_S", 0.05):
+             patch.object(night_generator, "PLAN_TIMEOUT_S", 0.05):
             tasks, missing = await self.gen.generate(
                 "directiva que cuelga al LLM")
         self.assertEqual(tasks, [],
@@ -1327,7 +1328,7 @@ class TestIndexedFilesFormatos(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(args.get("format"), "json")
             return json.dumps(payload)
 
-        with patch.object(night, "cbm_binary_path", lambda: "cbm.exe"),              patch.object(night, "cbm_call", fake_cbm):
+        with patch.object(night_generator, "cbm_binary_path", lambda: "cbm.exe"),              patch.object(night_generator, "cbm_call", fake_cbm):
             return await self.gen.indexed_files()
 
     async def test_formato_0_9_results(self) -> None:

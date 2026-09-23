@@ -2,15 +2,16 @@
 
 Cover:
   - git_flow: branch_name sanitiza autor; detect_base_branch; open branch.
-  - server: POST /conversations crea rama `<autor>-<fecha>` desde base;
-    rechaza (409) una segunda conversación abierta sobre el mismo repo;
-    /close abre PR best-effort (gh ausente en CI → pr_error, sin romper).
+  - server: POST /conversations crea rama/workspace aislado desde develop,
+    incluso para otra tarea del mismo repo; `/close` conserva los workspaces
+    administrados y el flujo legacy abre PR best-effort.
 
 Cómo correr:
     cd mcp-server
     python -m pytest tests/test_git_flow.py -q
 """
 from __future__ import annotations
+from relay import git_branches, git_conversations, git_process
 
 import asyncio
 import os
@@ -48,17 +49,17 @@ def _init_repo(repo: Path) -> None:
 class TestBranchName(unittest.TestCase):
     def test_sanitizes_author(self) -> None:
         today = time.strftime("%Y-%m-%d")
-        self.assertEqual(git_flow.branch_name("Example User#123"),
+        self.assertEqual(git_branches.branch_name("Example User#123"),
                          f"example-user-123-{today}")
-        self.assertEqual(git_flow.branch_name(None), f"user-{today}")
-        self.assertEqual(git_flow.branch_name("   "), f"user-{today}")
+        self.assertEqual(git_branches.branch_name(None), f"user-{today}")
+        self.assertEqual(git_branches.branch_name("   "), f"user-{today}")
 
 
 class TestExecCleanup(unittest.IsolatedAsyncioTestCase):
     async def test_spawn_failure_is_an_operational_result(self) -> None:
-        with patch("relay.git_flow.asyncio.create_subprocess_exec",
+        with patch("relay.git_process.asyncio.create_subprocess_exec",
                    AsyncMock(side_effect=FileNotFoundError("gh"))):
-            rc, out = await git_flow._exec(".", "gh", "pr")
+            rc, out = await git_process._exec(".", "gh", "pr")
         self.assertEqual(rc, 127)
         self.assertIn("spawn falló", out)
 
@@ -83,9 +84,9 @@ class TestExecCleanup(unittest.IsolatedAsyncioTestCase):
                 return self.returncode
 
         proc = Proc()
-        with patch("relay.git_flow.asyncio.create_subprocess_exec",
+        with patch("relay.git_process.asyncio.create_subprocess_exec",
                    AsyncMock(return_value=proc)):
-            rc, _ = await git_flow._exec(".", "gh", "pr", timeout=0.01)
+            rc, _ = await git_process._exec(".", "gh", "pr", timeout=0.01)
         self.assertEqual(rc, 124)
         self.assertTrue(proc.killed)
         self.assertTrue(proc.waited)
@@ -110,9 +111,9 @@ class TestExecCleanup(unittest.IsolatedAsyncioTestCase):
                 return self.returncode
 
         proc = Proc()
-        with patch("relay.git_flow.asyncio.create_subprocess_exec",
+        with patch("relay.git_process.asyncio.create_subprocess_exec",
                    AsyncMock(return_value=proc)):
-            task = asyncio.create_task(git_flow._exec(".", "gh", "pr"))
+            task = asyncio.create_task(git_process._exec(".", "gh", "pr"))
             await asyncio.sleep(0)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -131,11 +132,11 @@ class TestOpenBranch(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_creates_and_checks_out_branch(self) -> None:
-        self.assertTrue(await git_flow.is_git_repo(str(self.repo)))
-        self.assertEqual(await git_flow.detect_base_branch(str(self.repo)), "main")
-        branch = await git_flow.open_conversation_branch(str(self.repo), "usuario-demo-a")
-        self.assertEqual(branch, git_flow.branch_name("usuario-demo-a"))
-        rc, out = await git_flow._git(str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
+        self.assertTrue(await git_branches.is_git_repo(str(self.repo)))
+        self.assertEqual(await git_branches.detect_base_branch(str(self.repo)), "main")
+        branch = await git_conversations.open_conversation_branch(str(self.repo), "usuario-demo-a")
+        self.assertEqual(branch, git_branches.branch_name("usuario-demo-a"))
+        rc, out = await git_process._git(str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
         self.assertEqual(out.strip(), branch)
 
     async def test_base_es_develop_cuando_existe(self) -> None:
@@ -151,25 +152,25 @@ class TestOpenBranch(unittest.IsolatedAsyncioTestCase):
         _git(self.repo, "commit", "-m", "adelanto develop")
         _git(self.repo, "checkout", "main")
 
-        self.assertEqual(await git_flow.work_base_branch(repo), "develop")
+        self.assertEqual(await git_branches.work_base_branch(repo), "develop")
         # detect_base_branch NO cambia: sigue siendo el trunk (lo usa
         # _ensure_develop y el PR).
-        self.assertEqual(await git_flow.detect_base_branch(repo), "main")
+        self.assertEqual(await git_branches.detect_base_branch(repo), "main")
 
-        branch = await git_flow.open_conversation_branch(repo, "usuario-demo-a")
+        branch = await git_conversations.open_conversation_branch(repo, "usuario-demo-a")
         # La rama arranca desde develop: el commit de develop está acá.
         self.assertTrue((self.repo / "nuevo.txt").exists())
-        rc, out = await git_flow._git(
+        rc, out = await git_process._git(
             repo, "rev-list", "--count", f"develop..{branch}")
         self.assertEqual(out.strip(), "0")
 
     async def test_cada_nuevo_estrena_rama(self) -> None:
         """Dos conversaciones del mismo autor el mismo día = dos ramas."""
         repo = str(self.repo)
-        first = await git_flow.open_conversation_branch(repo, "usuario-demo-a")
-        self.assertEqual(first, git_flow.branch_name("usuario-demo-a"))
+        first = await git_conversations.open_conversation_branch(repo, "usuario-demo-a")
+        self.assertEqual(first, git_branches.branch_name("usuario-demo-a"))
         _git(self.repo, "checkout", "main")
-        second = await git_flow.open_conversation_branch(repo, "usuario-demo-a")
+        second = await git_conversations.open_conversation_branch(repo, "usuario-demo-a")
         self.assertEqual(second, f"{first}-2")
 
     async def test_respeta_la_rama_remota_del_pr_anterior(self) -> None:
@@ -177,14 +178,14 @@ class TestOpenBranch(unittest.IsolatedAsyncioTestCase):
         su PR: un /nuevo homónimo pushearía commits de otra conversación
         al PR anterior. El nombre tiene que esquivar `origin/*` también."""
         repo = str(self.repo)
-        name = git_flow.branch_name("usuario-demo-a")
-        rc, sha = await git_flow._git(repo, "rev-parse", "HEAD")
+        name = git_branches.branch_name("usuario-demo-a")
+        rc, sha = await git_process._git(repo, "rev-parse", "HEAD")
         _git(self.repo, "update-ref", f"refs/remotes/origin/{name}", sha.strip())
-        branch = await git_flow.open_conversation_branch(repo, "usuario-demo-a")
+        branch = await git_conversations.open_conversation_branch(repo, "usuario-demo-a")
         self.assertEqual(branch, f"{name}-2")
 
     async def test_base_cae_al_trunk_sin_develop(self) -> None:
-        self.assertEqual(await git_flow.work_base_branch(str(self.repo)), "main")
+        self.assertEqual(await git_branches.work_base_branch(str(self.repo)), "main")
 
     async def test_untracked_no_bloquea(self) -> None:
         """2026-08-02: un archivo untracked (típico: `.claude/`, `.mcp.json`,
@@ -194,8 +195,8 @@ class TestOpenBranch(unittest.IsolatedAsyncioTestCase):
         (self.repo / ".mcp.json").write_text("{}", encoding="utf-8")
         (self.repo / ".claude").mkdir()
         (self.repo / ".claude" / "x").write_text("y", encoding="utf-8")
-        branch = await git_flow.open_conversation_branch(str(self.repo), "usuario-demo-a")
-        self.assertEqual(branch, git_flow.branch_name("usuario-demo-a"))
+        branch = await git_conversations.open_conversation_branch(str(self.repo), "usuario-demo-a")
+        self.assertEqual(branch, git_branches.branch_name("usuario-demo-a"))
         # el untracked sigue ahí: no se pierde ni se commitea al crear la rama
         self.assertTrue((self.repo / ".mcp.json").exists())
 
@@ -203,14 +204,14 @@ class TestOpenBranch(unittest.IsolatedAsyncioTestCase):
         """Un cambio en un archivo TRACKEADO sí bloquea: branchear ahí
         mezclaría WIP ajeno con la conversación."""
         (self.repo / "README.md").write_text("# modificado\n", encoding="utf-8")
-        with self.assertRaises(git_flow.GitFlowError):
-            await git_flow.open_conversation_branch(str(self.repo), "usuario-demo-a")
+        with self.assertRaises(git_process.GitFlowError):
+            await git_conversations.open_conversation_branch(str(self.repo), "usuario-demo-a")
 
     async def test_has_commits(self) -> None:
-        self.assertTrue(await git_flow.has_commits(str(self.repo)))
+        self.assertTrue(await git_branches.has_commits(str(self.repo)))
         with tempfile.TemporaryDirectory() as t:
             _git(Path(t), "init", "-b", "main")  # sin commit → HEAD unborn
-            self.assertFalse(await git_flow.has_commits(t))
+            self.assertFalse(await git_branches.has_commits(t))
 
 
 class TestLocalExcludes(unittest.IsolatedAsyncioTestCase):
@@ -228,23 +229,23 @@ class TestLocalExcludes(unittest.IsolatedAsyncioTestCase):
         (self.repo / ".claude").mkdir()
         (self.repo / ".claude" / "x").write_text("y", encoding="utf-8")
         # antes: git los ve como untracked
-        _, before = await git_flow.working_tree_clean(repo)
+        _, before = await git_branches.working_tree_clean(repo)
         self.assertIn(".mcp.json", before)
-        await git_flow.ensure_local_excludes(repo)
+        await git_conversations.ensure_local_excludes(repo)
         # después: git ya no los ve (ni para /nuevo ni para el add -A de /cerrar)
-        clean, after = await git_flow.working_tree_clean(repo)
+        clean, after = await git_branches.working_tree_clean(repo)
         self.assertTrue(clean, f"aún sucio: {after}")
         # idempotente: segunda corrida no duplica el bloque
-        await git_flow.ensure_local_excludes(repo)
+        await git_conversations.ensure_local_excludes(repo)
         exclude = self.repo / ".git" / "info" / "exclude"
         self.assertEqual(
-            exclude.read_text(encoding="utf-8").count(git_flow._EXCLUDE_MARK), 1)
+            exclude.read_text(encoding="utf-8").count(git_conversations._EXCLUDE_MARK), 1)
 
     async def test_worktree_config_se_resuelve(self) -> None:
         """En un worktree `.git` es un archivo; el remote vive en el config
-        compartido del repo principal. admin._git_remote_url debe encontrarlo
+        compartido del repo principal. admin_common._git_remote_url debe encontrarlo
         (antes devolvía None → panel 'sin remoto')."""
-        from relay import admin
+        from relay import admin_common
         _git(self.repo, "remote", "add", "origin",
              "https://github.com/AuroraDemo/demo.git")
         wt = Path(self._tmp.name).parent / (self.repo.name + "-wt")
@@ -252,7 +253,7 @@ class TestLocalExcludes(unittest.IsolatedAsyncioTestCase):
             _git(self.repo, "worktree", "add", str(wt), "-b", "wt")
             self.assertTrue((wt / ".git").is_file())  # worktree: .git es archivo
             self.assertEqual(
-                admin._git_remote_url(str(wt)),
+                admin_common._git_remote_url(str(wt)),
                 "https://github.com/AuroraDemo/demo.git")
         finally:
             if wt.exists():
@@ -284,25 +285,25 @@ class TestSyncBaseWithOrigin(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def _sha(self, ref: str) -> str:
-        rc, out = await git_flow._git(str(self.repo), "rev-parse", ref)
+        rc, out = await git_process._git(str(self.repo), "rev-parse", ref)
         return out.strip()
 
     async def test_nuevo_ramifica_desde_el_remoto_actualizado(self) -> None:
-        branch = await git_flow.open_conversation_branch(str(self.repo), "usuario-demo-a")
+        branch = await git_conversations.open_conversation_branch(str(self.repo), "usuario-demo-a")
         # El commit que solo estaba en el remoto está en la rama de trabajo.
         self.assertTrue((self.repo / "remoto.txt").exists())
         self.assertEqual(await self._sha("develop"),
                          await self._sha("origin/develop"))
-        rc, count = await git_flow._git(
+        rc, count = await git_process._git(
             str(self.repo), "rev-list", "--count", f"origin/develop..{branch}")
         self.assertEqual(count.strip(), "0")
 
     async def test_divergencia_no_toca_el_local(self) -> None:
         # develop local con un commit propio + el remoto adelantado.
         _git(self.repo, "commit", "--allow-empty", "-m", "local propio")
-        await git_flow.fetch_origin_safe(str(self.repo))
+        await git_branches.fetch_origin_safe(str(self.repo))
         before = await self._sha("develop")
-        ref = await git_flow.sync_base_with_origin(str(self.repo), "develop")
+        ref = await git_branches.sync_base_with_origin(str(self.repo), "develop")
         self.assertEqual(ref, "origin/develop")
         self.assertEqual(await self._sha("develop"), before)
 
@@ -314,7 +315,7 @@ class TestConversationDiff(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
         _init_repo(self.repo)
-        self.branch = await git_flow.open_conversation_branch(
+        self.branch = await git_conversations.open_conversation_branch(
             str(self.repo), "usuario-demo-a")
 
     async def asyncTearDown(self) -> None:
@@ -328,7 +329,7 @@ class TestConversationDiff(unittest.IsolatedAsyncioTestCase):
                                              encoding="utf-8")
         (self.repo / "nuevo.txt").write_text("sin add\n", encoding="utf-8")
 
-        out = await git_flow.conversation_diff(str(self.repo), self.branch)
+        out = await git_conversations.conversation_diff(str(self.repo), self.branch)
         self.assertIsNone(out["error"])
         self.assertTrue(out["exists"])
         self.assertTrue(out["is_current"])
@@ -346,7 +347,7 @@ class TestConversationDiff(unittest.IsolatedAsyncioTestCase):
         (self.repo / "grande.txt").write_text("x\n" * 5000, encoding="utf-8")
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-m", "archivo grande")
-        out = await git_flow.conversation_diff(str(self.repo), self.branch,
+        out = await git_conversations.conversation_diff(str(self.repo), self.branch,
                                               cap=500)
         self.assertTrue(out["truncated"])
         self.assertLessEqual(len(out["diff"]), 500)
@@ -355,7 +356,7 @@ class TestConversationDiff(unittest.IsolatedAsyncioTestCase):
     async def test_rama_borrada_explica_el_caso(self) -> None:
         _git(self.repo, "checkout", "main")
         _git(self.repo, "branch", "-D", self.branch)
-        out = await git_flow.conversation_diff(str(self.repo), self.branch)
+        out = await git_conversations.conversation_diff(str(self.repo), self.branch)
         self.assertFalse(out["exists"])
         self.assertIn("ya no existe", out["error"])
 
@@ -367,7 +368,7 @@ class TestCleanupBranch(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
         _init_repo(self.repo)
-        self.branch = await git_flow.open_conversation_branch(
+        self.branch = await git_conversations.open_conversation_branch(
             str(self.repo), "usuario-demo-a")
         (self.repo / "feature.txt").write_text("nuevo\n", encoding="utf-8")
         _git(self.repo, "add", "-A")
@@ -378,23 +379,23 @@ class TestCleanupBranch(unittest.IsolatedAsyncioTestCase):
 
     async def test_borra_la_rama_y_vuelve_a_la_base(self) -> None:
         # Sin mergear a la base: tiene que usar -D, no -d.
-        out = await git_flow.cleanup_conversation_branch(
+        out = await git_branches.cleanup_conversation_branch(
             str(self.repo), self.branch)
         self.assertTrue(out["deleted"], out["error"])
         self.assertIsNone(out["error"])
-        rc, head = await git_flow._git(
+        rc, head = await git_process._git(
             str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
         self.assertEqual(head.strip(), "main")
-        self.assertFalse(await git_flow._branch_exists(
+        self.assertFalse(await git_branches._branch_exists(
             str(self.repo), self.branch))
 
     async def test_no_borra_ramas_protegidas(self) -> None:
         for protegida in ("main", "master", "develop"):
-            out = await git_flow.cleanup_conversation_branch(
+            out = await git_branches.cleanup_conversation_branch(
                 str(self.repo), protegida)
             self.assertFalse(out["deleted"])
             self.assertIn("protegida", out["error"])
-        self.assertTrue(await git_flow._branch_exists(str(self.repo), "main"))
+        self.assertTrue(await git_branches._branch_exists(str(self.repo), "main"))
 
 
 class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
@@ -407,7 +408,7 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
         _init_repo(self.repo)
-        self.branch = await git_flow.open_conversation_branch(
+        self.branch = await git_conversations.open_conversation_branch(
             str(self.repo), "usuario-demo-a")
 
     async def asyncTearDown(self) -> None:
@@ -416,13 +417,13 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
     async def test_autocommits_pending_changes(self) -> None:
         # El experto editó pero NO commiteó (el caso que rompía /cerrar).
         (self.repo / "feature.txt").write_text("nuevo\n", encoding="utf-8")
-        out = await git_flow.finalize_conversation_pr(
+        out = await git_conversations.finalize_conversation_pr(
             str(self.repo), self.branch, title="[demo] cierre", body="b")
         self.assertTrue(out["committed"])
         # El commit quedó en la rama y el tree limpio (no bloquea /nuevo).
-        clean, _ = await git_flow.working_tree_clean(str(self.repo))
+        clean, _ = await git_branches.working_tree_clean(str(self.repo))
         self.assertTrue(clean)
-        rc, count = await git_flow._git(
+        rc, count = await git_process._git(
             str(self.repo), "rev-list", "--count", f"main..{self.branch}")
         self.assertEqual(count.strip(), "1")
         # Sin remoto: el push falla pero el error es post-commit.
@@ -438,14 +439,14 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
             seen["stat"], seen["diff"] = stat, diff
             return "## Qué cambió\n- agrega feature.txt", False
 
-        await git_flow.finalize_conversation_pr(
+        await git_conversations.finalize_conversation_pr(
             str(self.repo), self.branch, title="t", body="b",
             body_builder=builder)
         self.assertIn("feature.txt", seen["stat"])
         self.assertIn("+nuevo", seen["diff"])
 
     async def test_no_changes_reports_no_commits(self) -> None:
-        out = await git_flow.finalize_conversation_pr(
+        out = await git_conversations.finalize_conversation_pr(
             str(self.repo), self.branch, title="t", body="b")
         self.assertFalse(out["committed"])
         self.assertIn("sin commits propios", out["error"])
@@ -453,9 +454,9 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
     async def test_checks_out_branch_if_head_moved(self) -> None:
         # Algo movió HEAD a main; con tree limpio, /cerrar vuelve solo.
         _git(self.repo, "checkout", "main")
-        out = await git_flow.finalize_conversation_pr(
+        out = await git_conversations.finalize_conversation_pr(
             str(self.repo), self.branch, title="t", body="b")
-        rc, head = await git_flow._git(
+        rc, head = await git_process._git(
             str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
         self.assertEqual(head.strip(), self.branch)
         self.assertIn("sin commits propios", out["error"])
@@ -463,12 +464,12 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
     async def test_dirty_on_wrong_branch_is_clear_error(self) -> None:
         _git(self.repo, "checkout", "main")
         (self.repo / "dirty.txt").write_text("x", encoding="utf-8")
-        out = await git_flow.finalize_conversation_pr(
+        out = await git_conversations.finalize_conversation_pr(
             str(self.repo), self.branch, title="t", body="b")
         self.assertFalse(out["committed"])
         self.assertIn("resuelve a mano", out["error"])
         # No commiteó nada en main.
-        rc, head = await git_flow._git(
+        rc, head = await git_process._git(
             str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
         self.assertEqual(head.strip(), "main")
 
@@ -480,14 +481,19 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
         self.repo = base / "repo"
         self.repo.mkdir()
         _init_repo(self.repo)
+        _git(self.repo, "branch", "-m", "develop")
+        self.origin = base / "origin.git"
+        _git(base, "init", "--bare", str(self.origin))
+        _git(self.repo, "remote", "add", "origin", str(self.origin))
+        _git(self.repo, "push", "-u", "origin", "develop")
         self._env_backup = {k: os.environ.get(k) for k in _ENV_KEYS}
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
         os.environ["FOURBIS_JSONL_DIR"] = str(base / "jsonl")
         os.environ["FOURBIS_COMPACTOR_MODEL"] = "test"
-        db = Database()
-        await db.init_schema()
-        await db.upsert_project({
+        self.db = Database()
+        await self.db.init_schema()
+        await self.db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": str(self.repo),
             "defaults_json": {"model": "test"}})
 
@@ -499,7 +505,7 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
                 os.environ[k] = v
         self._tmp.cleanup()
 
-    async def test_nuevo_creates_branch_and_rejects_second(self) -> None:
+    async def test_nuevo_creates_isolated_workspaces_for_multiple_tasks(self) -> None:
         from relay.server import create_app
         app = create_app()
         async with TestClient(TestServer(app)) as client:
@@ -507,24 +513,30 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
                 "project": "demo", "author": "usuario-demo-a", "discord_thread_id": "t1"})
             self.assertEqual(r.status, 201)
             body = await r.json()
-            self.assertEqual(body["branch"], git_flow.branch_name("usuario-demo-a"))
-            self.assertEqual(body["base_branch"], "main")
-            # el repo quedó parado en la rama nueva
-            rc, out = await git_flow._git(
-                str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
+            self.assertEqual(body["branch"], f"codex/task-{body['id']}")
+            self.assertEqual(body["base_branch"], "develop")
+            # La rama vive en el workspace de esta conversación; el checkout
+            # de origen permanece en develop.
+            task = await self.db.get_conversation_task(body["id"])
+            workspace = Path(task["workspace_path"])
+            rc, out = await git_process._git(
+                str(workspace), "rev-parse", "--abbrev-ref", "HEAD")
             self.assertEqual(out.strip(), body["branch"])
+            rc, out = await git_process._git(
+                str(self.repo), "rev-parse", "--abbrev-ref", "HEAD")
+            self.assertEqual(out.strip(), "develop")
 
-            # una segunda conversación abierta sobre el mismo repo → 409
+            # Otra conversación puede trabajar a la vez en otro workspace.
             r2 = await client.post("/conversations", json={
                 "project": "demo", "author": "otro"})
-            self.assertEqual(r2.status, 409)
-            self.assertEqual((await r2.json())["conversation_id"], body["id"])
+            self.assertEqual(r2.status, 201, await r2.text())
+            second = await r2.json()
+            self.assertNotEqual(second["branch"], body["branch"])
+            second_task = await self.db.get_conversation_task(second["id"])
+            self.assertNotEqual(second_task["workspace_path"], task["workspace_path"])
 
-    async def test_nuevo_sin_commit_local_arranca_sin_rama(self) -> None:
-        """Repo `git init` sin commit local (HEAD unborn): la conversación
-        arranca SIN rama en vez de 422. Caso real (code-hero-rpg): rewrite
-        local no commiteado sobre un origin con otro proyecto — forzar el
-        checkout de la base habría borrado el trabajo untracked."""
+    async def test_consulta_sin_commit_local_arranca_sin_rama(self) -> None:
+        """Una consulta en un repo sin commits conserva archivos sin seguimiento."""
         from relay.server import create_app
         unborn = Path(self._tmp.name) / "unborn"
         unborn.mkdir()
@@ -540,9 +552,10 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
         app = create_app()
         async with TestClient(TestServer(app)) as client:
             r = await client.post("/conversations", json={
-                "project": "unborn-demo", "author": "usuario-demo-a"})
+                "project": "unborn-demo", "author": "usuario-demo-a",
+                "read_only": True})
             self.assertEqual(r.status, 201, await r.text())
-            self.assertIsNone((await r.json())["branch"])
+            self.assertFalse((await r.json())["branch"])
             # el trabajo untracked NO se tocó
             self.assertTrue((unborn / "local.ts").exists())
 
@@ -552,17 +565,19 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
         async with TestClient(TestServer(app)) as client:
             r = await client.post("/conversations", json={
                 "project": "demo", "author": "usuario-demo-a"})
-            conv_id = (await r.json())["id"]
+            body = await r.json()
+            conv_id = body["id"]
+            workspace = Path((await self.db.get_conversation_task(conv_id))["workspace_path"])
             # El experto edita y commitea en la rama de la conv.
-            (self.repo / "hecho.txt").write_text("cambio\n", encoding="utf-8")
-            _git(self.repo, "add", "-A")
-            _git(self.repo, "commit", "-m", "trabajo")
-            (self.repo / "hecho.txt").write_text("cambio\nsin commitear\n",
-                                                 encoding="utf-8")
+            (workspace / "hecho.txt").write_text("cambio\n", encoding="utf-8")
+            _git(workspace, "add", "-A")
+            _git(workspace, "commit", "-m", "trabajo")
+            (workspace / "hecho.txt").write_text("cambio\nsin commitear\n",
+                                                  encoding="utf-8")
             rd = await client.get(f"/conversations/{conv_id}/diff")
             self.assertEqual(rd.status, 200)
             body = await rd.json()
-            self.assertEqual(body["branch"], git_flow.branch_name("usuario-demo-a"))
+            self.assertEqual(body["branch"], (await self.db.get_conversation_task(conv_id))["branch"])
             self.assertEqual(body["commits"], 1)
             self.assertIn("+cambio", body["diff"])
             self.assertIn("+sin commitear", body["pending_diff"])
@@ -570,11 +585,12 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_without_commits_reports_pr_error(self) -> None:
         from relay.server import create_app
+        branch = "usuario-demo-legacy"
+        _git(self.repo, "switch", "-c", branch)
+        conv_id = await self.db.create_conversation(
+            project_slug="demo", author="usuario-demo-a", branch=branch)
         app = create_app()
         async with TestClient(TestServer(app)) as client:
-            r = await client.post("/conversations", json={
-                "project": "demo", "author": "usuario-demo-a"})
-            conv_id = (await r.json())["id"]
             # El PR corre en background: /close responde ya mismo (antes
             # esperaba al verify y la UI cortaba a los 30s).
             rc = await client.post(f"/conversations/{conv_id}/close", json={})
@@ -593,6 +609,29 @@ class TestConversationBranchHttp(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pr["state"], "error")
             self.assertIn("sin commits propios", pr["error"])
             self.assertIsNone(pr["pr_url"])
+
+    async def test_close_managed_task_preserves_workspace_and_branch(self) -> None:
+        from relay.server import create_app
+        app = create_app()
+        async with TestClient(TestServer(app)) as client:
+            created = await client.post("/conversations", json={
+                "project": "demo", "author": "usuario-demo-a"})
+            self.assertEqual(created.status, 201, await created.text())
+            conv_id = (await created.json())["id"]
+            before = await self.db.get_conversation_task(conv_id)
+            workspace = Path(before["workspace_path"])
+            self.assertTrue(workspace.is_dir())
+
+            closed = await client.post(f"/conversations/{conv_id}/close", json={})
+            self.assertEqual(closed.status, 200)
+            body = await closed.json()
+            self.assertEqual(body["pr"], "skipped")
+            self.assertEqual(body["compaction"], "skipped")
+
+            after = await self.db.get_conversation_task(conv_id)
+            self.assertEqual(after["workspace_path"], before["workspace_path"])
+            self.assertEqual(after["branch"], before["branch"])
+            self.assertTrue(workspace.is_dir())
 
 
 if __name__ == "__main__":

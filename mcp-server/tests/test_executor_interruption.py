@@ -20,6 +20,7 @@ Y los casos negativos: la señal mal formada NO dispara la
 re-planificación.
 """
 from __future__ import annotations
+from relay import expert_runner, expert_staged_runner, expert_stages, expert_verdicts
 
 import json
 from unittest.mock import AsyncMock, patch
@@ -46,7 +47,7 @@ def test_parse_executor_interruption_canonical_fence():
         + json.dumps(sig)
         + "\n```\nfin del turno"
     )
-    parsed = experts._parse_executor_interruption(out)
+    parsed = expert_verdicts._parse_executor_interruption(out)
     assert parsed == sig
 
 
@@ -59,13 +60,13 @@ def test_parse_executor_interruption_fallback_marker():
         "timestamp": "2026-08-26T13:00:00Z",
     }
     out = "<<INTERRUPT:EXECUTOR>>" + json.dumps(sig)
-    parsed = experts._parse_executor_interruption(out)
+    parsed = expert_verdicts._parse_executor_interruption(out)
     assert parsed == sig
 
 
 def test_parse_executor_interruption_absent_returns_none():
     out = "todo bien, cerré el turno"
-    assert experts._parse_executor_interruption(out) is None
+    assert expert_verdicts._parse_executor_interruption(out) is None
 
 
 def test_parse_executor_interruption_missing_field_returns_none():
@@ -75,12 +76,12 @@ def test_parse_executor_interruption_missing_field_returns_none():
         # falta `error_context`, `partial_progress`, `timestamp`
     }
     out = "```EXECUTOR_INTERRUPTION\n" + json.dumps(sig) + "\n```"
-    assert experts._parse_executor_interruption(out) is None
+    assert expert_verdicts._parse_executor_interruption(out) is None
 
 
 def test_parse_executor_interruption_garbage_returns_none():
     out = "```EXECUTOR_INTERRUPTION\n{not valid json}\n```"
-    assert experts._parse_executor_interruption(out) is None
+    assert expert_verdicts._parse_executor_interruption(out) is None
 
 
 # ---------- integración: run_expert_staged ----------
@@ -146,12 +147,12 @@ async def test_run_expert_staged_interruption_invokes_planner_again():
         verifier_calls.append(kwargs)
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter",
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter",
                       new=AsyncMock(return_value=("bitácora", {}))):
-        result = await experts.run_expert_staged(
+        result = await expert_staged_runner.run_expert_staged(
             project, "editame el archivo",
             defaults={"planner_model": "x", "executor_model": "x",
                       "verifier_model": "x", "documenter_model": "x"},
@@ -205,11 +206,11 @@ async def test_run_expert_staged_no_signal_skips_interruption_path():
     async def fake_documenter(**kwargs):
         return "doc emitido", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "editame", model_override="test",
         )
 
@@ -240,11 +241,11 @@ async def test_run_expert_staged_malformed_signal_does_not_interrupt():
     async def fake_documenter(**kwargs):
         return "doc", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "editame", model_override="test",
         )
 
@@ -289,12 +290,12 @@ async def test_run_expert_staged_interrupcion_tiene_tope():
         verifier_calls.append(kwargs)
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter",
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter",
                       new=AsyncMock(return_value=("bitácora", {}))):
-        result = await experts.run_expert_staged(
+        result = await expert_staged_runner.run_expert_staged(
             project, "editame el archivo",
             defaults={"planner_model": "x", "executor_model": "x",
                       "verifier_model": "x", "documenter_model": "x"},
@@ -345,12 +346,12 @@ async def test_plan_revision_apunta_a_la_interrupcion_que_lo_disparo():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter",
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter",
                       new=AsyncMock(return_value=("bitácora", {}))):
-        result = await experts.run_expert_staged(
+        result = await expert_staged_runner.run_expert_staged(
             project, "editame el archivo",
             defaults={"planner_model": "x", "executor_model": "x",
                       "verifier_model": "x", "documenter_model": "x"},

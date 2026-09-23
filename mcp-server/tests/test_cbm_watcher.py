@@ -66,7 +66,7 @@ class TestWatcherRun(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_cbm_binary_is_noop(self) -> None:
         os.environ["CBM_AUTO_WATCH"] = "1"
-        with patch("relay.experts.cbm_binary_path", return_value=None):
+        with patch("relay.cbm_runtime.cbm_binary_path", return_value=None):
             await asyncio.wait_for(cbm_watcher.run(self.app), timeout=5)
 
     async def test_event_triggers_incremental_job_and_noise_does_not(self) -> None:
@@ -78,9 +78,9 @@ class TestWatcherRun(unittest.IsolatedAsyncioTestCase):
             return f"job_{slug}_1"
 
         (self.repo / ".git").mkdir()
-        with patch("relay.experts.cbm_binary_path", return_value="cbm.exe"), \
-                patch("relay.admin._start_index_job", side_effect=fake_start), \
-                patch("relay.admin._get_job", return_value={"status": "ok"}), \
+        with patch("relay.cbm_runtime.cbm_binary_path", return_value="cbm.exe"), \
+                patch("relay.admin_workspace._start_index_job", side_effect=fake_start), \
+                patch("relay.admin_common._get_job", return_value={"status": "ok"}), \
                 patch.object(cbm_watcher, "QUIET_S", 0.3), \
                 patch.object(cbm_watcher, "TICK_S", 0.05):
             task = asyncio.create_task(cbm_watcher.run(self.app))

@@ -7,10 +7,12 @@ Es un proyecto de portafolio de FourBis y Jeremías Badilla, distribuido bajo la
 ## Capacidades
 
 - Conversaciones persistentes por proyecto, con historial, compactación y memoria buscable.
+- Tareas con rama y workspace persistentes entre mensajes y reinicios, validación por commit y seguimiento opcional de una misma PR.
 - Ejecución de expertos por etapas: planificación, ejecución, verificación y documentación.
 - Herramientas nativas para archivos, shell y consultas SQL, con límites configurables.
 - Integración opcional con servidores MCP para browser, GitHub y otras capacidades.
 - Workspace web con ventanas de chat, tablas, estado de ejecución, proyectos, modelos, logs y configuración.
+- Varios chats visibles a la vez: un clic abre o recupera su ventana, con nombre local editable y borradores independientes.
 - API HTTP para integrar una CLI, un bot u otras interfaces.
 - Persistencia local en SQLite y archivos de estado; el arranque crea el esquema cuando es necesario.
 
@@ -19,6 +21,14 @@ Las capacidades visuales del workspace están descritas en [docs/UI_WORKSPACE.md
 ![Workspace de FourBis Relay](docs/images/workspace.png)
 
 Datos de ejemplo renderizados en un workspace local.
+
+### Varias conversaciones a la vista
+
+Abrir un chat recupera su propia ventana. Los nombres se pueden editar en la
+interfaz y los borradores se mantienen separados; en móvil se muestra una
+ventana a la vez.
+
+![Dos chats con datos ficticios](docs/images/workspace-chats.png)
 
 ### Del chat al plan de trabajo
 
@@ -69,6 +79,7 @@ Start-Process http://127.0.0.1:8413/admin/
 - [API HTTP](docs/API.md)
 - [Admin UI](docs/ADMIN_UI.md)
 - [Workspace](docs/UI_WORKSPACE.md)
+- [Tareas persistentes y continuidad de PR](docs/PERSISTENT_TASKS.md)
 - [Arquitectura](docs/ARCHITECTURE.md)
 - [Contribuir](CONTRIBUTING.md)
 

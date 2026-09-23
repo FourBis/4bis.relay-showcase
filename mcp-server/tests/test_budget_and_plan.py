@@ -3,7 +3,7 @@
 `UsageLimitExceeded: request_limit of 50`, perdiendo todo el trabajo).
 
 Cubre:
-  Opción 1 — corte por presupuesto gracioso (experts.run_expert):
+  Opción 1 — corte por presupuesto gracioso (expert_runner.run_expert):
     - al topar request_limit NO propaga excepción: devuelve dict normal
     - phase_at_end="budget_exceeded", content con mensaje útil
     - messages_json parcial NO vacío (conversación reanudable, ADR-025)
@@ -21,6 +21,7 @@ Cómo correr:
     python -m pytest tests/test_budget_and_plan.py -q
 """
 from __future__ import annotations
+from relay import config, expert_models, expert_planning, expert_runner, expert_selection, expert_staged_runner, expert_stages
 
 import json
 import tempfile
@@ -85,12 +86,12 @@ class TestBudgetExceeded(unittest.IsolatedAsyncioTestCase):
                               "on_demand": False, "health": "ok"}], [])
             async def _fake_catalog(*_a, **_k):
                 return (_ping_toolset(), [], [])
-            with patch.object(experts, "build_model", lambda spec: _loop_model()), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts.config, "expert_request_limit",
+            with patch.object(expert_models, "build_model", lambda spec: _loop_model()), \
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(config, "expert_request_limit",
                                  lambda: 1):
                 # NO debe levantar UsageLimitExceeded.
-                r = await experts.run_expert(project, "haz todo", db=_FakeDb())
+                r = await expert_runner.run_expert(project, "haz todo", db=_FakeDb())
 
             self.assertEqual(r["phase_at_end"], "budget_exceeded")
             # Mensaje útil (no stacktrace crudo).
@@ -142,14 +143,14 @@ class TestBudgetAutoContinue(unittest.IsolatedAsyncioTestCase):
         async def _fake_catalog(*_a, **_k):
             return (_ping_toolset(), [], [])
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model",
+            with patch.object(expert_models, "build_model",
                               lambda spec: _finishing_model(5)), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts.config, "expert_request_limit",
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(config, "expert_request_limit",
                                  lambda: 2), \
-                    patch.object(experts.config, "expert_max_legs",
+                    patch.object(config, "expert_max_legs",
                                  lambda: 5):
-                r = await experts.run_expert(
+                r = await expert_runner.run_expert(
                     self._project(tmp), "haz todo", db=object())
             self.assertIn("listo", r["content"])
             self.assertNotEqual(r["phase_at_end"], "budget_exceeded")
@@ -165,12 +166,12 @@ class TestBudgetAutoContinue(unittest.IsolatedAsyncioTestCase):
         async def _fake_catalog(*_a, **_k):
             return (_ping_toolset(), [], [])
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model",
+            with patch.object(expert_models, "build_model",
                               lambda spec: _loop_model()), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts.config, "expert_request_limit",
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(config, "expert_request_limit",
                                  lambda: 10):
-                r = await experts.run_expert(
+                r = await expert_runner.run_expert(
                     self._project(tmp), "haz todo", db=object())
             self.assertEqual(r["phase_at_end"], "budget_exceeded")
             self.assertEqual(r["legs"], 1,
@@ -223,16 +224,16 @@ class TestSupervisorDeMediaCorrida(unittest.IsolatedAsyncioTestCase):
                      hard=12):
         async def _fake_catalog(*_a, **_k):
             return (_ping_toolset(), [], [])
-        with patch.object(experts, "build_model",
+        with patch.object(expert_models, "build_model",
                           lambda spec: _finishing_model_variado(needed)), \
-                patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                patch.object(experts.config, "expert_request_limit",
+                patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                patch.object(config, "expert_request_limit",
                              lambda: 2), \
-                patch.object(experts.config, "expert_max_legs",
+                patch.object(config, "expert_max_legs",
                              lambda: max_legs), \
-                patch.object(experts.config, "expert_max_legs_hard",
+                patch.object(config, "expert_max_legs_hard",
                              lambda: hard):
-            return await experts.run_expert(
+            return await expert_runner.run_expert(
                 self._project(tmp), "haz todo", db=object(),
                 on_leg_boundary=supervisor)
 
@@ -351,16 +352,16 @@ class TestBudgetSplit(unittest.IsolatedAsyncioTestCase):
                        max_legs=1, max_legs_hard=12, on_leg_boundary=None):
         async def _fake_catalog(*_a, **_k):
             return (_ping_toolset(), [], [])
-        with patch.object(experts, "build_model",
+        with patch.object(expert_models, "build_model",
                           lambda spec: _finishing_model_variado(needed)), \
-                patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                patch.object(experts.config, "expert_request_limit",
+                patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                patch.object(config, "expert_request_limit",
                              lambda: request_limit), \
-                patch.object(experts.config, "expert_max_legs",
+                patch.object(config, "expert_max_legs",
                              lambda: max_legs), \
-                patch.object(experts.config, "expert_max_legs_hard",
+                patch.object(config, "expert_max_legs_hard",
                              lambda: max_legs_hard):
-            return await experts.run_expert(
+            return await expert_runner.run_expert(
                 self._project(tmp), "haz todo", db=object(),
                 on_leg_boundary=on_leg_boundary)
 
@@ -455,10 +456,10 @@ class TestLargePromptDecomposition(unittest.IsolatedAsyncioTestCase):
         async def fake_planner(**kwargs):
             return self.BIG, {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert",
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert",
                           self._executor_that_must_not_run()):
-            r = await experts.run_expert_staged(
+            r = await expert_staged_runner.run_expert_staged(
                 self.PROJ, "coverage 100% de todos los controllers")
 
         self.assertEqual(r["phase_at_end"], "planned")
@@ -514,10 +515,10 @@ class TestLargePromptDecomposition(unittest.IsolatedAsyncioTestCase):
         async def fake_verifier(**kwargs):
             return "complete", "ok", {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert", fake_executor), \
-             patch.object(experts, "_run_verifier", fake_verifier):
-            r = await experts.run_expert_staged(
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert", fake_executor), \
+             patch.object(expert_stages, "_run_verifier", fake_verifier):
+            r = await expert_staged_runner.run_expert_staged(
                 self.PROJ, "sigue con la 2",
                 message_history_json="HISTORIAL")
 
@@ -540,10 +541,10 @@ class TestLargePromptDecomposition(unittest.IsolatedAsyncioTestCase):
             seen["es_continuacion"] = kwargs.get("es_continuacion")
             return self.BIG, {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert",
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert",
                           self._executor_that_must_not_run()):
-            r = await experts.run_expert_staged(
+            r = await expert_staged_runner.run_expert_staged(
                 self.PROJ,
                 "Genera un manual de usuario de la aplicación en formato "
                 "md, con capturas de pantalla, todos los pasos deben estar "
@@ -555,7 +556,7 @@ class TestLargePromptDecomposition(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r["phase_at_end"], "planned")
 
     def test_format_decomposition_strips_prefix(self) -> None:
-        out = experts._format_decomposition(self.BIG)
+        out = expert_planning._format_decomposition(self.BIG)
         self.assertNotIn("DEMASIADO_GRANDE", out)
         self.assertIn("1. Tests a FooController", out)
         self.assertIn("night run", out)
@@ -580,10 +581,10 @@ class TestLargePromptDecomposition(unittest.IsolatedAsyncioTestCase):
         async def fake_verifier(**kwargs):
             return "complete", "ok", {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert", fake_executor), \
-             patch.object(experts, "_run_verifier", fake_verifier):
-            r = await experts.run_expert_staged(self.PROJ, "edita main.py")
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert", fake_executor), \
+             patch.object(expert_stages, "_run_verifier", fake_verifier):
+            r = await expert_staged_runner.run_expert_staged(self.PROJ, "edita main.py")
 
         self.assertTrue(seen.get("executed"))
         self.assertEqual(r["phase_at_end"], "writing")
@@ -630,10 +631,10 @@ class TestPlanBasura(unittest.IsolatedAsyncioTestCase):
         async def fake_verifier(**kwargs):
             return "complete", "ok", {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert", self._executor(seen)), \
-             patch.object(experts, "_run_verifier", fake_verifier):
-            r = await experts.run_expert_staged(self.PROJ, "documenta la app")
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert", self._executor(seen)), \
+             patch.object(expert_stages, "_run_verifier", fake_verifier):
+            r = await expert_staged_runner.run_expert_staged(self.PROJ, "documenta la app")
         return r, seen
 
     async def test_no_se_inyecta_ni_se_supervisa(self) -> None:

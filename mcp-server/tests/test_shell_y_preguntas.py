@@ -12,6 +12,8 @@ docs/SHELL_Y_PREGUNTAS.md.
     respuesta entra como el turno siguiente del hilo.
 """
 from __future__ import annotations
+from relay import shell_environment, shell_syntax
+from relay import cbm_runtime, expert_evidence, expert_models, expert_runner, expert_toolsets
 
 import asyncio
 import json
@@ -86,7 +88,7 @@ async def test_corre_en_el_cwd_pedido(tmp_path):
 async def test_comando_inexistente_no_explota():
     r = await shell.run("herramienta-que-no-existe-4bis", timeout=10)
     assert r["exit"] != 0
-    assert shell.missing_tool_hint(r["out"])       # sugiere preguntar
+    assert shell_environment.missing_tool_hint(r["out"])       # sugiere preguntar
 
 
 async def test_cancelar_desde_afuera_tambien_mata_el_arbol(tmp_path):
@@ -105,7 +107,7 @@ async def test_cancelar_desde_afuera_tambien_mata_el_arbol(tmp_path):
     # Sin comillas ni rutas absolutas: `cmd /s` se come la primera y la
     # última comilla del comando y lo rompe. Con `cwd` no hacen falta.
     cmd = ("ping -n 6 127.0.0.1 >nul && echo si> sobrevivi.txt"
-           if shell.IS_WINDOWS else
+           if shell_environment.IS_WINDOWS else
            "sleep 5 && echo si > sobrevivi.txt")
 
     task = asyncio.create_task(shell.run(cmd, cwd=str(tmp_path), timeout=60))
@@ -118,7 +120,7 @@ async def test_cancelar_desde_afuera_tambien_mata_el_arbol(tmp_path):
     assert not marca.exists(), "el proceso sobrevivió a la cancelación"
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el bug es del pipe de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el bug es del pipe de Windows")
 async def test_un_nieto_con_el_pipe_no_cuelga_el_comando(tmp_path):
     """Causa #5: el hijo directo termina y un nieto se queda el stdout.
 
@@ -157,10 +159,10 @@ async def test_un_nieto_con_el_pipe_no_cuelga_el_comando(tmp_path):
 
 
 def test_hint_de_instalacion_solo_cuando_aplica():
-    assert shell.missing_tool_hint("bash: pwsh: command not found")
-    assert shell.missing_tool_hint("ModuleNotFoundError: No module named 'x'")
-    assert not shell.missing_tool_hint("2 tests failed\n(exit=1)")
-    assert not shell.missing_tool_hint("")
+    assert shell_environment.missing_tool_hint("bash: pwsh: command not found")
+    assert shell_environment.missing_tool_hint("ModuleNotFoundError: No module named 'x'")
+    assert not shell_environment.missing_tool_hint("2 tests failed\n(exit=1)")
+    assert not shell_environment.missing_tool_hint("")
 
 
 def test_una_ruta_inexistente_no_se_lee_como_herramienta_ausente():
@@ -175,7 +177,7 @@ def test_una_ruta_inexistente_no_se_lee_como_herramienta_ausente():
     """
     salida_ruta = ('"\\"C:\\Users\\demo\\.dotnet\\dotnet.exe\\"" no se '
                    "reconoce como un comando interno o externo,\n(exit=1)")
-    hint = shell.missing_tool_hint(salida_ruta)
+    hint = shell_environment.missing_tool_hint(salida_ruta)
     assert "RUTA INEXISTENTE" in hint
     assert "ask_human" not in hint
     assert "instal" not in hint.split("[RUTA INEXISTENTE]")[1].lower() \
@@ -185,22 +187,22 @@ def test_una_ruta_inexistente_no_se_lee_como_herramienta_ausente():
     # está bien y es lo que evita que el experto instale por su cuenta.
     salida_binaria = ('"tail" no se reconoce como un comando interno o '
                       "externo,\n(exit=1)")
-    assert "ask_human" in shell.missing_tool_hint(salida_binaria)
-    assert "ask_human" in shell.missing_tool_hint("bash: dotnet: command not found")
+    assert "ask_human" in shell_environment.missing_tool_hint(salida_binaria)
+    assert "ask_human" in shell_environment.missing_tool_hint("bash: dotnet: command not found")
 
 
 def test_powershell_va_sin_perfil_y_no_interactivo():
     """Los dos flags que evitan el cuelgue clásico de Windows."""
-    argv, kind = shell.build_argv("Get-ChildItem", shell_kind="powershell")
+    argv, kind = shell_syntax.build_argv("Get-ChildItem", shell_kind="powershell")
     assert kind == "powershell"
     assert "-NoProfile" in argv and "-NonInteractive" in argv
     assert argv[-2] == "-Command" and argv[-1].endswith("\nGet-ChildItem")
 
 
 def test_auto_detecta_powershell_por_el_comando():
-    assert shell._looks_like_powershell("Get-ChildItem | Where-Object {$_}")
-    assert shell._looks_like_powershell(".\\deploy.ps1")
-    assert not shell._looks_like_powershell("git status")
+    assert shell_syntax._looks_like_powershell("Get-ChildItem | Where-Object {$_}")
+    assert shell_syntax._looks_like_powershell(".\\deploy.ps1")
+    assert not shell_syntax._looks_like_powershell("git status")
 
 
 def test_un_pipeline_unix_no_va_a_cmd():
@@ -216,7 +218,7 @@ def test_un_pipeline_unix_no_va_a_cmd():
                 'git ls-files | grep -E "x" | wc -l',
                 'git status --short 2>&1 | head -200',
                 'cat x 2>/dev/null'):
-        assert shell._looks_like_sh(cmd), cmd
+        assert shell_syntax._looks_like_sh(cmd), cmd
 
 
 def test_los_alias_de_powershell_no_son_senal_de_unix():
@@ -224,11 +226,11 @@ def test_los_alias_de_powershell_no_son_senal_de_unix():
     verlos no prueba nada. Solo cuentan los que no trae NINGÚN shell de
     Windows — si no, mandaríamos a bash comandos con rutas `C:\\...`,
     donde las barras invertidas son escapes."""
-    assert not shell._looks_like_sh("ls -la")
-    assert not shell._looks_like_sh("sort archivo.txt")
-    assert not shell._looks_like_sh("dotnet build")
+    assert not shell_syntax._looks_like_sh("ls -la")
+    assert not shell_syntax._looks_like_sh("sort archivo.txt")
+    assert not shell_syntax._looks_like_sh("dotnet build")
     # "cut" adentro de una ruta no es una invocación de `cut`.
-    assert not shell._looks_like_sh(r"dir C:\Users\uncut\shortcut")
+    assert not shell_syntax._looks_like_sh(r"dir C:\Users\uncut\shortcut")
 
 
 def test_tail_no_va_a_cmd():
@@ -242,7 +244,7 @@ def test_tail_no_va_a_cmd():
                 "dotnet build 2>&1 | tail -n 30",
                 "sleep 12",
                 "uname -a"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
@@ -257,7 +259,7 @@ def test_cualquier_cmdlet_va_a_powershell_no_solo_los_de_la_lista():
                 'docker ps | Out-String',
                 'npm run dev 2>&1 | Tee-Object -FilePath x.log',
                 'curl.exe -s http://localhost:8080/health | Out-Null'):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "powershell", (cmd, kind)
 
 
@@ -265,7 +267,7 @@ def test_señal_windows_explicita_sigue_yendo_a_cmd():
     """La ruta Windows con backslash es señal EXPLÍCITA de cmd
     (`_looks_like_cmd`): sigue yendo a cmd después de invertir el
     default."""
-    _, kind = shell.build_argv(r'dotnet build C:\repo\app.sln --nologo')
+    _, kind = shell_syntax.build_argv(r'dotnet build C:\repo\app.sln --nologo')
     assert kind == "cmd"
 
 
@@ -281,11 +283,11 @@ def test_comandos_sin_senal_ahora_van_a_sh_por_el_nuevo_default():
     for cmd in ('curl.exe -s -o NUL -w "%{http_code}" http://localhost:5000/health',
                 'git status --short',
                 'npm run build'):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 def test_el_bash_elegido_no_es_el_de_wsl():
     """`shutil.which("bash")` en Windows devuelve WSL, no Git Bash.
 
@@ -295,15 +297,15 @@ def test_el_bash_elegido_no_es_el_de_wsl():
     mandaba a `sh` corría ahí. `dotnet --version` andaba por cmd y
     `dotnet --version | tail -1` contestaba `command not found`.
     """
-    elegido = shell.bash_exe()
+    elegido = shell_environment.bash_exe()
     assert elegido, "esta máquina tiene Git Bash: algo lo dejó de encontrar"
     assert "system32" not in elegido.lower(), f"eligió WSL: {elegido}"
-    argv, kind = shell.build_argv("git status | head -3")
+    argv, kind = shell_syntax.build_argv("git status | head -3")
     assert kind == "sh"
     assert "system32" not in argv[0].lower()
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 @pytest.mark.skipif(not shutil.which("gh"), reason="necesita `gh` instalado")
 async def test_bash_encuentra_herramientas_de_la_maquina():
     """MSYS2 ya traduce el PATH de Windows solo al arrancar bash real
@@ -315,7 +317,7 @@ async def test_bash_encuentra_herramientas_de_la_maquina():
     assert r["out"].strip(), r["out"]
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 async def test_un_hijo_windows_lanzado_desde_bash_ve_el_path_completo():
     """El bug del 2/9: `path_para_bash` convertía el PATH a formato POSIX
     (":") para que bash lo lea, pero un hijo WINDOWS (`python.exe`)
@@ -331,7 +333,7 @@ async def test_un_hijo_windows_lanzado_desde_bash_ve_el_path_completo():
     assert n > 10, (n, r["out"])
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 async def test_un_binario_de_windows_se_encuentra_dentro_de_un_pipeline():
     """La prueba de fuego: `<herramienta windows> | <filtro unix>`.
 
@@ -354,7 +356,7 @@ def test_alias_unix_no_van_a_cmd_que_es_el_unico_que_no_los_tiene():
                 "cat Tests/Tests.csproj",
                 "ls Service/Services/INVENTORYDEMO/Courier/",
                 "git log --oneline -3 && rm .git/COMMIT_EDITMSG.tmp"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
@@ -363,20 +365,20 @@ def test_alias_unix_con_rutas_windows_no_se_manda_a_bash():
     (son escapes), así que ahí NO se toca el ruteo."""
     for cmd in (r"ls C:\Users\demo\source",
                 r"cat C:\Users\demo\.relay\notes\x.md"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind != "sh", (cmd, kind)
 
 
 def test_powershell_le_gana_a_la_pinta_de_unix():
     """Un cmdlet con un `head` en el medio sigue siendo PowerShell: el
     orden de las heurísticas no cambió."""
-    _, kind = shell.build_argv("Get-Content x | Select-Object -First 3")
+    _, kind = shell_syntax.build_argv("Get-Content x | Select-Object -First 3")
     assert kind == "powershell"
 
 
 def test_sh_no_carga_el_profile():
     """`bash -lc` carga el profile: mismo problema que el $PROFILE."""
-    argv, kind = shell.build_argv("ls", shell_kind="sh")
+    argv, kind = shell_syntax.build_argv("ls", shell_kind="sh")
     assert kind == "sh"
     if argv[0].endswith("bash"):
         assert "--noprofile" in argv and "--norc" in argv
@@ -392,7 +394,7 @@ def test_comillas_simples_posix_se_mandan_a_bash():
         "{ viewerCanCreateProjects name } viewer { login } }'",
         "git ls-files | head -5",
     ):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
@@ -405,18 +407,18 @@ def test_apostrofo_suelto_no_es_quoting():
     que afirmar sobre `kind` ya no distinguiría un guard roto de un
     default cambiado.
     """
-    assert not shell._looks_like_single_quoted("echo don't")
+    assert not shell_syntax._looks_like_single_quoted("echo don't")
 
 
 def test_comillas_simples_con_ruta_windows_no_se_manda_a_bash():
     """Misma guarda de backslash que el resto de las heurísticas unix."""
-    _, kind = shell.build_argv(r"dir C:\Users\demo")
+    _, kind = shell_syntax.build_argv(r"dir C:\Users\demo")
     assert kind != "sh"
 
 
 def test_powershell_le_gana_a_comillas_simples():
     """Un cmdlet con comillas simples adentro sigue siendo PowerShell."""
-    _, kind = shell.build_argv("Get-ChildItem -Filter '*.cs'")
+    _, kind = shell_syntax.build_argv("Get-ChildItem -Filter '*.cs'")
     assert kind == "powershell"
 
 
@@ -432,27 +434,27 @@ def test_sintaxis_posix_se_manda_a_bash():
         "echo ${HOME}",
         "echo `date`",
     ):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
 def test_powershell_le_gana_a_sintaxis_posix():
     """`$(...)` también es válido en PowerShell: tiene que seguir
     ganando sobre la heurística de sintaxis unix."""
-    _, kind = shell.build_argv('Write-Host "$(Get-Date)"')
+    _, kind = shell_syntax.build_argv('Write-Host "$(Get-Date)"')
     assert kind == "powershell"
 
 
 def test_sintaxis_posix_con_ruta_windows_no_se_manda_a_bash():
     """Mismo guard de backslash que comillas simples y alias unix."""
-    _, kind = shell.build_argv(r"echo $(dir) C:\Users\demo")
+    _, kind = shell_syntax.build_argv(r"echo $(dir) C:\Users\demo")
     assert kind != "sh"
 
 
 def test_comando_sin_ninguna_señal_va_a_sh_por_el_nuevo_default():
     """`echo hola`: sin señal unix NI señal cmd, cae al nuevo default
     (sh) — ver `_looks_like_cmd` y el cambio de default en `build_argv`."""
-    _, kind = shell.build_argv("echo hola")
+    _, kind = shell_syntax.build_argv("echo hola")
     assert kind == "sh"
 
 
@@ -461,29 +463,29 @@ def test_docker_sin_senal_windows_ahora_va_a_sh():
     traen ninguna señal de Windows y hoy caían a cmd por default —
     donde `cmd` falla más (45.9% medido) que `sh` (32.9%)."""
     for cmd in ("docker compose up -d --build 2>&1", "docker ps -a"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
 def test_builtin_de_cmd_manda_a_cmd():
     """`dir` es builtin de cmd.exe y no existe en bash."""
-    _, kind = shell.build_argv(r"dir TestResults\coverage /b")
+    _, kind = shell_syntax.build_argv(r"dir TestResults\coverage /b")
     assert kind == "cmd"
 
 
 def test_ruta_windows_con_backslash_manda_a_cmd():
-    _, kind = shell.build_argv(r'cmd /c "C:\Program Files\Web\Web.exe --urls http://+:80"')
+    _, kind = shell_syntax.build_argv(r'cmd /c "C:\Program Files\Web\Web.exe --urls http://+:80"')
     assert kind == "cmd"
 
 
 def test_var_cmd_manda_a_cmd():
     """`%VAR%` es expansión de cmd.exe, no existe en bash."""
-    _, kind = shell.build_argv("echo SHELL=%SHELL%")
+    _, kind = shell_syntax.build_argv("echo SHELL=%SHELL%")
     assert kind == "cmd"
 
 
 def test_script_bat_o_cmd_manda_a_cmd():
-    _, kind = shell.build_argv(r'"C:\Users\demo\scripts\login_a.cmd"')
+    _, kind = shell_syntax.build_argv(r'"C:\Users\demo\scripts\login_a.cmd"')
     assert kind == "cmd"
 
 
@@ -496,7 +498,7 @@ def test_escape_de_barra_no_es_ruta_windows():
         r'curl -sS -w "\nHTTP %{http_code}\n" http://localhost:5000',
         r'docker ps --format "table {{.Names}}\t{{.ID}}"',
     ):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
@@ -512,7 +514,7 @@ def test_flag_estilo_windows_manda_a_cmd():
         'findstr /R "algo" f.txt',
         "taskkill /PID 1234 /F",
     ):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "cmd", (cmd, kind)
 
 
@@ -523,7 +525,7 @@ def test_ruta_unix_con_segunda_barra_no_es_flag_windows():
     for cmd in ("ls /tmp",
                 "cd /tmp && pwd",
                 "curl -s https://api.github.com/orgs/x"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
@@ -537,16 +539,16 @@ def test_raiz_unix_de_un_solo_segmento_no_es_flag_windows():
     for cmd in ("find / -path /proc -prune -o -name x -print",
                 "cp a.txt /opt",
                 "ls /root/.4bis"):
-        _, kind = shell.build_argv(cmd)
+        _, kind = shell_syntax.build_argv(cmd)
         assert kind == "sh", (cmd, kind)
 
 
 def test_docker_sin_flag_windows_sigue_en_sh():
-    _, kind = shell.build_argv("docker compose up -d --build")
+    _, kind = shell_syntax.build_argv("docker compose up -d --build")
     assert kind == "sh"
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 async def test_cwd_posix_ya_no_tira_winerror_267(tmp_path):
     """El bug real: `cwd='/c/...'` (lo que el modelo escribe, porque es
     lo que ve en la salida de bash) hacía morir el proceso ENTERO con
@@ -562,11 +564,11 @@ async def test_cwd_posix_ya_no_tira_winerror_267(tmp_path):
 
 def test_cwd_windows_sigue_funcionando(tmp_path):
     """No romper lo que ya andaba: forma Windows pasa intacta."""
-    assert shell._cwd_para_windows(str(tmp_path)) == str(tmp_path)
-    assert shell._cwd_para_windows("C:/Users/x") == "C:/Users/x"
+    assert shell_environment._cwd_para_windows(str(tmp_path)) == str(tmp_path)
+    assert shell_environment._cwd_para_windows("C:/Users/x") == "C:/Users/x"
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="el enredo es de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="el enredo es de Windows")
 async def test_cwd_posix_inexistente_da_error_claro_no_winerror_267():
     r = await shell.run("echo hola", cwd="/c/ruta/que/no/existe-de-verdad",
                          timeout=30)
@@ -577,9 +579,9 @@ async def test_cwd_posix_inexistente_da_error_claro_no_winerror_267():
 
 def test_convierte_solo_drive_posix_real():
     """`/usr/local` no es un drive (dos letras): queda intacto."""
-    assert shell._cwd_para_windows("/usr/local") == "/usr/local"
-    assert shell._cwd_para_windows("/c/Users/demo") == "C:/Users/demo"
-    assert shell._cwd_para_windows("/c") == "C:/"
+    assert shell_environment._cwd_para_windows("/usr/local") == "/usr/local"
+    assert shell_environment._cwd_para_windows("/c/Users/demo") == "C:/Users/demo"
+    assert shell_environment._cwd_para_windows("/c") == "C:/"
 
 
 # ---------- 1.b el `cwd` relativo de la tool (2026-09-04) ----------
@@ -606,7 +608,7 @@ async def test_cwd_relativo_se_resuelve_contra_el_repo(tmp_path):
 
 def test_cwd_relativo_apunta_adentro_del_repo(tmp_path):
     (tmp_path / "frontend").mkdir()
-    cwd, err = shell._resolver_cwd("frontend", str(tmp_path))
+    cwd, err = shell_environment._resolver_cwd("frontend", str(tmp_path))
     assert err == ""
     assert Path(cwd) == (tmp_path / "frontend").resolve()
 
@@ -614,9 +616,9 @@ def test_cwd_relativo_apunta_adentro_del_repo(tmp_path):
 def test_cwd_vacio_sigue_siendo_la_raiz_del_repo(tmp_path):
     """Lo que el docstring de la tool promete, y lo que el `or` ya hacía
     bien: no romperlo al sacarlo del call site."""
-    assert shell._resolver_cwd("", str(tmp_path)) == (str(tmp_path), "")
-    assert shell._resolver_cwd(None, str(tmp_path)) == (str(tmp_path), "")
-    assert shell._resolver_cwd("", "") == (None, "")
+    assert shell_environment._resolver_cwd("", str(tmp_path)) == (str(tmp_path), "")
+    assert shell_environment._resolver_cwd(None, str(tmp_path)) == (str(tmp_path), "")
+    assert shell_environment._resolver_cwd("", "") == (None, "")
 
 
 def test_cwd_relativo_no_puede_salirse_del_repo(tmp_path):
@@ -626,7 +628,7 @@ def test_cwd_relativo_no_puede_salirse_del_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (tmp_path / "otro").mkdir()
-    cwd, err = shell._resolver_cwd("../otro", str(repo))
+    cwd, err = shell_environment._resolver_cwd("../otro", str(repo))
     assert cwd is None
     assert "se sale del repo" in err
 
@@ -659,13 +661,13 @@ def test_cwd_absoluto_fuera_del_repo_sigue_permitido(tmp_path):
     repo.mkdir()
     afuera = tmp_path / "otro"
     afuera.mkdir()
-    cwd, err = shell._resolver_cwd(str(afuera), str(repo))
+    cwd, err = shell_environment._resolver_cwd(str(afuera), str(repo))
     assert err == ""
     assert Path(cwd) == afuera
 
 
 def test_entorno_no_interactivo_completo():
-    env = shell._env_for_run()
+    env = shell_environment._env_for_run()
     # Las herramientas que preguntan en medio de un script.
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["PIP_NO_INPUT"] == "1"
@@ -675,7 +677,7 @@ def test_entorno_no_interactivo_completo():
 
 
 def test_env_extra_pisa_al_default():
-    env = shell._env_for_run({"CI": "0", "MIO": "1"})
+    env = shell_environment._env_for_run({"CI": "0", "MIO": "1"})
     assert env["CI"] == "0" and env["MIO"] == "1"
 
 
@@ -691,7 +693,7 @@ async def test_hide_tools_saca_run_shell():
         async def get_tools(self, ctx):
             return {"run_shell": object(), "read_file": object()}
 
-    oculto = experts.HideToolsToolset(
+    oculto = expert_toolsets.HideToolsToolset(
         wrapped=_Fake(), hidden=frozenset({"run_shell"}))
     tools = await oculto.get_tools(None)
     assert "run_shell" not in tools
@@ -705,7 +707,7 @@ async def test_hide_tools_sin_lista_no_toca_nada():
         async def get_tools(self, ctx):
             return {"run_shell": object()}
 
-    pasa = experts.HideToolsToolset(wrapped=_Fake())
+    pasa = expert_toolsets.HideToolsToolset(wrapped=_Fake())
     assert "run_shell" in await pasa.get_tools(None)
 
 
@@ -717,8 +719,10 @@ async def test_ask_human_registra_y_manda_terminar(db):
     from pydantic_ai.models.test import TestModel
     from unittest.mock import patch
 
+    await db.create_conversation(project_slug="demo", conversation_id="conv-1")
+
     capturado = {}
-    _RealAgent = experts.Agent
+    _RealAgent = expert_runner.Agent
 
     class _SpyAgent:
         def __init__(self, *a, **kw):
@@ -733,10 +737,10 @@ async def test_ask_human_registra_y_manda_terminar(db):
     proj = {"slug": "demo", "repo_path": str(tempfile.mkdtemp()),
             "system_prompt": "p", "mcp_servers": [], "native_tools": [],
             "defaults_json": {}}
-    with patch.object(experts, "Agent", _SpyAgent), \
-         patch.object(experts, "build_model", lambda s: TestModel(call_tools=[])), \
-         patch.object(experts, "cbm_binary_path", lambda: None):
-        await experts.run_expert(
+    with patch.object(expert_runner, "Agent", _SpyAgent), \
+         patch.object(expert_models, "build_model", lambda s: TestModel(call_tools=[])), \
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+        await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
             chat_id="chat-1", conversation_id="conv-1")
 
@@ -778,9 +782,9 @@ async def test_pregunta_persistida_y_respondible(db):
 
 
 def test_clasifica_las_preguntas_de_instalacion():
-    assert experts._huele_a_instalacion("¿instalo pwsh?", "")
-    assert experts._huele_a_instalacion("", "hay que correr pip install rich")
-    assert not experts._huele_a_instalacion("¿borro la rama vieja?", "")
+    assert expert_evidence._huele_a_instalacion("¿instalo pwsh?", "")
+    assert expert_evidence._huele_a_instalacion("", "hay que correr pip install rich")
+    assert not expert_evidence._huele_a_instalacion("¿borro la rama vieja?", "")
 
 
 # ---------- 4. la pregunta llega al humano en la respuesta ----------
@@ -1061,8 +1065,8 @@ def test_desenvuelve_el_powershell_que_escribe_el_modelo():
         (r'powershell -NoProfile -Command "Write-Output 1; \"\"; Write-Output 2"',
          'Write-Output 1; ""; Write-Output 2'),
     ):
-        assert shell.desenvolver_powershell(envuelto) == payload, envuelto
-        argv, kind = shell.build_argv(envuelto)
+        assert shell_syntax.desenvolver_powershell(envuelto) == payload, envuelto
+        argv, kind = shell_syntax.build_argv(envuelto)
         assert kind == "powershell", envuelto
         assert argv[-1].endswith("\n" + payload), envuelto
 
@@ -1083,7 +1087,7 @@ def test_no_desenvuelve_cuando_desenvolver_cambiaria_el_comando():
         'powershell -Command "sin cerrar',
         "dotnet build",                                # ni siquiera es PS
     ):
-        assert shell.desenvolver_powershell(cmd) == "", cmd
+        assert shell_syntax.desenvolver_powershell(cmd) == "", cmd
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="corre PowerShell real")
@@ -1125,7 +1129,7 @@ def test_la_ruta_windows_sobrevive_al_ruteo_a_bash():
     la guarda arreglaría la ruta rompiendo el pipe.
     """
     cmd = r"cd C:\Users\demo\repo && dotnet build | tail -40"
-    argv, kind = shell.build_argv(cmd)
+    argv, kind = shell_syntax.build_argv(cmd)
     assert kind == "sh", "sigue necesitando bash por el `tail`"
     assert argv[-1] == "cd C:/Users/demo/repo && dotnet build | tail -40"
     assert "\\" not in argv[-1]
@@ -1144,7 +1148,7 @@ def test_no_toca_backslashes_que_no_son_ruta():
         r'grep -n "useState\|busy" src/App.tsx',
         "grep -r foo /usr/local | head -3",
     ):
-        assert shell._rutas_para_bash(cmd) == cmd, cmd
+        assert shell_syntax._rutas_para_bash(cmd) == cmd, cmd
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="corre bash de verdad")
@@ -1192,4 +1196,4 @@ async def test_el_hint_de_herramienta_faltante_tambien_desde_powershell():
     for kind in ("powershell", "cmd", "sh"):
         r = await shell.run("estonoexiste-xyz-abc --version",
                             shell_kind=kind, timeout=60)
-        assert shell.missing_tool_hint(r["out"]), (kind, r["out"])
+        assert shell_environment.missing_tool_hint(r["out"]), (kind, r["out"])

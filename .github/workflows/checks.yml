@@ -37,6 +37,14 @@ jobs:
           mcp-server/tests/test_memories_ui.py
           mcp-server/tests/test_identity.py
           mcp-server/tests/test_project_privacy.py
+          mcp-server/tests/test_task_persistence.py
+          mcp-server/tests/test_task_workspace.py
+          mcp-server/tests/test_task_pr.py
+          mcp-server/tests/test_task_controls.py
+          mcp-server/tests/test_task_continuity.py
+          mcp-server/tests/test_task_callers.py
+          mcp-server/tests/test_task_index.py
+          mcp-server/tests/test_module_boundaries.py
           mcp-server/tests/test_tracing.py
           mcp-server/tests/test_browser_boundary.py
           mcp-server/tests/test_system_config.py

@@ -1,3 +1,4 @@
+from relay import shell_environment, shell_process
 """Comandos reales: el intérprete no debe convertir fallos en éxitos."""
 import shutil
 import asyncio
@@ -9,7 +10,7 @@ from relay import shell, shell_tools
 from relay.experts import Bitacora
 
 
-@pytest.mark.skipif(not shell.bash_exe(), reason="requiere Bash")
+@pytest.mark.skipif(not shell_environment.bash_exe(), reason="requiere Bash")
 @pytest.mark.parametrize("cmd", ["false | cat", "false; echo no-debe-ejecutarse"])
 async def test_bash_preserves_failures(tmp_path, cmd):
     result = await shell.run(cmd, cwd=str(tmp_path), shell_kind="sh", timeout=10)
@@ -63,8 +64,8 @@ async def test_cancelled_background_start_is_reaped_before_return(tmp_path, monk
     def kill(proc):
         assert proc is process
         proc.returncode = -1
-    monkeypatch.setattr(shell.subprocess, "Popen", spawn)
-    monkeypatch.setattr(shell, "_kill_tree", kill)
+    monkeypatch.setattr(shell_process.subprocess, "Popen", spawn)
+    monkeypatch.setattr(shell_process, "_kill_tree", kill)
     task = asyncio.create_task(shell.lanzar("server", base=str(tmp_path)))
     await started.wait()
     task.cancel()

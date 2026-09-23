@@ -1,3 +1,4 @@
+from relay import skills_browser
 """Alta de skills desde GitHub + toggle enabled (2026-07-25).
 
 Cubre lo que puede romper en silencio: el guard anti-traversal del clon,
@@ -224,7 +225,7 @@ def test_install_rechaza_skills_gigantes(tmp_path, monkeypatch):
     d = _write_skill(clone, "gorda", "gorda")
     (d / "blob.bin").write_bytes(b"x" * 2048)
     dest.mkdir()
-    monkeypatch.setattr(sk, "SKILL_MAX_BYTES", 1024)
+    monkeypatch.setattr(skills_browser, "SKILL_MAX_BYTES", 1024)
     with pytest.raises(ValueError, match="MB"):
         sk.install_skill_from_clone(clone, "gorda", dest)
 

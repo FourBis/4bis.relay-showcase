@@ -438,7 +438,7 @@ class TestVetWithLlmFallsBack(unittest.IsolatedAsyncioTestCase):
         # Forzar el path 'no model': parcheamos build_model para
         # que tire ModelUnavailable.
         from relay.mcp_installer import vet_with_llm
-        with patch("relay.experts.build_model",
+        with patch("relay.expert_models.build_model",
                    side_effect=ModelUnavailable("sin key")):
             with tempfile.TemporaryDirectory() as t:
                 d = Path(t)

@@ -14,6 +14,7 @@ Cómo correr:
     python -m pytest tests/test_git_diff_endpoint.py -q
 """
 from __future__ import annotations
+from relay import expert_git
 
 import os
 import subprocess
@@ -278,7 +279,7 @@ class TestGitDiffTruncation(unittest.IsolatedAsyncioTestCase):
         subprocess.run(["git", "commit", "-q", "-m", "init"],
                        cwd=self._tmp.name, check=True)
         # cambio que excede 20KB
-        big = "x" * (experts.DIFF_MAX_BYTES + 5000)
+        big = "x" * (expert_git.DIFF_MAX_BYTES + 5000)
         (Path(self._tmp.name) / "small.txt").write_text(big + "\nb\n")
 
         self.db = Database()

@@ -9,6 +9,7 @@ Cubre:
 - versión unificada desde relay.__version__
 """
 from __future__ import annotations
+from relay import expert_models
 
 import json
 import sys
@@ -156,7 +157,7 @@ async def test_config_put_ejecutor_aplica_al_proximo_run(cli):
                       json={"FOURBIS_MODEL": "fake:executor"})
     assert r.status == 200
     assert config.model_spec() == "fake:executor"
-    assert experts.resolve_model_spec("", {"defaults_json": {}}) == \
+    assert expert_models.resolve_model_spec("", {"defaults_json": {}}) == \
         "fake:executor"
     r = await cli.put("/admin/api/config", json={"FOURBIS_MODEL": ""})
     assert r.status == 200

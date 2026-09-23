@@ -25,6 +25,7 @@ docs/MULTIMODELO_FIXES.md:
     conserva el último turno.
 """
 from __future__ import annotations
+from relay import cbm_runtime, expert_context, expert_history, expert_models, expert_planning, expert_runner, expert_selection, expert_staged_runner, expert_stages, expert_verdicts
 
 import json
 from unittest.mock import patch
@@ -96,7 +97,7 @@ class _FakeRun:
 
 def test_clean_stage_output_quita_bloque_think():
     raw = "<think>me pregunto si…</think>\nVERDICT: complete"
-    assert experts._clean_stage_output(raw) == "VERDICT: complete"
+    assert expert_verdicts._clean_stage_output(raw) == "VERDICT: complete"
 
 
 def test_clean_stage_output_quita_think_sin_cerrar():
@@ -107,32 +108,32 @@ def test_clean_stage_output_quita_think_sin_cerrar():
     que colar un poco de razonamiento.
     """
     raw = "<think>razono y razono\nVERDICT: complete"
-    out = experts._clean_stage_output(raw)
+    out = expert_verdicts._clean_stage_output(raw)
     assert out.startswith("razono y razono")
     assert "<think>" not in out
 
 
 def test_clean_stage_output_conserva_lo_posterior_a_think_abierto():
     raw = "<thinking>ruido\nVERDICT: needs_more"
-    assert "VERDICT: needs_more" in experts._clean_stage_output(raw)
+    assert "VERDICT: needs_more" in expert_verdicts._clean_stage_output(raw)
 
 
 def test_clean_stage_output_quita_fence_envolvente():
     raw = "```markdown\n1. leer main.py\n2. editar\n```"
-    assert experts._clean_stage_output(raw) == "1. leer main.py\n2. editar"
+    assert expert_verdicts._clean_stage_output(raw) == "1. leer main.py\n2. editar"
 
 
 def test_clean_stage_output_no_toca_texto_limpio():
     """Idempotente: lo que ya venía bien queda igual (caso MiniMax)."""
     raw = "VERDICT: complete\nFEEDBACK: listo"
-    assert experts._clean_stage_output(raw) == raw
-    assert experts._clean_stage_output(raw) == experts._clean_stage_output(raw)
+    assert expert_verdicts._clean_stage_output(raw) == raw
+    assert expert_verdicts._clean_stage_output(raw) == expert_verdicts._clean_stage_output(raw)
 
 
 def test_clean_stage_output_no_rompe_un_fence_interno():
     """Un plan con un bloque de código adentro no se desarma."""
     raw = "1. correr:\n\n```bash\npytest -q\n```\n\n2. revisar"
-    assert experts._clean_stage_output(raw) == raw
+    assert expert_verdicts._clean_stage_output(raw) == raw
 
 
 # ---------- 2. parser del verificador ----------
@@ -147,7 +148,7 @@ def test_parse_verifier_no_se_invierte_con_prosa_previa():
     text = ("Analizando: no es needs_human porque no hay que decidir nada, "
             "y tampoco needs_more.\n"
             "VERDICT: complete\nFEEDBACK: el plan se cumplió")
-    v, f, _pasos = experts._parse_verifier(text)
+    v, f, _pasos = expert_verdicts._parse_verifier(text)
     assert v == "complete"
     assert f == "el plan se cumplió"
     assert _pasos == [], "sin línea PASOS: la lista viene vacía"
@@ -156,28 +157,28 @@ def test_parse_verifier_no_se_invierte_con_prosa_previa():
 def test_parse_verifier_con_bloque_think():
     text = ("<think>Veamos… podría ser needs_more</think>\n"
             "VERDICT: complete\nFEEDBACK: ok")
-    assert experts._parse_verifier(text)[0] == "complete"
+    assert expert_verdicts._parse_verifier(text)[0] == "complete"
 
 
 def test_parse_verifier_linea_sola_sin_etiqueta():
-    v, _, _pasos = experts._parse_verifier("needs_more\nfalta correr los tests")
+    v, _, _pasos = expert_verdicts._parse_verifier("needs_more\nfalta correr los tests")
     assert v == "needs_more"
     assert _pasos == []
 
 
 def test_parse_verifier_markdown_alrededor_de_la_etiqueta():
-    v, _, _ = experts._parse_verifier("**VERDICT:** `needs_human`\nFEEDBACK: x")
+    v, _, _ = expert_verdicts._parse_verifier("**VERDICT:** `needs_human`\nFEEDBACK: x")
     assert v == "needs_human"
 
 
 def test_parse_verifier_fallback_suelto_sigue_andando():
     """Una mención suelta todavía puede pedir trabajo, nunca aprobarlo."""
-    v, _, _ = experts._parse_verifier("me parece que esto es needs_more todavía")
+    v, _, _ = expert_verdicts._parse_verifier("me parece que esto es needs_more todavía")
     assert v == "needs_more"
 
 
 def test_parse_verifier_feedback_siempre_acotado():
-    v, f, _pasos = experts._parse_verifier("x" * 900)
+    v, f, _pasos = expert_verdicts._parse_verifier("x" * 900)
     assert v == "needs_human" and len(f) <= 200
     assert _pasos == []
 
@@ -188,22 +189,22 @@ def test_parse_verifier_feedback_siempre_acotado():
 def test_plan_signal_con_preambulo():
     """El modelo saluda antes de la señal: antes esto anulaba el corte."""
     plan = "Claro, acá va:\nDEMASIADO_GRANDE:\n1. una\n2. otra"
-    assert experts._plan_signal(plan) == "too_large"
+    assert expert_planning._plan_signal(plan) == "too_large"
 
 
 def test_plan_signal_con_markdown():
-    assert experts._plan_signal("**TRIVIAL:** la respuesta es 42") == "trivial"
+    assert expert_planning._plan_signal("**TRIVIAL:** la respuesta es 42") == "trivial"
 
 
 def test_plan_signal_ignora_mencion_tardia():
     """Un plan que MENCIONA la palabra en el paso 7 no es una señal."""
     plan = "\n".join([f"{i}. paso {i}" for i in range(1, 7)]
                      + ["7. avisar DEMASIADO_GRANDE: si no entra"])
-    assert experts._plan_signal(plan) == ""
+    assert expert_planning._plan_signal(plan) == ""
 
 
 def test_plan_signal_vacio_sin_senal():
-    assert experts._plan_signal("1. leer\n2. escribir") == ""
+    assert expert_planning._plan_signal("1. leer\n2. escribir") == ""
 
 
 # Salidas REALES del planificador, copiadas de `chats.stages_json`. Que
@@ -236,17 +237,17 @@ def test_plan_utilizable_rechaza_la_basura_real():
     verificador los usaba igual como contrato. Ver `_plan_utilizable`.
     """
     for basura in _PLANES_BASURA:
-        assert not experts._plan_utilizable(basura), basura[:60]
+        assert not expert_planning._plan_utilizable(basura), basura[:60]
 
 
 def test_plan_utilizable_acepta_los_planes_de_verdad():
     """Rechazar de más sería peor: el ejecutor se quedaría sin guía."""
     for bueno in _PLANES_BUENOS:
-        assert experts._plan_utilizable(bueno), bueno[:60]
+        assert expert_planning._plan_utilizable(bueno), bueno[:60]
 
 
 def test_format_decomposition_saca_la_senal_con_preambulo():
-    out = experts._format_decomposition(
+    out = expert_planning._format_decomposition(
         "Claro:\nDEMASIADO_GRANDE:\n1. una\n2. otra")
     assert "DEMASIADO_GRANDE" not in out
     assert "1. una" in out and "2. otra" in out
@@ -262,7 +263,7 @@ def test_history_recap_arma_el_resumen():
         ("user", "ahora los tests"),
         ("assistant", "corrí pytest, 3 fallan"),
     ])
-    recap = experts._history_recap(raw)
+    recap = expert_planning._history_recap(raw)
     assert "arreglá el login" in recap
     assert "corrí pytest, 3 fallan" in recap
     assert recap.index("arreglá el login") < recap.index("corrí pytest")
@@ -270,29 +271,29 @@ def test_history_recap_arma_el_resumen():
 
 def test_history_recap_respeta_el_presupuesto():
     raw = _history([("user", "u" * 5000), ("assistant", "a" * 5000)])
-    recap = experts._history_recap(raw, max_chars=500)
+    recap = expert_planning._history_recap(raw, max_chars=500)
     assert 0 < len(recap) <= 1500   # un mensaje entero, recortado a _RECAP_PART_CAP
 
 
 def test_history_recap_se_queda_con_los_ultimos_turnos():
     raw = _history([(r, f"turno {i}")
                     for i, r in enumerate(["user", "assistant"] * 6)])
-    recap = experts._history_recap(raw, max_turns=2)
+    recap = expert_planning._history_recap(raw, max_turns=2)
     assert "turno 11" in recap
     assert "turno 0" not in recap
 
 
 @pytest.mark.parametrize("bad", ["", "no soy json", "{}", None])
 def test_history_recap_best_effort(bad):
-    assert experts._history_recap(bad) == ""
+    assert expert_planning._history_recap(bad) == ""
 
 
 async def test_run_planner_recibe_el_recap_en_el_prompt():
     sink = {}
     fake = _FakeRun("1. seguir", sink)
-    with patch.object(experts, "Agent", fake), \
-         patch.object(experts, "build_model", lambda spec: "m"):
-        plan, _usage, err = await experts._run_planner(
+    with patch.object(expert_stages, "Agent", fake), \
+         patch.object(expert_models, "build_model", lambda spec: "m"):
+        plan, _usage, err = await expert_stages._run_planner(
             user="continúa", project=_project(), model_spec="test",
             ponytail="", is_followup=True,
             history_recap="usuario: arreglá el login\n\nexperto: toqué auth.py",
@@ -317,9 +318,9 @@ async def test_planner_no_pide_el_razonador_si_no_lo_tiene():
     evalúa Python ahora, no el modelo sobre sí mismo.
     """
     sink = {}
-    with patch.object(experts, "Agent", _FakeRun("1. hacer algo", sink)), \
-         patch.object(experts, "build_model", lambda spec: "m"):
-        await experts._run_planner(
+    with patch.object(expert_stages, "Agent", _FakeRun("1. hacer algo", sink)), \
+         patch.object(expert_models, "build_model", lambda spec: "m"):
+        await expert_stages._run_planner(
             user="documenta la app", project=_project(), model_spec="test",
             ponytail="", toolsets=[])
     assert "sequentialthinking" not in sink["instructions"]
@@ -327,9 +328,9 @@ async def test_planner_no_pide_el_razonador_si_no_lo_tiene():
 
 async def test_planner_pide_el_razonador_cuando_esta_adjunto():
     sink = {}
-    with patch.object(experts, "Agent", _FakeRun("1. hacer algo", sink)), \
-         patch.object(experts, "build_model", lambda spec: "m"):
-        await experts._run_planner(
+    with patch.object(expert_stages, "Agent", _FakeRun("1. hacer algo", sink)), \
+         patch.object(expert_models, "build_model", lambda spec: "m"):
+        await expert_stages._run_planner(
             user="documenta la app", project=_project(), model_spec="test",
             ponytail="", toolsets=[object()])
     assert "sequentialthinking" in sink["instructions"]
@@ -356,11 +357,11 @@ async def test_staged_pasa_el_recap_al_planificador():
 
     raw = _history([("user", "arreglá el login"),
                     ("assistant", "listo, toqué auth.py")])
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        await expert_staged_runner.run_expert_staged(
             _project(), "continúa", model_override="test",
             message_history_json=raw)
     assert seen["is_followup"] is True
@@ -380,10 +381,10 @@ async def test_staged_sin_historial_no_manda_recap():
     async def fake_verifier(**kwargs):
         return "complete", "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        await expert_staged_runner.run_expert_staged(
             _project(), "primer pedido", model_override="test")
     assert seen["recap"] == ""
 
@@ -401,10 +402,10 @@ async def test_planner_caido_deja_stage_error():
     async def fake_verifier(**kwargs):
         return "complete", "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             _project(), "hola", model_override="test")
     assert result["stage_errors"]["planner"].startswith("TimeoutError")
 
@@ -418,8 +419,8 @@ async def test_run_planner_reporta_el_error_y_avisa_por_progress():
     def broken(spec):
         raise RuntimeError("429 del free tier")
 
-    with patch.object(experts, "build_model", broken):
-        plan, usage, err = await experts._run_planner(
+    with patch.object(expert_models, "build_model", broken):
+        plan, usage, err = await expert_stages._run_planner(
             user="x", project=_project(), model_spec="lo-que-sea",
             ponytail="", on_progress=on_progress)
     assert plan == "" and usage == {}
@@ -467,11 +468,11 @@ async def test_verificador_opt_out_por_proyecto():
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             _project(verifier=False), "hola", model_override="test")
     assert "si" not in llamado
     # Ni `complete` ni `needs_human`: nadie verificó, y eso no es aprobar.
@@ -492,11 +493,11 @@ async def test_needs_more_se_ve_en_el_content():
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             _project(), "hola", model_override="test")
     assert result["content"].startswith("hice la mitad")
     # El feedback del verificador tiene que llegar al humano: es lo que le
@@ -536,11 +537,11 @@ async def _staged_contando(executor, verdict="complete", **proj_kw):
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             _project(**proj_kw), "hacé el trabajo", model_override="test")
     return result, llamadas
 
@@ -616,7 +617,7 @@ async def test_turno_con_trabajo_no_dispara_reintento():
 
 def test_merge_doc_into_history_anexa_al_ultimo_texto():
     raw = _history([("user", "hacé X"), ("assistant", "hecho")])
-    out = _merge = experts._merge_doc_into_history(raw, "**Pendiente:** correr tests")
+    out = _merge = expert_stages._merge_doc_into_history(raw, "**Pendiente:** correr tests")
     msgs = ModelMessagesTypeAdapter.validate_json(out)
     assert len(msgs) == 2                      # no agrega mensajes
     texto = msgs[-1].parts[-1].content
@@ -631,10 +632,10 @@ def test_merge_doc_sobrevive_a_slim_history():
     mensaje aparte se habría llevado puesta la respuesta del ejecutor.
     """
     raw = _history([("user", "hacé X"), ("assistant", "hecho")])
-    merged = experts._merge_doc_into_history(raw, "**Pendiente:** correr tests")
+    merged = expert_stages._merge_doc_into_history(raw, "**Pendiente:** correr tests")
     msgs = list(ModelMessagesTypeAdapter.validate_json(merged))
     msgs.append(ModelRequest(parts=[UserPromptPart(content="continuá")]))
-    slim = experts._slim_history(msgs)
+    slim = expert_history._slim_history(msgs)
     textos = [p.content for m in slim if isinstance(m, ModelResponse)
               for p in m.parts if isinstance(p, TextPart)]
     assert any("correr tests" in t for t in textos)
@@ -650,7 +651,7 @@ def test_merge_doc_salta_el_response_sin_texto():
             tool_name="read_file", args="{}", tool_call_id="c1")]),
     ]
     raw = ModelMessagesTypeAdapter.dump_json(messages).decode("utf-8")
-    out = experts._merge_doc_into_history(raw, "registro")
+    out = expert_stages._merge_doc_into_history(raw, "registro")
     msgs = ModelMessagesTypeAdapter.validate_json(out)
     assert "registro" in msgs[1].parts[-1].content
 
@@ -663,20 +664,20 @@ def test_merge_doc_marca_el_registro_como_no_imitable():
     cinco registros y ninguna respuesta.
     """
     raw = _history([("user", "hacé X"), ("assistant", "hecho")])
-    out = experts._merge_doc_into_history(raw, "**Pendiente:** correr tests")
+    out = expert_stages._merge_doc_into_history(raw, "**Pendiente:** correr tests")
     texto = ModelMessagesTypeAdapter.validate_json(out)[-1].parts[-1].content
-    assert experts._DOC_MARCA in texto
-    assert texto.index(experts._DOC_MARCA) < texto.index("correr tests")
+    assert expert_stages._DOC_MARCA in texto
+    assert texto.index(expert_stages._DOC_MARCA) < texto.index("correr tests")
 
 
 def test_merge_doc_reemplaza_el_registro_previo_en_vez_de_apilar():
     """Dos registros son dos ejemplos del formato a imitar, no más contexto."""
     raw = _history([("user", "hacé X"), ("assistant", "hecho")])
-    una = experts._merge_doc_into_history(raw, "**Pendiente:** correr tests")
-    dos = experts._merge_doc_into_history(una, "**Pendiente:** subir el PR")
+    una = expert_stages._merge_doc_into_history(raw, "**Pendiente:** correr tests")
+    dos = expert_stages._merge_doc_into_history(una, "**Pendiente:** subir el PR")
     texto = ModelMessagesTypeAdapter.validate_json(dos)[-1].parts[-1].content
 
-    assert texto.count(experts._DOC_MARCA) == 1, "se apilaron dos registros"
+    assert texto.count(expert_stages._DOC_MARCA) == 1, "se apilaron dos registros"
     assert "subir el PR" in texto          # queda el nuevo
     assert "correr tests" not in texto     # se fue el viejo
     assert texto.startswith("hecho")       # la respuesta real sobrevive
@@ -684,14 +685,14 @@ def test_merge_doc_reemplaza_el_registro_previo_en_vez_de_apilar():
 
 def test_merge_doc_es_idempotente():
     raw = _history([("user", "hacé X"), ("assistant", "hecho")])
-    una = experts._merge_doc_into_history(raw, "**Pendiente:** correr tests")
-    otra = experts._merge_doc_into_history(una, "**Pendiente:** correr tests")
+    una = expert_stages._merge_doc_into_history(raw, "**Pendiente:** correr tests")
+    otra = expert_stages._merge_doc_into_history(una, "**Pendiente:** correr tests")
     assert una == otra
 
 
 @pytest.mark.parametrize("doc,raw", [("", "[]"), ("x", ""), ("x", "roto{")])
 def test_merge_doc_best_effort(doc, raw):
-    assert experts._merge_doc_into_history(raw, doc) == raw
+    assert expert_stages._merge_doc_into_history(raw, doc) == raw
 
 
 async def test_staged_mete_el_doc_en_el_historial():
@@ -724,11 +725,11 @@ async def test_staged_mete_el_doc_en_el_historial():
     async def fake_documenter(**kwargs):
         return "**Pendiente:** correr tests", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             _project(), "hacé X", model_override="test")
     assert "correr tests" in result["content"]          # lo ve el humano
     assert "correr tests" in result["messages_json"]    # …y el modelo
@@ -747,14 +748,14 @@ def _resp(model_name, *, thinking=True):
 def test_strip_foreign_thinking_mismo_modelo_no_toca():
     msgs = [ModelRequest(parts=[UserPromptPart(content="x")]),
             _resp("MiniMax-M3")]
-    assert experts._strip_foreign_thinking(msgs, "minimax:MiniMax-M3") == 0
+    assert expert_history._strip_foreign_thinking(msgs, "minimax:MiniMax-M3") == 0
     assert any(isinstance(p, ThinkingPart) for p in msgs[-1].parts)
 
 
 def test_strip_foreign_thinking_otro_modelo_saca():
     msgs = [ModelRequest(parts=[UserPromptPart(content="x")]),
             _resp("MiniMax-M3")]
-    n = experts._strip_foreign_thinking(msgs, "nvidia:nvidia/nemotron-3-ultra")
+    n = expert_history._strip_foreign_thinking(msgs, "nvidia:nvidia/nemotron-3-ultra")
     assert n == 1
     assert not any(isinstance(p, ThinkingPart) for p in msgs[-1].parts)
     assert any(isinstance(p, TextPart) for p in msgs[-1].parts)
@@ -765,20 +766,20 @@ def test_strip_foreign_thinking_no_vacia_un_response():
     solo_thinking = ModelResponse(parts=[ThinkingPart(content="…")],
                                   model_name="MiniMax-M3")
     msgs = [solo_thinking, _resp("MiniMax-M3")]
-    experts._strip_foreign_thinking(msgs, "openai:gpt-4o")
+    expert_history._strip_foreign_thinking(msgs, "openai:gpt-4o")
     assert solo_thinking.parts
 
 
 def test_strip_foreign_thinking_sin_model_name_no_adivina():
     msgs = [ModelResponse(parts=[ThinkingPart(content="…"),
                                  TextPart(content="hola")])]
-    assert experts._strip_foreign_thinking(msgs, "nvidia:x") == 0
+    assert expert_history._strip_foreign_thinking(msgs, "nvidia:x") == 0
 
 
 def test_model_key_normaliza():
-    assert experts._model_key("minimax:MiniMax-M3") == "minimax-m3"
-    assert experts._model_key("MiniMax-M3") == "minimax-m3"
-    assert experts._model_key("nvidia:nvidia/nemotron-3-ultra") == "nvidia/nemotron-3-ultra"
+    assert expert_context._model_key("minimax:MiniMax-M3") == "minimax-m3"
+    assert expert_context._model_key("MiniMax-M3") == "minimax-m3"
+    assert expert_context._model_key("nvidia:nvidia/nemotron-3-ultra") == "nvidia/nemotron-3-ultra"
 
 
 # ---------- 9. compactación con puente ----------
@@ -850,18 +851,18 @@ def test_strip_foreign_thinking_tolera_sufijo_de_version():
     """
     msgs = [ModelRequest(parts=[UserPromptPart(content="x")]),
             _resp("gpt-4o-2024-08-06")]
-    assert experts._strip_foreign_thinking(msgs, "openai:gpt-4o") == 0
+    assert expert_history._strip_foreign_thinking(msgs, "openai:gpt-4o") == 0
     assert any(isinstance(p, ThinkingPart) for p in msgs[-1].parts)
 
 
 def test_distinto_modelo_reconoce_familias_distintas():
-    assert experts._distinto_modelo("minimax-m3", "nvidia/nemotron-3-ultra")
-    assert not experts._distinto_modelo("gpt-4o-2024-08-06", "gpt-4o")
-    assert not experts._distinto_modelo("gpt-4o", "gpt-4o-2024-08-06")
-    assert not experts._distinto_modelo("minimax-m3", "minimax-m3")
+    assert expert_context._distinto_modelo("minimax-m3", "nvidia/nemotron-3-ultra")
+    assert not expert_context._distinto_modelo("gpt-4o-2024-08-06", "gpt-4o")
+    assert not expert_context._distinto_modelo("gpt-4o", "gpt-4o-2024-08-06")
+    assert not expert_context._distinto_modelo("minimax-m3", "minimax-m3")
     # Ante la duda (una clave vacía) NO se toca el historial.
-    assert not experts._distinto_modelo("", "gpt-4o")
-    assert not experts._distinto_modelo("gpt-4o", "")
+    assert not expert_context._distinto_modelo("", "gpt-4o")
+    assert not expert_context._distinto_modelo("gpt-4o", "")
 
 
 # ---------- 10. el bloque de evidencia se enciende por CAPACIDAD ----------
@@ -878,7 +879,7 @@ async def _instructions_con_mcps(attached, monkeypatch):
     from pydantic_ai.models.test import TestModel
 
     sink = {}
-    _RealAgent = experts.Agent          # antes de parchear: si no, recursión
+    _RealAgent = expert_runner.Agent          # antes de parchear: si no, recursión
 
     class _SpyAgent:
         def __init__(self, *a, **kw):
@@ -892,15 +893,15 @@ async def _instructions_con_mcps(attached, monkeypatch):
                            inflight=None, hide_tools=frozenset(), image_artifacts=None, vision=True):
         return [], attached, attached
 
-    monkeypatch.setattr(experts, "_catalog_toolsets", fake_catalog)
-    monkeypatch.setattr(experts, "build_model", lambda spec: TestModel(call_tools=[]))
-    monkeypatch.setattr(experts, "Agent", _SpyAgent)
-    monkeypatch.setattr(experts, "cbm_binary_path", lambda: None)
+    monkeypatch.setattr(expert_selection, "_catalog_toolsets", fake_catalog)
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: TestModel(call_tools=[]))
+    monkeypatch.setattr(expert_runner, "Agent", _SpyAgent)
+    monkeypatch.setattr(cbm_runtime, "cbm_binary_path", lambda: None)
 
     proj = _project()
     proj["id"] = 1                      # habilita el camino del catálogo
     proj["repo_path"] = "."
-    await experts.run_expert(
+    await expert_runner.run_expert(
         proj, "hola", db=object(), model_override="minimax:MiniMax-M3")
     instr = sink.get("instructions", "")
     # `instructions=` es una lista desde la bitácora (2026-08-17): el

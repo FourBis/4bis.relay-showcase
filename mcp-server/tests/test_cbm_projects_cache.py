@@ -18,46 +18,47 @@ Cómo correr:
     python -m pytest tests/test_cbm_projects_cache.py -q
 """
 from __future__ import annotations
+from relay.app_state import DB_KEY
 
 import unittest
 
-from relay import admin
+from relay import admin, admin_cbm, admin_projects
 
 
 class TestCbmProjectsCache(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # Estado module-level: cada test arranca con cache frío.
-        admin._cbm_projects_cache = None
-        admin._cbm_projects_at = 0.0
+        admin_cbm._cbm_projects_cache = None
+        admin_cbm._cbm_projects_at = 0.0
         self.calls = 0
-        self._orig = admin._read_cbm_cache_index
+        self._orig = admin_cbm._read_cbm_cache_index
 
         def fake_index() -> dict:
             self.calls += 1
             return {"projects": [{"name": "demo", "nodes": 1}]}
 
-        admin._read_cbm_cache_index = fake_index
+        admin_cbm._read_cbm_cache_index = fake_index
 
     def tearDown(self) -> None:
-        admin._read_cbm_cache_index = self._orig
-        admin._cbm_projects_cache = None
+        admin_cbm._read_cbm_cache_index = self._orig
+        admin_cbm._cbm_projects_cache = None
 
     async def test_second_call_hits_cache(self) -> None:
-        d1 = await admin._cbm_list_projects()
-        d2 = await admin._cbm_list_projects()
+        d1 = await admin_cbm._cbm_list_projects()
+        d2 = await admin_cbm._cbm_list_projects()
         self.assertEqual(self.calls, 1)
         self.assertEqual(d1, d2)
 
     async def test_invalidate_forces_refetch(self) -> None:
-        await admin._cbm_list_projects()
-        admin._invalidate_cbm_projects_cache()
-        await admin._cbm_list_projects()
+        await admin_cbm._cbm_list_projects()
+        admin_cbm._invalidate_cbm_projects_cache()
+        await admin_cbm._cbm_list_projects()
         self.assertEqual(self.calls, 2)
 
     async def test_mark_job_done_invalidates(self) -> None:
-        await admin._cbm_list_projects()
-        admin._mark_job_done("job_x")
-        await admin._cbm_list_projects()
+        await admin_cbm._cbm_list_projects()
+        admin_cbm._mark_job_done("job_x")
+        await admin_cbm._cbm_list_projects()
         self.assertEqual(self.calls, 2)
 
     async def test_errors_not_cached(self) -> None:
@@ -65,15 +66,15 @@ class TestCbmProjectsCache(unittest.IsolatedAsyncioTestCase):
             self.calls += 1
             return {"error": "boom"}
 
-        admin._read_cbm_cache_index = fail_index
-        await admin._cbm_list_projects()
-        await admin._cbm_list_projects()
+        admin_cbm._read_cbm_cache_index = fail_index
+        await admin_cbm._cbm_list_projects()
+        await admin_cbm._cbm_list_projects()
         self.assertEqual(self.calls, 2)  # sin cache de errores
 
     async def test_ttl_expiry_refetches(self) -> None:
-        await admin._cbm_list_projects()
-        admin._cbm_projects_at = 0.0  # simula TTL vencido
-        await admin._cbm_list_projects()
+        await admin_cbm._cbm_list_projects()
+        admin_cbm._cbm_projects_at = 0.0  # simula TTL vencido
+        await admin_cbm._cbm_list_projects()
         self.assertEqual(self.calls, 2)
 
 

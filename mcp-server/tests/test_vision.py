@@ -6,6 +6,7 @@ del provider —o peor, una respuesta segura sobre algo que el modelo
 nunca vio— después de esperar el run entero.
 """
 from __future__ import annotations
+from relay import expert_models
 
 import sys
 from pathlib import Path
@@ -23,7 +24,7 @@ from relay import experts
 @pytest.fixture(autouse=True)
 def catalogo_medido():
     """Los cuatro medidos a mano, como los siembra el schema."""
-    experts.load_catalog([
+    expert_models.load_catalog([
         {"spec": "minimax:MiniMax-M3", "vision": 1, "enabled": 1},
         {"spec": "nvidia:minimaxai/minimax-m3", "vision": 1, "enabled": 1},
         {"spec": "nvidia:z-ai/glm-5.2", "vision": 0, "enabled": 1},
@@ -31,15 +32,15 @@ def catalogo_medido():
          "vision": 0, "enabled": 1},
     ])
     yield
-    experts.load_catalog([])
+    expert_models.load_catalog([])
 
 
 def test_minimax_ve_imagenes():
-    assert experts.has_vision("minimax:MiniMax-M3") is True
+    assert expert_models.has_vision("minimax:MiniMax-M3") is True
 
 
 def test_nemotron_no_ve_imagenes():
-    assert experts.has_vision(
+    assert expert_models.has_vision(
         "nvidia:nvidia/nemotron-3-ultra-550b-a55b") is False
 
 
@@ -47,38 +48,38 @@ def test_glm_no_ve_imagenes():
     """El peligroso: acepta el payload multimodal sin error y contesta
     igual. Probado el 2026-08-18 — con un PNG de un color liso y la
     consigna de decir el color, contesta NO_VEO."""
-    assert experts.has_vision("nvidia:z-ai/glm-5.2") is False
+    assert expert_models.has_vision("nvidia:z-ai/glm-5.2") is False
 
 
 def test_la_vision_es_del_endpoint_no_del_modelo():
     """Los mismos pesos servidos en dos lados no tienen por qué
     comportarse igual — por eso la lista es a mano y no un regex sobre
     el nombre. Acá dan lo mismo, y nemotron (mismo provider) no."""
-    assert experts.has_vision("minimax:MiniMax-M3")
-    assert experts.has_vision("nvidia:minimaxai/minimax-m3")
-    assert not experts.has_vision("nvidia:nvidia/nemotron-3-ultra-550b-a55b")
+    assert expert_models.has_vision("minimax:MiniMax-M3")
+    assert expert_models.has_vision("nvidia:minimaxai/minimax-m3")
+    assert not expert_models.has_vision("nvidia:nvidia/nemotron-3-ultra-550b-a55b")
 
 
 def test_modelo_desconocido_se_asume_con_vision():
     """Solo cortamos cuando SABEMOS que no ve. Asumir que no ve haría
     que un modelo nuevo se tragara la imagen en silencio."""
-    assert experts.has_vision("openai:gpt-5") is True
-    assert experts.has_vision("") is True
+    assert expert_models.has_vision("openai:gpt-5") is True
+    assert expert_models.has_vision("") is True
 
 
 def test_sin_medir_se_deja_pasar():
     """Importar los 102 de NVIDIA mete 102 filas en vision=NULL. Tratar
     NULL como ciego cortaría runs que hoy andan; el dato honesto es
     "nadie lo probó", y ante la duda no se bloquea."""
-    experts.load_catalog([
+    expert_models.load_catalog([
         {"spec": "nvidia:recien/importado", "vision": None, "enabled": 1}])
-    assert experts.has_vision("nvidia:recien/importado") is True
+    assert expert_models.has_vision("nvidia:recien/importado") is True
 
 
 def test_el_seed_trae_los_medidos():
     """El seed es lo único con visión medida a mano; si alguien lo
     rompe, el guard se queda sin nada que ofrecer en el mensaje."""
-    from relay import db as db_mod
+    from relay import db_support as db_mod
     por_spec = {m["spec"]: m for m in db_mod._MODELS_SEED}
     assert por_spec["minimax:MiniMax-M3"]["vision"] == 1
     assert por_spec["nvidia:z-ai/glm-5.2"]["vision"] == 0
@@ -90,7 +91,7 @@ def test_el_seed_trae_los_medidos():
 def test_seed_bien_formado():
     """Cada fila tiene que poder armar un modelo Y poder medirse: sin
     base_url no hay ni run ni probe."""
-    from relay import db as db_mod
+    from relay import db_support as db_mod
     for m in db_mod._MODELS_SEED:
         assert ":" in m["spec"], m["spec"] + " no tiene provider:modelo"
         assert m["vision"] in (0, 1, None)
@@ -123,26 +124,26 @@ def test_mask_key_sin_key():
 
 def test_override_gana_sobre_el_proyecto():
     proj = {"defaults_json": {"model": "minimax:MiniMax-M3"}}
-    assert experts.resolve_model_spec("nvidia:x", proj) == "nvidia:x"
+    assert expert_models.resolve_model_spec("nvidia:x", proj) == "nvidia:x"
 
 
 def test_sin_override_manda_el_proyecto():
     proj = {"defaults_json": {"model": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"}}
-    assert experts.resolve_model_spec("", proj) == (
+    assert expert_models.resolve_model_spec("", proj) == (
         "nvidia:nvidia/nemotron-3-ultra-550b-a55b")
 
 
 def test_sin_nada_cae_al_global(monkeypatch):
     monkeypatch.setenv("FOURBIS_MODEL", "minimax:MiniMax-M3")
-    assert experts.resolve_model_spec("", {}) == "minimax:MiniMax-M3"
-    assert experts.resolve_model_spec("", None) == "minimax:MiniMax-M3"
+    assert expert_models.resolve_model_spec("", {}) == "minimax:MiniMax-M3"
+    assert expert_models.resolve_model_spec("", None) == "minimax:MiniMax-M3"
 
 
 def test_el_guard_mira_el_modelo_del_proyecto_no_solo_el_override():
     """El caso que se escapa si el guard solo mira el body: nadie eligió
     modelo en la UI y el proyecto tiene configurado uno ciego."""
     proj = {"defaults_json": {"model": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"}}
-    assert not experts.has_vision(experts.resolve_model_spec("", proj))
+    assert not expert_models.has_vision(expert_models.resolve_model_spec("", proj))
 
 
 # ---------- modelo por etapa (2026-08-18) ----------
@@ -178,7 +179,7 @@ def test_un_typo_se_rechaza_al_guardar():
 def test_un_modelo_apagado_no_se_puede_asignar():
     """Apagado = no aparece en ningún selector. Dejar asignarlo por API
     haría que la pantalla de Modelos mienta sobre qué está en uso."""
-    experts.load_catalog([
+    expert_models.load_catalog([
         {"spec": "nvidia:apagado/x", "vision": None, "enabled": 0}])
     valor, err = _flag("model", "nvidia:apagado/x")
     assert valor is None and "prendidos" in err
@@ -251,7 +252,7 @@ def test_el_aviso_incluye_compactor_y_usa_system_config(monkeypatch, caplog):
     from relay import config, server
 
     monkeypatch.setenv("FOURBIS_COMPACTOR_MODEL", "minimax:MiniMax-M3")
-    experts.load_catalog([
+    expert_models.load_catalog([
         {"spec": "minimax:MiniMax-M3", "enabled": 1},
         {"spec": "nvidia:nvidia/apagado", "enabled": 0},
     ])
@@ -274,7 +275,7 @@ def test_sin_catalogo_no_avisa_nada():
 
     from relay import server
 
-    experts.load_catalog([])
+    expert_models.load_catalog([])
     logger = logging.getLogger("relay.server")
     registros = []
     handler = logging.Handler()

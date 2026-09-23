@@ -8,6 +8,7 @@ Cubrimos:
 - block_in_text_format devuelve "" si no es repo git.
 """
 from __future__ import annotations
+from relay import expert_git, expert_instructions
 
 import asyncio
 import subprocess
@@ -37,7 +38,7 @@ def _make_git_repo(tmp: Path) -> Path:
 
 def test_capture_returns_not_git_repo_for_non_git(tmp_path: Path) -> None:
     """Un directorio sin .git devuelve ok=False."""
-    info = experts._capture_git_diff_sync(str(tmp_path))
+    info = expert_git._capture_git_diff_sync(str(tmp_path))
     assert info["ok"] is False
     assert info["status"] == "not_git_repo"
 
@@ -50,7 +51,7 @@ def test_capture_git_diff_clean_tree(tmp_path: Path) -> None:
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=tmp_path, check=True)
-    info = experts._capture_git_diff_sync(str(tmp_path))
+    info = expert_git._capture_git_diff_sync(str(tmp_path))
     assert info["ok"] is True
     assert info["status"] == ""
     assert info["diff"] == ""
@@ -59,7 +60,7 @@ def test_capture_git_diff_clean_tree(tmp_path: Path) -> None:
 def test_capture_git_diff_modified_and_untracked(tmp_path: Path) -> None:
     """Repo con un archivo modificado y uno nuevo devuelve ambos en status."""
     _make_git_repo(tmp_path)
-    info = experts._capture_git_diff_sync(str(tmp_path))
+    info = expert_git._capture_git_diff_sync(str(tmp_path))
     assert info["ok"] is True
     assert "README.md" in info["status"]
     assert "?? new.txt" in info["status"]
@@ -68,7 +69,7 @@ def test_capture_git_diff_modified_and_untracked(tmp_path: Path) -> None:
 
 def test_build_block_returns_empty_for_non_git(tmp_path: Path) -> None:
     """Sin git, build devuelve '' (no se incluye en el system)."""
-    block = experts._build_git_diff_block_sync(str(tmp_path))
+    block = expert_git._build_git_diff_block_sync(str(tmp_path))
     assert block == ""
 
 
@@ -78,7 +79,7 @@ def test_build_block_clean_repo(tmp_path: Path) -> None:
     # commitear también new.txt para que quede clean
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "tweak"], cwd=tmp_path, check=True)
-    block = experts._build_git_diff_block_sync(str(tmp_path))
+    block = expert_git._build_git_diff_block_sync(str(tmp_path))
     assert "Working tree clean" in block
     assert "Branch:" in block
     assert "HEAD:" in block
@@ -87,7 +88,7 @@ def test_build_block_clean_repo(tmp_path: Path) -> None:
 def test_build_block_with_changes(tmp_path: Path) -> None:
     """Repo con cambios produce bloque con status y diff."""
     _make_git_repo(tmp_path)
-    block = experts._build_git_diff_block_sync(str(tmp_path))
+    block = expert_git._build_git_diff_block_sync(str(tmp_path))
     assert "## Cambios en el workspace (git)" in block
     assert "Status" in block
     assert "Diff" in block
@@ -105,8 +106,8 @@ def test_build_block_truncates_huge_diff(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "big.txt").write_text("y" * 30_000)
 
     # Bajar el cap a 1KB para testear rápido
-    monkeypatch.setattr(experts, "DIFF_MAX_BYTES", 1000)
-    block = experts._build_git_diff_block_sync(str(tmp_path))
+    monkeypatch.setattr(expert_git, "DIFF_MAX_BYTES", 1000)
+    block = expert_git._build_git_diff_block_sync(str(tmp_path))
     assert "Diff truncado" in block
 
 
@@ -123,7 +124,7 @@ def test_system_prompt_no_lleva_el_diff(tmp_path: Path) -> None:
         "slug": "test", "repo_path": str(tmp_path),
         "system_prompt": "", "mcp_servers": [], "native_tools": [],
     }
-    out = experts.build_instructions(project, "", "")
+    out = expert_instructions.build_instructions(project, "", "")
     assert "## Cambios en el workspace (git)" not in out
     # el bloque sigue existiendo — solo cambió quién lo pide
-    assert "modified" in experts._build_git_diff_block_sync(str(tmp_path))
+    assert "modified" in expert_git._build_git_diff_block_sync(str(tmp_path))

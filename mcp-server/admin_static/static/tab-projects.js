@@ -10,6 +10,7 @@ import { dataTable } from "./ui-table.js";
 import { refreshStatus } from "./tab-status.js";
 import { renderColumnas } from "./board-view.js";
 import { loadOrphans } from "./tab-orphans.js";
+import { taskWorkspaceQuery } from "./workspace.js";
 
 // ---- iconos de fila ----
 //
@@ -749,7 +750,7 @@ function wireCbmReindex(slug) {
     const msg = $("#cbm-modal-msg");
     msg.textContent = "arrancando reindex…";
     try {
-      const r = await api(`projects/${encodeURIComponent(slug)}/reindex`,
+      const r = await api(`projects/${encodeURIComponent(slug)}/reindex${taskWorkspaceQuery(slug)}`,
         { method: "POST" });
       toast(`Reindex ${r.job_id} arrancado. Espera unos minutos…`, "ok");
       msg.textContent = `job_id=${r.job_id} — verifica el tab Estado para el progreso`;
@@ -1878,7 +1879,7 @@ async function wsLoadSubdirs(project) {
   // Si falla, el select queda con la opción "(raíz)".
   try {
     const r = await api(
-      `projects/${encodeURIComponent(project.slug)}/workspace/files`);
+      `projects/${encodeURIComponent(project.slug)}/workspace/files${taskWorkspaceQuery(project.slug)}`);
     const dirs = (r.entries || [])
       .filter((e) => e.is_dir)
       .map((e) => `<option value="${escape(e.path)}">${escape(e.path)}/</option>`)
@@ -1893,7 +1894,7 @@ async function wsLoadFiles(slug, subdir) {
   if (!list) return;
   list.innerHTML = `<p class="muted text-xs">cargando…</p>`;
   try {
-    const q = subdir ? `?subdir=${encodeURIComponent(subdir)}` : "";
+    const q = taskWorkspaceQuery(slug, { subdir });
     const r = await api(`projects/${encodeURIComponent(slug)}/workspace/files${q}`);
     const entries = r.entries || [];
     if (entries.length === 0) {
@@ -1924,7 +1925,7 @@ async function wsOpenFile(slug, path) {
   if (!editor || !pathEl || !content) return;
   try {
     const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/file?path=${encodeURIComponent(path)}`);
+      `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug, { path })}`);
     pathEl.textContent = r.path;
     content.value = r.content;
     content.dataset.path = r.path;
@@ -1957,7 +1958,7 @@ async function wsSaveFile(slug) {
   msg.textContent = "guardando…";
   try {
     const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/file`, {
+      `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug)}`, {
         method: "PUT",
         body: JSON.stringify({ path, content: content.value, overwrite: true }),
       });
@@ -2025,7 +2026,7 @@ async function wsScaffold(slug) {
     // no tiene guard — si el LLM tarda más, el server sigue gastando API
     // hasta terminar o fallar; el cliente se rinde y muestra retry hint.
     const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/scaffold`, {
+      `projects/${encodeURIComponent(slug)}/workspace/scaffold${taskWorkspaceQuery(slug)}`, {
         method: "POST",
         body: JSON.stringify({ prompt, apply: false, overwrite }),
       }, 60_000);
@@ -2060,7 +2061,7 @@ async function wsScaffold(slug) {
     onClick("#ws-scaffold-apply", async () => {
       try {
         const r2 = await api(
-          `projects/${encodeURIComponent(slug)}/workspace/scaffold`, {
+          `projects/${encodeURIComponent(slug)}/workspace/scaffold${taskWorkspaceQuery(slug)}`, {
             method: "POST",
             body: JSON.stringify({ prompt, apply: true, overwrite }),
           }, 60_000);

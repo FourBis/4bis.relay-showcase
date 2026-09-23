@@ -1,6 +1,7 @@
-// Workspace: los módulos conservan un único DOM y sus handlers. No iframes,
-// duplicados de formularios ni copias locales de datos del servidor.
-import { toast } from './ui.js';
+// Workspace: los módulos conservan su DOM; cada chat separado tiene su
+// propio contexto de navegador para aislar borrador, selección y polling.
+import { toast, confirmModal } from './ui.js';
+import { createConversationFrame } from './chat-window.js';
 
 const STORAGE = '4bis.workspace.v1';
 const windows = new Map();
@@ -8,6 +9,8 @@ let modules = new Map(), loaders = {}, activeId = '', restoreObject;
 let stage, layer, dock, launcher;
 let saveTimer;
 let focusOrder = 0;
+let taskContext = { conversationId: '', projectSlug: '' };
+let primaryTaskContext = taskContext;
 const mobile = () => matchMedia('(max-width: 760px)').matches;
 const descriptions = {
   chat: ['Conversar', 'Conversaciones, respuestas y memoria'],
@@ -31,10 +34,29 @@ const descriptions = {
   models: ['Configurar', 'Catálogo y disponibilidad de modelos'],
   config: ['Configurar', 'Preferencias y comportamiento del relay'],
 };
+
+export function setTaskWorkspaceContext({ conversationId = '', projectSlug = '' } = {}) {
+  primaryTaskContext = { conversationId: String(conversationId || ''),
+    projectSlug: String(projectSlug || '') };
+  if (!activeId || activeId === 'chat') taskContext = primaryTaskContext;
+}
+
+export function taskWorkspaceQuery(projectSlug, params = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== '' && value != null) query.set(key, value);
+  }
+  if (taskContext.conversationId && taskContext.projectSlug === projectSlug) {
+    query.set('conversation', taskContext.conversationId);
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : '';
+}
 const paths = {
   close: 'M6 6l12 12M6 18L18 6', minimize: 'M5 16h14',
   maximize: 'M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5',
   restore: 'M8 8h13v13H8zM3 16V3h13',
+  rename: 'M16 3l5 5L8 21H3v-5zM14 5l5 5',
 };
 const svg = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="${paths[name]}"/></svg>`;
 const number = (n, fallback) => typeof n === 'number' && Number.isFinite(n) ? n : fallback;
@@ -71,9 +93,15 @@ export function readLayout(raw, validModules) {
       if (!w || typeof w.id !== 'string' || w.id.length > 240 || seen.has(w.id)) return false;
       if (w.module ? !validModules.includes(w.module) || w.id !== w.module :
         !w.restore || typeof w.restore.conversationId !== 'string' || w.restore.conversationId.length > 160) return false;
+      if (!w.module && w.restore.kind === 'conversation' &&
+        (!/^[\w-]{1,160}$/.test(w.restore.conversationId) ||
+          w.id !== `object:conversation:${w.restore.conversationId}`)) return false;
       seen.add(w.id); return true;
     }).map(w => ({ id: w.id, module: w.module || null,
-      title: typeof w.title === 'string' ? w.title.slice(0, 120) : 'Resultado del chat',
+      title: w.restore?.kind === 'conversation'
+        ? conversationTitle(w.title, w.restore.conversationId, w.customTitle)
+        : typeof w.title === 'string' ? w.title.slice(0, 120) : 'Resultado del chat',
+      customTitle: typeof w.customTitle === 'string' ? w.customTitle.trim().slice(0, 120) : '',
       restore: w.module ? null : w.restore,
       rect: { x: number(w.rect?.x, 0), y: number(w.rect?.y, 0), w: number(w.rect?.w, 860), h: number(w.rect?.h, 640) },
       closed: w.closed === true, minimized: w.minimized === true, maximized: w.maximized === true,
@@ -83,11 +111,32 @@ export function readLayout(raw, validModules) {
 
 function bounds() { return { width: stage.clientWidth, height: stage.clientHeight }; }
 function announce(text) { document.getElementById('workspace-announcement').textContent = text; }
+function conversationTitle(title, id, customTitle) {
+  if (typeof customTitle === 'string' && customTitle.trim()) return customTitle.trim().slice(0, 120);
+  const label = typeof title === 'string' && title ? title : 'Conversación';
+  // Los layouts anteriores incluían el ID corto en el nombre visible.
+  const suffix = ` · ${id.slice(0, 8)}`;
+  return (label.endsWith(suffix) ? label.slice(0, -suffix.length) : label).slice(0, 120);
+}
+
+function setWindowTitle(w, title) {
+  if (w.title === title) return;
+  w.title = title;
+  w.el.setAttribute('aria-label', title);
+  w.el.querySelector('.workspace-window-title').textContent = title;
+  w.el.querySelector('.workspace-window-head').setAttribute('aria-label',
+    `${title}. Flechas para mover; Mayús y flechas para redimensionar; Enter para expandir.`);
+  w.el.querySelectorAll('[data-window-action]').forEach(button =>
+    button.setAttribute('aria-label', `${button.title} ${title}`));
+  if (w.frame) { w.frame.title = title; w.frame.setAttribute('aria-label', title); }
+  renderDock(); persist();
+}
+
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     const saved = [...windows.values()].filter(w => w.module || w.restore).map(w => ({
-      id: w.id, module: w.module, title: w.title, restore: w.restore,
+      id: w.id, module: w.module, title: w.title, customTitle: w.customTitle, restore: w.restore,
       rect: w.rect, closed: w.closed, minimized: w.minimized, maximized: w.maximized,
     }));
     try { localStorage.setItem(STORAGE, JSON.stringify({ version: 1, windows: saved.slice(-40) })); }
@@ -113,6 +162,7 @@ function visibility() {
     w.el.hidden = hidden;
     w.el.classList.toggle('is-active', activeId === w.id);
     w.el.classList.toggle('is-minimized', w.minimized);
+    w.frame?.contentWindow?.postMessage({ type: 'relay-chat-visibility', visible: !hidden }, location.origin);
     if (w.module) modules.get(w.module).panel.hidden = hidden;
     if (!hidden) visible++;
   }
@@ -125,6 +175,8 @@ function activate(w, focus = false) {
   // Cambiar apilado sin reinsertar el DOM: mover el nodo quitaría el foco
   // de inputs al llegar a una ventana de atrás con Tab.
   w.order = ++focusOrder;
+  if (w.module === 'chat') taskContext = primaryTaskContext;
+  else if (w.context) taskContext = w.context;
   [...windows.values()].sort((a, b) => (a.order || 0) - (b.order || 0))
     .forEach((entry, i) => { entry.el.style.zIndex = i + 1; });
   visibility(); place(w);
@@ -141,6 +193,8 @@ function nextActive() {
     .sort((a, b) => (b.order || 0) - (a.order || 0))[0];
   const el = w?.el;
   activeId = w?.id || '';
+  if (w?.module === 'chat') taskContext = primaryTaskContext;
+  else if (w?.context) taskContext = w.context;
   history.replaceState(null, '', `#/${w?.module || 'workspace'}`);
   visibility();
   if (el) el.querySelector('.workspace-window-head').focus({ preventScroll: true });
@@ -156,9 +210,10 @@ function renderDock() {
     if (!btn) {
       btn = document.createElement('button'); btn.className = 'workspace-dock-item';
       btn.dataset.windowId = w.id;
+      btn.append(document.createElement('span'));
       btn.addEventListener('click', () => activate(w, true)); dock.append(btn);
     }
-    btn.textContent = w.title;
+    btn.firstElementChild.textContent = w.title;
     btn.title = `${w.minimized ? 'Restaurar' : 'Mostrar'} ${w.title}`;
     btn.setAttribute('aria-pressed', String(!w.minimized && activeId === w.id));
     btn.classList.toggle('is-minimized', w.minimized);
@@ -215,12 +270,26 @@ function makeWindow(options) {
   const title = document.createElement('h2'); title.className = 'workspace-window-title'; title.textContent = w.title;
   heading.append(kind, title); head.append(heading);
   const actions = document.createElement('div'); actions.className = 'workspace-window-actions';
-  for (const [action, label] of [['minimize', 'Minimizar'], ['maximize', 'Expandir'], ['close', 'Cerrar']]) {
+  const controls = [['minimize', 'Minimizar'], ['maximize', 'Expandir'], ['close', 'Cerrar']];
+  if (w.restore?.kind === 'conversation') controls.unshift(['rename', 'Renombrar']);
+  for (const [action, label] of controls) {
     const button = document.createElement('button'); button.className = 'workspace-icon';
     button.dataset.windowAction = action; button.innerHTML = svg(action); button.title = label;
     button.setAttribute('aria-label', `${label} ${w.title}`);
-    button.onclick = () => {
-      if (action === 'close') closeWindow(w);
+    button.onclick = async () => {
+      if (action === 'rename') {
+        const confirmed = confirmModal({ title: 'Renombrar ventana', body: 'Nombre de la ventana',
+          confirmText: 'Guardar' });
+        const input = document.createElement('input'); input.className = 'input w-full';
+        input.setAttribute('aria-label', 'Nombre de la ventana');
+        input.maxLength = 120; input.value = w.title;
+        document.getElementById('confirm-modal-body').append(input);
+        setTimeout(() => input.focus(), 60);
+        if (!await confirmed) return;
+        const name = input.value.trim();
+        if (name) { w.customTitle = name; setWindowTitle(w, name); persist(); }
+      }
+      else if (action === 'close') closeWindow(w);
       else if (action === 'maximize') maximizeWindow(w);
       else { w.minimized = true; nextActive(); persist(); }
     };
@@ -281,6 +350,10 @@ async function loadModule(w) {
 }
 
 export function openWorkspaceModule(name, saved) {
+  if (!layer && window.parent !== window) {
+    window.parent.postMessage({ type: 'relay-chat-module', name }, location.origin);
+    return true;
+  }
   if (!modules.has(name)) return false;
   const entry = modules.get(name);
   let w = windows.get(name), needsLoad = !w || w.closed;
@@ -294,7 +367,29 @@ export function openWorkspaceModule(name, saved) {
   return true;
 }
 
+export function openConversationWindow({ id, project_slug, title } = {}, saved) {
+  if (!/^[\w-]{1,160}$/.test(id || '')) return null;
+  const windowId = `object:conversation:${id}`;
+  let w = windows.get(windowId);
+  if (!w) w = makeWindow({ ...saved, id: windowId, module: null,
+    title: conversationTitle(project_slug || title, id, saved?.customTitle), source: 'Chat',
+    restore: { kind: 'conversation', conversationId: id } });
+  if (!w.frame) {
+    w.frame = createConversationFrame(id, w.title);
+    w.body.classList.add('workspace-conversation-body');
+    w.body.replaceChildren(w.frame);
+    w.frame.addEventListener('load', visibility);
+  }
+  if (project_slug) w.context = { conversationId: id, projectSlug: project_slug };
+  launcher?.close(); activate(w, true);
+  return w.el;
+}
+
 export function openObject(options) {
+  if (!layer && window.parent !== window && options.restore) {
+    window.parent.postMessage({ type: 'relay-chat-object', restore: options.restore }, location.origin);
+    return null;
+  }
   if (!(options.content instanceof HTMLElement) || typeof options.id !== 'string') return null;
   // Los identificadores externos nunca pueden suplantar un módulo del sistema.
   const id = `object:${options.id.replace(/^object:/, '')}`;
@@ -305,6 +400,10 @@ export function openObject(options) {
 }
 
 async function restoreSavedObject(saved) {
+  if (saved.restore?.kind === 'conversation') {
+    openConversationWindow({ id: saved.restore.conversationId, title: saved.title }, saved);
+    return;
+  }
   let w = windows.get(saved.id);
   if (!w) w = makeWindow({ ...saved, module: null });
   const message = document.createElement('p'); message.className = 'muted'; message.textContent = 'Recuperando resultado de la conversación…';
@@ -338,6 +437,10 @@ function renderRecent() {
 }
 
 export function openWorkspaceLauncher(query = '') {
+  if (!layer && window.parent !== window) {
+    window.parent.postMessage({ type: 'relay-chat-launcher', query }, location.origin);
+    return;
+  }
   document.getElementById('search-modal')?.classList.remove('open');
   const filter = document.getElementById('workspace-filter'); filter.value = query;
   renderRecent(); filterTools();
@@ -367,6 +470,33 @@ export function initWorkspace({ moduleLoaders, restoreChatObject }) {
   stage = document.getElementById('main'); layer = document.getElementById('workspace-windows');
   dock = document.getElementById('workspace-items'); launcher = document.getElementById('workspace-launcher-dialog');
   const nav = document.getElementById('workspace-modules');
+  window.addEventListener('message', event => {
+    if (event.origin !== location.origin) return;
+    const w = [...windows.values()].find(entry => entry.frame?.contentWindow === event.source);
+    if (!w || w.closed) return;
+    if (event.data?.type === 'relay-chat-shortcut' && typeof event.data.shift === 'boolean') {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, shiftKey: event.data.shift }));
+      return;
+    }
+    if (event.data?.type === 'relay-chat-module' && typeof event.data.name === 'string') {
+      openWorkspaceModule(event.data.name); return;
+    }
+    if (event.data?.type === 'relay-chat-launcher' && typeof event.data.query === 'string') {
+      openWorkspaceLauncher(event.data.query.slice(0, 160)); return;
+    }
+    if (event.data?.type === 'relay-chat-object' &&
+        event.data.restore?.conversationId === w.restore?.conversationId) {
+      restoreObject(event.data.restore).then(openObject)
+        .catch(error => toast(`No se pudo abrir el resultado: ${error.message}`, 'err'));
+      return;
+    }
+    if (event.data?.type !== 'relay-chat-context' || event.data.conversationId !== w.restore?.conversationId) return;
+    w.context = { conversationId: event.data.conversationId,
+      projectSlug: typeof event.data.projectSlug === 'string' ? event.data.projectSlug : '' };
+    if (!w.customTitle && w.context.projectSlug) setWindowTitle(w, w.context.projectSlug.slice(0, 120));
+    if (document.activeElement === w.frame) activate(w);
+    if (activeId === w.id) taskContext = w.context;
+  });
   const buttons = [...nav.querySelectorAll('.tab')]; nav.replaceChildren();
   for (const groupName of ['Conversar', 'Trabajar', 'Observar', 'Preparar', 'Configurar']) {
     const group = document.createElement('div'); group.className = 'workspace-module-group';

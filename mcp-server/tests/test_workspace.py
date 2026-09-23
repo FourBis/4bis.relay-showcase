@@ -391,7 +391,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         ]
         fake_output = _FakeScaffoldOutput(
             fake_files, rationale="minimal seed")
-        with patch("relay.admin.Agent") as AgentCls:
+        with patch("relay.admin_workspace.Agent") as AgentCls:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(
                 return_value=_FakeAgentResult(fake_output))
@@ -420,7 +420,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
             ("docs/NEW.md", "# New\n"),
         ]
         fake_output = _FakeScaffoldOutput(fake_files, rationale="ok")
-        with patch("relay.admin.Agent") as AgentCls:
+        with patch("relay.admin_workspace.Agent") as AgentCls:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(
                 return_value=_FakeAgentResult(fake_output))
@@ -448,7 +448,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
             ("evil.exe", "binario"),                        # ext mala
         ]
         fake_output = _FakeScaffoldOutput(fake_files, rationale="mixed")
-        with patch("relay.admin.Agent") as AgentCls:
+        with patch("relay.admin_workspace.Agent") as AgentCls:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(
                 return_value=_FakeAgentResult(fake_output))
@@ -490,7 +490,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
             ("evil.exe", "x"),           # binario (path válido)
         ]
         fake_output = _FakeScaffoldOutput(fake_files, rationale="all bad")
-        with patch("relay.admin.Agent") as AgentCls:
+        with patch("relay.admin_workspace.Agent") as AgentCls:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(
                 return_value=_FakeAgentResult(fake_output))
@@ -508,7 +508,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(evil.exists())
 
     async def test_scaffold_llm_falla_502(self) -> None:
-        with patch("relay.admin.Agent") as AgentCls:
+        with patch("relay.admin_workspace.Agent") as AgentCls:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(
                 side_effect=RuntimeError("API timeout"))
@@ -520,7 +520,7 @@ class TestWorkspaceApi(unittest.IsolatedAsyncioTestCase):
 
     async def test_scaffold_sin_api_key_502(self) -> None:
         from relay.experts import ModelUnavailable
-        with patch("relay.admin.build_model",
+        with patch("relay.admin_workspace.build_model",
                    side_effect=ModelUnavailable("no key")):
             r = await self.client.post(
                 "/admin/api/projects/demo/workspace/scaffold",

@@ -1,3 +1,4 @@
+from relay import bitacora, expert_models, expert_runner, expert_stages, expert_steps, expert_verdicts
 """Regresiones de la verificación AuroraDemo: correlación y recuperación tardía."""
 import json
 from types import SimpleNamespace
@@ -50,11 +51,11 @@ def test_ids_asocian_resultados_fuera_de_orden_y_no_leen_exit_citado():
 def test_el_id_viaja_desde_las_partes_del_modelo_hasta_la_salida():
     requested = ModelResponse(parts=[ToolCallPart(
         "shell", {"cmd": "newman run final.json"}, tool_call_id="n")])
-    calls, _, _ = experts._clasificar_partes(requested)
+    calls, _, _ = expert_steps._clasificar_partes(requested)
     assert calls == [("shell", {"cmd": "newman run final.json"}, "n")]
     returned = SimpleNamespace(request=ModelRequest(parts=[ToolReturnPart(
         "shell", "requests=3 failures=0\n(exit=0)", tool_call_id="n")]))
-    assert experts._console_tool_outputs(returned) == [
+    assert expert_steps._console_tool_outputs(returned) == [
         ("shell", "requests=3 failures=0\n(exit=0)", "n")]
 
 
@@ -89,7 +90,7 @@ async def test_la_evidencia_final_conserva_recuperacion_y_avisa_recortes(monkeyp
 
     graph = {"tasks": tasks}
     raw = await orquestador._evidencia_de_los_nodos(DB(), graph)
-    rendered = experts.Bitacora.cargar(raw).evidencia(max_chars=4000)
+    rendered = bitacora.Bitacora.cargar(raw).evidencia(max_chars=4000)
     assert "newman run final.json → exit=0" in rendered
     assert "requests=3 assertions=3 failures=0" in rendered
     assert "comandos omitidos" in rendered
@@ -110,10 +111,10 @@ async def test_la_evidencia_final_conserva_recuperacion_y_avisa_recortes(monkeyp
             prompts.append(prompt)
             return SimpleNamespace(output="VERDICT: complete\nFEEDBACK: comprobado")
 
-    monkeypatch.setattr(experts, "Agent", Agent)
-    monkeypatch.setattr(experts, "build_model", lambda _: object())
-    monkeypatch.setattr(experts, "_stage_usage", lambda _: {})
-    await experts._run_verifier(
+    monkeypatch.setattr(expert_stages, "Agent", Agent)
+    monkeypatch.setattr(expert_models, "build_model", lambda _: object())
+    monkeypatch.setattr(expert_verdicts, "_stage_usage", lambda _: {})
+    await expert_stages._run_verifier(
         user="Probar integración", plan="Newman y tests", model_spec="test", ponytail="",
         executor_result={"graph_id": "g", "content": summary, "bitacora_json": raw})
     assert "newman run final.json → exit=0" in prompts[0]
@@ -122,7 +123,7 @@ async def test_la_evidencia_final_conserva_recuperacion_y_avisa_recortes(monkeyp
 
 
 def test_bitacora_no_recorta_evidencia_sin_decirlo():
-    bit = experts.Bitacora()
+    bit = bitacora.Bitacora()
     for i in range(20):
         bit.anotar_comando(f"test {i} " + "x" * 120, 0)
     evidence = bit.evidencia(max_chars=500)

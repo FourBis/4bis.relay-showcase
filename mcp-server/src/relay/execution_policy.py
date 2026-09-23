@@ -58,5 +58,6 @@ class ExecutionPolicy:
         """
         read_only = bool(defaults.get("read_only"))
         member = request_role.get() != "owner"
-        restricted = read_only or member or bool(defaults.get("rutas_vedadas"))
-        return cls(read_only, read_only or member, not restricted)
+        feedback = bool(defaults.get("task_feedback"))
+        restricted = read_only or member or feedback or bool(defaults.get("rutas_vedadas"))
+        return cls(read_only, read_only or member or feedback, not restricted)

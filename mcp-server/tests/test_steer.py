@@ -22,6 +22,7 @@ Cómo correr:
     python -m pytest tests/test_steer.py -q
 """
 from __future__ import annotations
+from relay import config, expert_models, expert_runner, expert_selection, progress
 
 import asyncio
 import json
@@ -113,12 +114,12 @@ class TestSteer(unittest.IsolatedAsyncioTestCase):
             events.append(kw)
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model",
+            with patch.object(expert_models, "build_model",
                               lambda spec: _steerable_model(steer)), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts.config, "expert_request_limit",
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(config, "expert_request_limit",
                                  lambda: 50):
-                r = await experts.run_expert(
+                r = await expert_runner.run_expert(
                     _project(tmp), "arregla el bug de CORS", db=object(),
                     steer=steer, on_progress=on_progress)
 
@@ -154,12 +155,12 @@ class TestSteer(unittest.IsolatedAsyncioTestCase):
 
         rescue: dict = {}
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model",
+            with patch.object(expert_models, "build_model",
                               lambda spec: _slow_model()), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog), \
-                    patch.object(experts.config, "expert_request_limit",
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog), \
+                    patch.object(config, "expert_request_limit",
                                  lambda: 500):
-                task = asyncio.create_task(experts.run_expert(
+                task = asyncio.create_task(expert_runner.run_expert(
                     _project(tmp), "itera", db=object(), rescue=rescue))
                 # Dejar que haga algunas vueltas y cancelar como el humano.
                 await asyncio.sleep(0.4)
@@ -206,10 +207,10 @@ async def test_steer_counts_tools_before_and_after_reentry(tmp_path, cancelled):
         return ModelResponse(parts=[TextPart("listo")])
 
     rescue: dict = {}
-    with patch.object(experts, "build_model", return_value=FunctionModel(act)), \
-            patch.object(experts, "_catalog_toolsets", catalog), \
-            patch.object(experts.config, "expert_request_limit", return_value=50):
-        task = asyncio.create_task(experts.run_expert(
+    with patch.object(expert_models, "build_model", return_value=FunctionModel(act)), \
+            patch.object(expert_selection, "_catalog_toolsets", catalog), \
+            patch.object(config, "expert_request_limit", return_value=50):
+        task = asyncio.create_task(expert_runner.run_expert(
             _project(str(tmp_path)), "haz la tarea", db=object(),
             steer=steer, rescue=rescue))
         try:
@@ -244,7 +245,7 @@ class TestNarrationSteps(unittest.IsolatedAsyncioTestCase):
                 notifications.append(kw)
 
         store: dict = {}
-        cb = experts.make_progress_callback(
+        cb = progress.make_progress_callback(
             store=store, notify=_Notify(), chat_id="cid-s", target="demo",
             model="test")
         rp = store["cid-s"]
@@ -304,7 +305,7 @@ class TestSteerEndpoint(unittest.IsolatedAsyncioTestCase):
                                       json={"message": "x"})
                 self.assertEqual(r.status, 404)
 
-                cb = experts.make_progress_callback(
+                cb = progress.make_progress_callback(
                     store=app[PROGRESS_KEY], notify=None,
                     chat_id="cafe1234", target="demo", model="test")
                 self.assertTrue(callable(cb))

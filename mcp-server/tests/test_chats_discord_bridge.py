@@ -255,7 +255,7 @@ class TestDiscordBridgeHttp(unittest.IsolatedAsyncioTestCase):
         async def bot_caido(**kw):
             return None, "no se pudo crear thread: connection refused"
 
-        with patch("relay.server._request_bot_create_thread", bot_caido):
+        with patch("relay.server_conversation_actions._request_bot_create_thread", bot_caido):
             r = await self.client.post(
                 f"/conversations/{conv_id}/set-discord-user",
                 json={"discord_user_id": "example-user-id",
@@ -279,7 +279,7 @@ class TestDiscordBridgeHttp(unittest.IsolatedAsyncioTestCase):
         async def bot_ok(**kw):
             return "dm_channel_42", None
 
-        with patch("relay.server._request_bot_create_thread", bot_ok):
+        with patch("relay.server_conversation_actions._request_bot_create_thread", bot_ok):
             r = await self.client.post(
                 f"/conversations/{conv_id}/set-discord-user",
                 json={"discord_user_id": "example-user-id",
@@ -340,7 +340,7 @@ class TestDiscordBridgeHttp(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("relay.config._runtime", {
                 "FOURBIS_DEFAULT_DISCORD_USER": "example-user-id"}), \
-                patch("relay.server._request_bot_create_thread", bot_ok):
+                patch("relay.server_conversation_actions._request_bot_create_thread", bot_ok):
             r = await self.client.post(
                 f"/conversations/{conv_id}/set-discord-user",
                 json={"create_thread": True})
@@ -361,7 +361,7 @@ class TestDiscordBridgeHttp(unittest.IsolatedAsyncioTestCase):
             return "dm_channel_h", None
 
         with patch.dict("relay.config._runtime", {"FOURBIS_DEFAULT_DISCORD_USER": ""}), \
-                patch("relay.server._request_bot_create_thread", bot_ok):
+                patch("relay.server_conversation_actions._request_bot_create_thread", bot_ok):
             r = await self.client.post(
                 f"/conversations/{conv_id}/set-discord-user",
                 json={"create_thread": True})

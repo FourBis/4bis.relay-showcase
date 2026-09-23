@@ -20,6 +20,7 @@ Cómo correr:
     python -m pytest tests/test_pasos_shell_ui.py -q
 """
 from __future__ import annotations
+from relay import expert_models, expert_runner, expert_selection
 
 import json
 import sys
@@ -168,10 +169,10 @@ class TestUnEventoPorToolCall(unittest.IsolatedAsyncioTestCase):
             vistos.append(fields)
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(experts, "build_model",
+            with patch.object(expert_models, "build_model",
                               lambda spec: FunctionModel(act)), \
-                    patch.object(experts, "_catalog_toolsets", _fake_catalog):
-                r = await experts.run_expert(
+                    patch.object(expert_selection, "_catalog_toolsets", _fake_catalog):
+                r = await expert_runner.run_expert(
                     {"slug": "demo", "repo_path": tmp, "id": 1,
                      "system_prompt": "", "mcp_servers": [],
                      # `native_shell=false`: sin esto la tool nativa

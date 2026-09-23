@@ -19,6 +19,7 @@ Cómo correr:
     python -m pytest tests/test_images_prompt.py -q
 """
 from __future__ import annotations
+from relay import expert_history
 
 import json
 import unittest
@@ -42,11 +43,11 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"\xde\xad\xbe\xef" * 12_800
 class TestPromptConImagenes(unittest.TestCase):
     def test_sin_imagenes_devuelve_el_str_pelado(self) -> None:
         """El camino sin adjuntos no cambia ni un byte."""
-        self.assertEqual(experts._prompt_con_imagenes("hola", None), "hola")
-        self.assertEqual(experts._prompt_con_imagenes("hola", []), "hola")
+        self.assertEqual(expert_history._prompt_con_imagenes("hola", None), "hola")
+        self.assertEqual(expert_history._prompt_con_imagenes("hola", []), "hola")
 
     def test_con_imagenes_arma_lista_multimodal(self) -> None:
-        prompt = experts._prompt_con_imagenes(
+        prompt = expert_history._prompt_con_imagenes(
             "mirá esto", [(_PNG, "image/png"), (_PNG, "image/jpeg")])
         self.assertIsInstance(prompt, list)
         self.assertEqual(prompt[0], "mirá esto")
@@ -70,7 +71,7 @@ class TestImagenesFueraDelHistorial(unittest.TestCase):
     def test_el_historial_persistido_no_lleva_los_bytes(self) -> None:
         from pydantic_ai.messages import ModelMessagesTypeAdapter
         msgs = self._historial_con_imagen()
-        dumped = experts._dump_messages(msgs)
+        dumped = expert_history._dump_messages(msgs)
         self.assertNotIn("deadbeef", dumped.lower())
         self.assertNotIn("iVBORw0KGg", dumped)      # el png en base64
         # 50KB de imagen: el historial guardado tiene que quedar en el
@@ -80,14 +81,14 @@ class TestImagenesFueraDelHistorial(unittest.TestCase):
                         f"strip={len(dumped)} crudo={len(crudo)}")
 
     def test_el_texto_del_usuario_sobrevive(self) -> None:
-        dumped = experts._dump_messages(self._historial_con_imagen())
+        dumped = expert_history._dump_messages(self._historial_con_imagen())
         self.assertIn("mirá esta captura", dumped)
         self.assertIn("imagen(es) adjunta(s)", dumped)
 
     def test_el_historial_sigue_siendo_deserializable(self) -> None:
         """Si esto se rompe, la conversación no se puede continuar."""
         from pydantic_ai.messages import ModelMessagesTypeAdapter
-        dumped = experts._dump_messages(self._historial_con_imagen())
+        dumped = expert_history._dump_messages(self._historial_con_imagen())
         msgs = ModelMessagesTypeAdapter.validate_json(dumped)
         self.assertEqual(len(msgs), 2)
         self.assertIsInstance(msgs[0].parts[0].content, str)
@@ -97,7 +98,7 @@ class TestImagenesFueraDelHistorial(unittest.TestCase):
             ModelRequest(parts=[UserPromptPart(content="hola")]),
             ModelResponse(parts=[TextPart(content="chau")]),
         ]
-        dumped = json.loads(experts._dump_messages(msgs))
+        dumped = json.loads(expert_history._dump_messages(msgs))
         self.assertEqual(dumped[0]["parts"][0]["content"], "hola")
 
     def test_varias_imagenes_se_cuentan(self) -> None:
@@ -107,7 +108,7 @@ class TestImagenesFueraDelHistorial(unittest.TestCase):
             BinaryContent(data=_PNG, media_type="image/png"),
             BinaryContent(data=_PNG, media_type="image/png"),
         ])])]
-        self.assertIn("[3 imagen(es)", experts._dump_messages(msgs))
+        self.assertIn("[3 imagen(es)", expert_history._dump_messages(msgs))
 
 
 if __name__ == "__main__":

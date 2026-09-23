@@ -14,6 +14,7 @@ Cubre:
   - end-to-end vía POST /experts/run y forma de /system/active.
 """
 from __future__ import annotations
+from relay import bitacora, config, expert_consult, expert_models, expert_planning, expert_runner, expert_staged_runner, expert_stages, expert_verdicts, experts
 
 import asyncio
 import json
@@ -37,7 +38,7 @@ from relay.server import create_app
 
 
 def test_parse_verifier_canonical():
-    v, f, _pasos = experts._parse_verifier(
+    v, f, _pasos = expert_verdicts._parse_verifier(
         "VERDICT: complete\nFEEDBACK: listo, sin observaciones")
     assert v == "complete"
     assert f == "listo, sin observaciones"
@@ -45,7 +46,7 @@ def test_parse_verifier_canonical():
 
 
 def test_parse_verifier_case_insensitive():
-    v, f, _pasos = experts._parse_verifier(
+    v, f, _pasos = expert_verdicts._parse_verifier(
         "verdict: NEEDS_MORE\nfeedback: test")
     assert v == "needs_more"
     assert f == "test"
@@ -54,7 +55,7 @@ def test_parse_verifier_case_insensitive():
 
 def test_parse_verifier_multiline_feedback_truncates_to_200():
     text = "VERDICT: complete\nFEEDBACK: " + ("x" * 500)
-    v, f, _pasos = experts._parse_verifier(text)
+    v, f, _pasos = expert_verdicts._parse_verifier(text)
     assert v == "complete"
     assert len(f) == 200
     assert _pasos == []
@@ -62,14 +63,14 @@ def test_parse_verifier_multiline_feedback_truncates_to_200():
 
 def test_parse_verifier_unknown_verdict_requires_review():
     """La prosa sin veredicto no acredita que el trabajo esté completo."""
-    v, f, _pasos = experts._parse_verifier("hola, hice el cambio")
+    v, f, _pasos = expert_verdicts._parse_verifier("hola, hice el cambio")
     assert v == "needs_human"
     assert "hice el cambio" in f
     assert _pasos == []
 
 
 def test_parse_verifier_needs_human():
-    v, f, _pasos = experts._parse_verifier(
+    v, f, _pasos = expert_verdicts._parse_verifier(
         "VERDICT: needs_human\nFEEDBACK: elegir alcance")
     assert v == "needs_human"
     assert f == "elegir alcance"
@@ -82,7 +83,7 @@ def test_parse_verifier_empty_is_needs_human(text):
 
     Igual que texto suelto sin veredicto: no hay aprobación comprobable.
     """
-    v, f, _pasos = experts._parse_verifier(text)
+    v, f, _pasos = expert_verdicts._parse_verifier(text)
     assert v == "needs_human"
     assert "NO fue verificado" in f
     assert _pasos == []
@@ -100,10 +101,10 @@ def test_run_verifier_failure_is_needs_human():
     # nada, y el test pasaría por el camino equivocado.
     boom = RuntimeError("status_code: 429, Too Many Requests")
 
-    with patch.object(experts, "build_model", side_effect=boom):
+    with patch.object(expert_models, "build_model", side_effect=boom):
         # Etapa B: ahora devuelve 5-tupla (verdict, feedback, usage, error, pasos).
         # Ver `experts.py:_run_verifier`.
-        v, f, usage, err, _pasos = asyncio.run(experts._run_verifier(
+        v, f, usage, err, _pasos = asyncio.run(expert_stages._run_verifier(
             user="x", plan="1. hacer algo",
             executor_result={"content": "hecho", "tool_calls_summary": []},
             model_spec="test", ponytail=""))
@@ -118,10 +119,10 @@ def test_run_verifier_failure_is_needs_human():
 def test_run_verifier_model_unavailable_still_propagates():
     """ModelUnavailable sigue propagando: es config rota, no una caída
     transitoria, y el caller quiere enterarse."""
-    with patch.object(experts, "build_model",
-                      side_effect=experts.ModelUnavailable("sin key")):
-        with pytest.raises(experts.ModelUnavailable):
-            asyncio.run(experts._run_verifier(
+    with patch.object(expert_models, "build_model",
+                      side_effect=expert_models.ModelUnavailable("sin key")):
+        with pytest.raises(expert_models.ModelUnavailable):
+            asyncio.run(expert_stages._run_verifier(
                 user="x", plan="p", executor_result={"content": "c"},
                 model_spec="test", ponytail=""))
 
@@ -134,62 +135,62 @@ def test_run_verifier_model_unavailable_still_propagates():
 
 
 def test_planner_model_spec_falls_back_to_model_spec(monkeypatch):
-    experts.config.set_runtime_config({
+    config.set_runtime_config({
         "FOURBIS_PLANNER_MODEL": "",
         "FOURBIS_COMPACTOR_MODEL": "",
         "FOURBIS_MODEL": "anthropic:claude-x",
     })
     try:
-        assert experts.config.planner_model_spec() == "anthropic:claude-x"
+        assert config.planner_model_spec() == "anthropic:claude-x"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 def test_model_spec_prefiere_system_config_al_entorno(monkeypatch):
     """Config -> Ejecutor promete aplicar sin reiniciar el relay."""
     monkeypatch.setenv("FOURBIS_MODEL", "env:executor")
-    experts.config.set_runtime_config({"FOURBIS_MODEL": "db:executor"})
+    config.set_runtime_config({"FOURBIS_MODEL": "db:executor"})
     try:
-        assert experts.config.model_spec() == "db:executor"
-        assert experts.resolve_model_spec("", {}) == "db:executor"
+        assert config.model_spec() == "db:executor"
+        assert expert_models.resolve_model_spec("", {}) == "db:executor"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 def test_verifier_model_spec_falls_back_to_compactor(monkeypatch):
-    experts.config.set_runtime_config({
+    config.set_runtime_config({
         "FOURBIS_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_VERIFIER_MODEL": "",
         "FOURBIS_COMPACTOR_MODEL": "minimax:MiniMax-M2.7",
     })
     try:
-        assert experts.config.verifier_model_spec() == "minimax:MiniMax-M2.7"
+        assert config.verifier_model_spec() == "minimax:MiniMax-M2.7"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 def test_documenter_model_spec_runtime_override():
-    experts.config.set_runtime_config({
+    config.set_runtime_config({
         "FOURBIS_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_DOCUMENTER_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_COMPACTOR_MODEL": "otro:modelo",
     })
     try:
-        assert experts.config.documenter_model_spec() == "minimax:MiniMax-M3"
+        assert config.documenter_model_spec() == "minimax:MiniMax-M3"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 def test_documenter_model_spec_falls_back_to_compactor(monkeypatch):
-    experts.config.set_runtime_config({
+    config.set_runtime_config({
         "FOURBIS_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_DOCUMENTER_MODEL": "",
         "FOURBIS_COMPACTOR_MODEL": "minimax:MiniMax-M2.7",
     })
     try:
-        assert experts.config.documenter_model_spec() == "minimax:MiniMax-M2.7"
+        assert config.documenter_model_spec() == "minimax:MiniMax-M2.7"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 def test_staged_specs_follow_test_sentinel(monkeypatch):
@@ -198,18 +199,18 @@ def test_staged_specs_follow_test_sentinel(monkeypatch):
     Es la salvaguarda que evita que la suite facture tokens cuando el
     .env define FOURBIS_PLANNER_MODEL apuntando a MiniMax.
     """
-    experts.config.set_runtime_config({
+    config.set_runtime_config({
         "FOURBIS_MODEL": "test",
         "FOURBIS_PLANNER_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_VERIFIER_MODEL": "minimax:MiniMax-M3",
         "FOURBIS_DOCUMENTER_MODEL": "minimax:MiniMax-M3",
     })
     try:
-        assert experts.config.planner_model_spec() == "test"
-        assert experts.config.verifier_model_spec() == "test"
-        assert experts.config.documenter_model_spec() == "test"
+        assert config.planner_model_spec() == "test"
+        assert config.verifier_model_spec() == "test"
+        assert config.documenter_model_spec() == "test"
     finally:
-        experts.config.set_runtime_config({})
+        config.set_runtime_config({})
 
 
 # ---------- run_expert_staged: opt-out + flujo ----------
@@ -271,8 +272,8 @@ async def test_run_expert_staged_opt_out_uses_legacy():
         assert "Plan a ejecutar" not in (kwargs.get("system_extra") or "")
         return _executor_result(content="legacy response")
 
-    with patch.object(experts, "run_expert", fake_executor):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_runner, "run_expert", fake_executor):
+        result = await expert_staged_runner.run_expert_staged(
             project, "hola", model_override="test",
             on_progress=fake_progress,
         )
@@ -286,7 +287,7 @@ async def test_run_expert_staged_opt_out_uses_legacy():
 
 async def test_legacy_alias_still_exported():
     """server.py, night.py y código externo importan el nombre viejo."""
-    assert experts.run_expert_3stage is experts.run_expert_staged
+    assert experts.run_expert_3stage is expert_staged_runner.run_expert_staged
 
 
 async def test_run_expert_staged_propagates_model_unavailable():
@@ -300,15 +301,15 @@ async def test_run_expert_staged_propagates_model_unavailable():
     project = _project(three_stage=True)
 
     async def fake_planner(*args, **kwargs):
-        raise experts.ModelUnavailable("sin key")
+        raise expert_models.ModelUnavailable("sin key")
 
     async def fake_executor(proj, user, **kwargs):
         raise AssertionError("el ejecutor no debe correr si el planner falla")
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor):
-        with pytest.raises(experts.ModelUnavailable):
-            await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor):
+        with pytest.raises(expert_models.ModelUnavailable):
+            await expert_staged_runner.run_expert_staged(
                 project, "hola", model_override="minimax:MiniMax-M3",
             )
 
@@ -328,10 +329,10 @@ async def test_run_expert_staged_injects_plan_as_system_extra():
     async def fake_verifier(**kwargs):
         return "complete", "todo correcto", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "agrega un print", model_override="test",
         )
     assert "Plan a ejecutar" in captured["system_extra"]
@@ -365,8 +366,8 @@ class _PoolQueLevanta:
 
 async def test_reasoning_toolset_degrada_sin_db_ni_pool():
     """Sin catálogo o sin pool, el planificador planifica igual."""
-    assert await experts._reasoning_toolset(None, {"id": 1}, None) == []
-    assert await experts._reasoning_toolset(
+    assert await expert_planning._reasoning_toolset(None, {"id": 1}, None) == []
+    assert await expert_planning._reasoning_toolset(
         _DbConReasoning(), {"id": 1}, None) == []
 
 
@@ -380,14 +381,14 @@ async def test_reasoning_toolset_degrada_si_el_mcp_no_levanta():
         async def acquire(self, row, repo_path):
             return None
 
-    out = await experts._reasoning_toolset(
+    out = await expert_planning._reasoning_toolset(
         _DbConReasoning(), {"id": 1, "repo_path": "x"}, _PoolMudo())
     assert out == []
 
 
 async def test_reasoning_toolset_pide_la_capability_reasoning():
     db = _DbConReasoning()
-    out = await experts._reasoning_toolset(
+    out = await expert_planning._reasoning_toolset(
         db, {"id": 1, "repo_path": "x"}, _PoolQueLevanta())
     assert len(out) == 1
     assert db.pedido.get("capabilities") == ["reasoning"]
@@ -414,10 +415,10 @@ async def test_planner_recibe_el_razonador_para_decidir_descomponer():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        await expert_staged_runner.run_expert_staged(
             project, "parte de 0 en un SampleApp nuevo", model_override="test",
             db=_DbConReasoning(), mcp_pool=_PoolQueLevanta())
     assert captured["toolsets"], "el planificador planificó sin el razonador"
@@ -438,10 +439,10 @@ async def test_planner_reasoning_se_puede_apagar_por_proyecto():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        await expert_staged_runner.run_expert_staged(
             project, "haz algo", model_override="test",
             db=_DbConReasoning(), mcp_pool=_PoolQueLevanta())
     assert not captured["toolsets"]
@@ -465,10 +466,10 @@ async def test_en_followup_no_se_paga_el_razonador():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        await expert_staged_runner.run_expert_staged(
             project, "continúa", model_override="test",
             message_history_json='[{"parts":[]}]',
             db=_DbConReasoning(), mcp_pool=_PoolQueLevanta())
@@ -495,10 +496,10 @@ async def test_run_expert_staged_enchufa_el_supervisor_de_media_corrida():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        await expert_staged_runner.run_expert_staged(
             project, "leelo", model_override="test")
     assert callable(captured["supervisor"]), \
         "el ejecutor corrió sin supervisor de media corrida"
@@ -539,10 +540,10 @@ async def test_supervisor_traduce_off_plan_a_corte_y_el_resto_a_seguir():
     async def fake_verifier(**kwargs):
         return next(veredictos)
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "leelo", model_override="test")
 
     assert resultados[0] == "", "needs_more cortó: mataría los runs largos"
@@ -573,10 +574,10 @@ async def test_off_plan_reusa_el_veredicto_sin_pagar_otro_turno():
         llamadas["n"] += 1
         return "off_plan", "te fuiste del plan", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "leelo", model_override="test")
 
     assert llamadas["n"] == 1, \
@@ -617,11 +618,11 @@ async def test_needs_more_reintenta_solo_hasta_completar():
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "escribí los tests", model_override="test")
 
     assert len(pasadas) == 2, "no reintentó solo"
@@ -662,11 +663,11 @@ async def test_verifier_rounds_en_cero_vuelve_a_pedir_permiso():
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "hacelo", model_override="test")
 
     assert len(pasadas) == 1
@@ -698,11 +699,11 @@ async def test_off_plan_y_needs_human_no_reintentan():
         async def fake_documenter(**kwargs):
             return "", {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert", fake_executor), \
-             patch.object(experts, "_run_verifier", fake_verifier), \
-             patch.object(experts, "_run_documenter", fake_documenter):
-            result = await experts.run_expert_staged(
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert", fake_executor), \
+             patch.object(expert_stages, "_run_verifier", fake_verifier), \
+             patch.object(expert_stages, "_run_documenter", fake_documenter):
+            result = await expert_staged_runner.run_expert_staged(
                 project, "hacelo", model_override="test")
 
         assert len(pasadas) == 1, f"{verdict} gano una pasada extra"
@@ -741,11 +742,11 @@ async def test_off_plan_y_needs_human_SI_reintentan_si_no_se_ejecuto_nada():
         async def fake_documenter(**kwargs):
             return "", {}, ""
 
-        with patch.object(experts, "_run_planner", fake_planner), \
-             patch.object(experts, "run_expert", fake_executor), \
-             patch.object(experts, "_run_verifier", fake_verifier), \
-             patch.object(experts, "_run_documenter", fake_documenter):
-            await experts.run_expert_staged(
+        with patch.object(expert_stages, "_run_planner", fake_planner), \
+             patch.object(expert_runner, "run_expert", fake_executor), \
+             patch.object(expert_stages, "_run_verifier", fake_verifier), \
+             patch.object(expert_stages, "_run_documenter", fake_documenter):
+            await expert_staged_runner.run_expert_staged(
                 project, "hacelo", model_override="test")
 
         assert len(pasadas) == 2, (
@@ -768,10 +769,10 @@ async def test_run_roto_no_reintenta():
     async def fake_documenter(**kwargs):
         return "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "hacelo", model_override="test")
 
     assert len(pasadas) == 1
@@ -807,11 +808,11 @@ async def test_documentador_corre_una_sola_vez_al_final():
         docs.append(kwargs.get("verdict"))
         return "**Qué se hizo:** algo", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "hacelo", model_override="test")
 
     assert docs == ["complete"], f"el documentador corrió {len(docs)} veces"
@@ -831,10 +832,10 @@ async def test_run_expert_staged_needs_human_prefixes_content():
     async def fake_verifier(**kwargs):
         return "needs_human", "define el alcance", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "fix bug", model_override="test",
         )
     assert "needs_human" in result["content"]
@@ -857,10 +858,10 @@ async def test_run_expert_staged_skips_verifier_on_error():
         captured["verifier_called"] = True
         return "complete", "", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "fix", model_override="test",
         )
     assert captured.get("verifier_called") is not True
@@ -899,12 +900,12 @@ async def test_run_expert_staged_merges_verified_steps_into_bitacora():
     async def fake_verifier(**kwargs):
         return ("complete", "ok", {}, "", [1, 3])
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
         # Antes del fix esto levantaba NameError. Después del fix tiene
         # que pasar limpio y mergear los pasos en la bitácora.
-        result = await experts.run_expert_staged(
+        result = await expert_staged_runner.run_expert_staged(
             project, "fix", model_override="test")
 
     assert result["verifier_verdict"] == "complete"
@@ -942,10 +943,10 @@ async def test_run_expert_staged_none_result_is_needs_human():
         captured["verifier_called"] = True
         return "complete", "no deberia correr", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "fix", model_override="test",
         )
     assert captured.get("verifier_called") is not True
@@ -969,10 +970,10 @@ async def test_run_expert_staged_planner_failure_is_soft():
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "fix", model_override="test",
         )
     assert result["plan"] == ""
@@ -984,8 +985,8 @@ async def test_run_planner_swallows_generic_errors():
     def broken_build_model(spec):
         raise RuntimeError("timeout del planificador")
 
-    with patch.object(experts, "build_model", broken_build_model):
-        plan, usage, err = await experts._run_planner(
+    with patch.object(expert_models, "build_model", broken_build_model):
+        plan, usage, err = await expert_stages._run_planner(
             user="x", project=_project(), model_spec="lo-que-sea",
             ponytail="", on_progress=None,
         )
@@ -995,11 +996,11 @@ async def test_run_planner_swallows_generic_errors():
 
 async def test_run_planner_propagates_model_unavailable():
     def broken_build_model(spec):
-        raise experts.ModelUnavailable("falta MINIMAX_API_KEY")
+        raise expert_models.ModelUnavailable("falta MINIMAX_API_KEY")
 
-    with patch.object(experts, "build_model", broken_build_model):
-        with pytest.raises(experts.ModelUnavailable):
-            await experts._run_planner(
+    with patch.object(expert_models, "build_model", broken_build_model):
+        with pytest.raises(expert_models.ModelUnavailable):
+            await expert_stages._run_planner(
                 user="x", project=_project(), model_spec="lo-que-sea",
                 ponytail="", on_progress=None,
             )
@@ -1027,11 +1028,11 @@ async def _staged_with_documenter(project, *, executor_over=None,
         captured["kwargs"] = kwargs
         return doc_text, {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "edita main.py", model_override="test",
         )
     return result, captured
@@ -1105,8 +1106,8 @@ async def test_run_documenter_failure_is_soft():
     def broken_build_model(spec):
         raise RuntimeError("se cayó la red")
 
-    with patch.object(experts, "build_model", broken_build_model):
-        doc, usage, err = await experts._run_documenter(
+    with patch.object(expert_models, "build_model", broken_build_model):
+        doc, usage, err = await expert_stages._run_documenter(
             user="x", plan="p", executor_result=_executor_result(),
             verdict="complete", feedback="ok", model_spec="lo-que-sea",
             ponytail="", on_progress=None,
@@ -1122,10 +1123,10 @@ async def test_run_documenter_model_unavailable_is_soft():
     el run como fallido y obligar al humano a repetirlo.
     """
     def broken_build_model(spec):
-        raise experts.ModelUnavailable("falta MINIMAX_API_KEY")
+        raise expert_models.ModelUnavailable("falta MINIMAX_API_KEY")
 
-    with patch.object(experts, "build_model", broken_build_model):
-        doc, usage, err = await experts._run_documenter(
+    with patch.object(expert_models, "build_model", broken_build_model):
+        doc, usage, err = await expert_stages._run_documenter(
             user="x", plan="p", executor_result=_executor_result(),
             verdict="complete", feedback="ok", model_spec="lo-que-sea",
             ponytail="", on_progress=None,
@@ -1135,7 +1136,7 @@ async def test_run_documenter_model_unavailable_is_soft():
 
 
 def test_render_tool_calls_caps_long_args():
-    out = experts._render_tool_calls(
+    out = expert_planning._render_tool_calls(
         {"tool_calls_summary": [("edit_file", "x" * 500)]})
     assert out.startswith("- edit_file(")
     assert "…" in out
@@ -1143,7 +1144,7 @@ def test_render_tool_calls_caps_long_args():
 
 
 def test_render_tool_calls_empty():
-    assert experts._render_tool_calls({}) == "(sin llamadas a herramientas)"
+    assert expert_planning._render_tool_calls({}) == "(sin llamadas a herramientas)"
 
 
 # ---------- end-to-end: server /experts/run + /system/active ----------
@@ -1372,7 +1373,7 @@ class _FakeResult:
 
 
 def test_stage_usage_reads_tokens():
-    assert experts._stage_usage(_FakeResult("x", 120, 45)) == {
+    assert expert_verdicts._stage_usage(_FakeResult("x", 120, 45)) == {
         "tokens_in": 120, "tokens_out": 45}
 
 
@@ -1382,7 +1383,7 @@ def test_stage_usage_supports_callable_usage():
         output = "x"
         def usage(self):
             return _FakeUsage(7, 3)
-    assert experts._stage_usage(Old()) == {"tokens_in": 7, "tokens_out": 3}
+    assert expert_verdicts._stage_usage(Old()) == {"tokens_in": 7, "tokens_out": 3}
 
 
 def test_stage_usage_unreadable_is_empty_not_zero():
@@ -1394,7 +1395,7 @@ def test_stage_usage_unreadable_is_empty_not_zero():
     """
     class NoUsage:
         output = "x"
-    assert experts._stage_usage(NoUsage()) == {}
+    assert expert_verdicts._stage_usage(NoUsage()) == {}
 
 
 def test_stages_json_carries_stage_tokens():
@@ -1431,11 +1432,11 @@ async def test_staged_run_reports_stage_usage():
     async def fake_documenter(**kwargs):
         return "**Qué se hizo:** algo", {"tokens_in": 30, "tokens_out": 6}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        r = await experts.run_expert_staged(_project(), "hacé algo")
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        r = await expert_staged_runner.run_expert_staged(_project(), "hacé algo")
 
     su = r["stage_usage"]
     assert su["planner"]["tokens_in"] == 10
@@ -1887,11 +1888,11 @@ async def test_con_pregunta_abierta_no_corre_el_verificador():
         corrio["documenter"] = True
         return "📝 Registro: instalado pwsh 7", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier), \
-         patch.object(experts, "_run_documenter", fake_documenter):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier), \
+         patch.object(expert_stages, "_run_documenter", fake_documenter):
+        result = await expert_staged_runner.run_expert_staged(
             project, "arreglá el deploy", model_override="test")
 
     assert corrio["verifier"] is False, "verificó un trabajo que está en pausa"
@@ -1912,10 +1913,10 @@ async def test_con_pregunta_abierta_el_texto_no_pide_otra_cosa():
     async def fake_verifier(**kwargs):
         return "needs_more", "falta instalar", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "arreglá el deploy", model_override="test")
 
     assert "continúa" not in result["content"]
@@ -1940,9 +1941,9 @@ async def test_un_run_roto_gana_sobre_la_pregunta():
         return _executor_result(content="a medias", question_id="q_abc12345",
                                 phase_at_end="timeout")
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor):
+        result = await expert_staged_runner.run_expert_staged(
             project, "algo", model_override="test")
 
     assert result["verifier_verdict"] == "needs_human"
@@ -1964,10 +1965,10 @@ async def test_sin_pregunta_las_etapas_siguen_como_siempre():
         corrio["verifier"] = True
         return "complete", "ok", {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "algo", model_override="test")
 
     assert corrio["verifier"] is True
@@ -2001,10 +2002,10 @@ async def test_off_plan_del_verificador_final_avisa_en_el_content():
     async def fake_verifier(**kwargs):
         return "off_plan", feedback, {}, ""
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "genera el reporte", model_override="test")
 
     assert result["verifier_verdict"] == "off_plan"
@@ -2042,10 +2043,10 @@ async def test_off_plan_no_cierra_con_el_cintillo_optimista():
     async def fake_verifier(**kwargs):
         return next(veredictos)
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "haz algo", model_override="test")
 
     assert len(pasadas) == 2
@@ -2086,10 +2087,10 @@ async def test_sin_veredicto_la_cuenta_de_pasadas_no_se_le_atribuye_a_nadie():
     async def fake_verifier(**kwargs):
         return next(veredictos)
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "haz algo", model_override="test")
 
     assert len(pasadas) == 2
@@ -2123,10 +2124,10 @@ async def test_verifier_model_vacio_si_el_verificador_no_corrio():
     async def fake_verifier(**kwargs):
         raise AssertionError("el verificador no debe correr con pregunta abierta")
 
-    with patch.object(experts, "_run_planner", fake_planner), \
-         patch.object(experts, "run_expert", fake_executor), \
-         patch.object(experts, "_run_verifier", fake_verifier):
-        result = await experts.run_expert_staged(
+    with patch.object(expert_stages, "_run_planner", fake_planner), \
+         patch.object(expert_runner, "run_expert", fake_executor), \
+         patch.object(expert_stages, "_run_verifier", fake_verifier):
+        result = await expert_staged_runner.run_expert_staged(
             project, "instala lo que falte", model_override="test")
 
     assert result["verifier_verdict"] == ""
@@ -2145,7 +2146,7 @@ def test_la_evidencia_separa_los_hechos_de_las_afirmaciones():
     llamaron, o sea que no podia separar "corrio las pruebas" de "las
     pruebas pasaron".
     """
-    b = experts.Bitacora()
+    b = bitacora.Bitacora()
     b.anotar_comando("pytest -q", 1)
     b.anotar("los tests de auth pasan")
     b.pasos[2] = "agregue el empty state"
@@ -2155,7 +2156,7 @@ def test_la_evidencia_separa_los_hechos_de_las_afirmaciones():
     assert ev.index("harness") < ev.index("dice haber comprobado"), (
         "los comandos tienen que ir antes que las afirmaciones del modelo")
     assert "paso 2" in ev
-    assert experts.Bitacora().evidencia() == "", "sin nada, no inventa texto"
+    assert bitacora.Bitacora().evidencia() == "", "sin nada, no inventa texto"
 
 
 async def test_el_verificador_ve_los_exit_codes_y_no_solo_los_nombres(
@@ -2178,14 +2179,14 @@ async def test_el_verificador_ve_los_exit_codes_y_no_solo_los_nombres(
             vistos.append(prompt)
             return _Salida()
 
-    monkeypatch.setattr(experts, "Agent", _Agente)
-    monkeypatch.setattr(experts, "build_model", lambda spec: object())
+    monkeypatch.setattr(expert_stages, "Agent", _Agente)
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: object())
 
-    b = experts.Bitacora()
+    b = bitacora.Bitacora()
     b.anotar_comando("pytest -q", 1)
     b.anotar("los tests de auth pasan")
 
-    verdict, _fb, _u, err, _pasos = await experts._run_verifier(
+    verdict, _fb, _u, err, _pasos = await expert_stages._run_verifier(
         user="arregla el login", plan="1. correr las pruebas",
         executor_result={"content": "listo", "phase_at_end": "done",
                          "bitacora_json": b.volcar()},
@@ -2218,10 +2219,10 @@ async def test_sin_bitacora_el_verificador_igual_corre(monkeypatch):
             vistos.append(prompt)
             return _Salida()
 
-    monkeypatch.setattr(experts, "Agent", _Agente)
-    monkeypatch.setattr(experts, "build_model", lambda spec: object())
+    monkeypatch.setattr(expert_stages, "Agent", _Agente)
+    monkeypatch.setattr(expert_models, "build_model", lambda spec: object())
 
-    verdict, _fb, _u, err, _p = await experts._run_verifier(
+    verdict, _fb, _u, err, _p = await expert_stages._run_verifier(
         user="resumi el modulo", plan="1. leer", executor_result={
             "content": "el modulo hace X", "phase_at_end": "done"},
         model_spec="test", ponytail="")
@@ -2251,7 +2252,7 @@ async def test_una_pasada_no_puede_pasarse_del_presupuesto_del_pedido(
         monkeypatch):
     """`run_expert` toma el MENOR entre su techo y el del pedido."""
     vistos: dict = {}
-    original = experts.run_expert
+    original = expert_runner.run_expert
 
     async def espia(project, user, **kwargs):
         vistos["deadline"] = kwargs.get("deadline_pedido")
@@ -2263,11 +2264,11 @@ async def test_una_pasada_no_puede_pasarse_del_presupuesto_del_pedido(
     async def fake_verifier(**kwargs):
         return "complete", "ok", {}, "", []
 
-    monkeypatch.setattr(experts, "_run_planner", fake_planner)
-    monkeypatch.setattr(experts, "run_expert", espia)
-    monkeypatch.setattr(experts, "_run_verifier", fake_verifier)
+    monkeypatch.setattr(expert_stages, "_run_planner", fake_planner)
+    monkeypatch.setattr(expert_runner, "run_expert", espia)
+    monkeypatch.setattr(expert_stages, "_run_verifier", fake_verifier)
 
-    await experts.run_expert_staged(
+    await expert_staged_runner.run_expert_staged(
         _project(three_stage=True), "hace algo", model_override="test")
 
     assert vistos.get("deadline"), (
@@ -2291,15 +2292,15 @@ async def test_no_abre_otra_ronda_si_no_queda_presupuesto(monkeypatch):
     async def fake_verifier(**kwargs):
         return "needs_more", "falta la segunda parte", {}, "", []
 
-    monkeypatch.setattr(experts, "_run_planner", fake_planner)
-    monkeypatch.setattr(experts, "run_expert", fake_executor)
-    monkeypatch.setattr(experts, "_run_verifier", fake_verifier)
+    monkeypatch.setattr(expert_stages, "_run_planner", fake_planner)
+    monkeypatch.setattr(expert_runner, "run_expert", fake_executor)
+    monkeypatch.setattr(expert_stages, "_run_verifier", fake_verifier)
 
     # Presupuesto ya agotado: la reserva de cierre no entra ni por asomo.
     project = _project(three_stage=True)
     project["defaults_json"]["request_timeout"] = 0.001
 
-    result = await experts.run_expert_staged(
+    result = await expert_staged_runner.run_expert_staged(
         project, "hace algo grande", model_override="test")
 
     assert pasadas["n"] == 1, (
@@ -2318,14 +2319,14 @@ def test_solo_reviso_es_conservador():
     `shell` corre lo que sea, y una tool MCP desconocida podria hacer
     cualquier cosa. Ante la duda se documenta, que es lo de antes.
     """
-    assert experts._solo_reviso([("read_file", ""), ("search_files", ""),
+    assert expert_verdicts._solo_reviso([("read_file", ""), ("search_files", ""),
                                  ("list_dir", "")]) is True
-    assert experts._solo_reviso([("read_file", ""), ("edit_file", "")]) is False
-    assert experts._solo_reviso([("read_file", ""), ("shell", "")]) is False
-    assert experts._solo_reviso([("read_file", ""), ("db_query", "")]) is False
-    assert experts._solo_reviso([("jira_create", "")]) is False
+    assert expert_verdicts._solo_reviso([("read_file", ""), ("edit_file", "")]) is False
+    assert expert_verdicts._solo_reviso([("read_file", ""), ("shell", "")]) is False
+    assert expert_verdicts._solo_reviso([("read_file", ""), ("db_query", "")]) is False
+    assert expert_verdicts._solo_reviso([("jira_create", "")]) is False
     # Sin llamadas no hay revision que resumir: lo maneja `has_work`.
-    assert experts._solo_reviso([]) is False
+    assert expert_verdicts._solo_reviso([]) is False
 
 
 async def test_una_revision_no_se_lleva_un_resumen_de_regalo(monkeypatch):
@@ -2353,14 +2354,14 @@ async def test_una_revision_no_se_lleva_un_resumen_de_regalo(monkeypatch):
 
     # El runner RECALCULA el resumen desde `messages_json`, asi que
     # sembrarlo en el dict del ejecutor no alcanza: se parchea la fuente.
-    monkeypatch.setattr(experts, "_summarize_tool_calls_from_messages",
+    monkeypatch.setattr(expert_consult, "_summarize_tool_calls_from_messages",
                         lambda _mj: [("read_file", "a"), ("search_files", "b")])
-    monkeypatch.setattr(experts, "_run_planner", fake_planner)
-    monkeypatch.setattr(experts, "run_expert", fake_executor)
-    monkeypatch.setattr(experts, "_run_verifier", fake_verifier)
-    monkeypatch.setattr(experts, "_run_documenter", fake_documenter)
+    monkeypatch.setattr(expert_stages, "_run_planner", fake_planner)
+    monkeypatch.setattr(expert_runner, "run_expert", fake_executor)
+    monkeypatch.setattr(expert_stages, "_run_verifier", fake_verifier)
+    monkeypatch.setattr(expert_stages, "_run_documenter", fake_documenter)
 
-    result = await experts.run_expert_staged(
+    result = await expert_staged_runner.run_expert_staged(
         _project(three_stage=True), "revisa el modulo", model_override="test")
 
     assert not corrio["doc"], "documento una revision de solo lectura"
@@ -2389,14 +2390,14 @@ async def test_un_run_que_escribio_si_se_documenta(monkeypatch):
         corrio["doc"] = True
         return "toque a.py y b.py", {}, ""
 
-    monkeypatch.setattr(experts, "_summarize_tool_calls_from_messages",
+    monkeypatch.setattr(expert_consult, "_summarize_tool_calls_from_messages",
                         lambda _mj: [("read_file", "a"), ("edit_file", "b")])
-    monkeypatch.setattr(experts, "_run_planner", fake_planner)
-    monkeypatch.setattr(experts, "run_expert", fake_executor)
-    monkeypatch.setattr(experts, "_run_verifier", fake_verifier)
-    monkeypatch.setattr(experts, "_run_documenter", fake_documenter)
+    monkeypatch.setattr(expert_stages, "_run_planner", fake_planner)
+    monkeypatch.setattr(expert_runner, "run_expert", fake_executor)
+    monkeypatch.setattr(expert_stages, "_run_verifier", fake_verifier)
+    monkeypatch.setattr(expert_stages, "_run_documenter", fake_documenter)
 
-    result = await experts.run_expert_staged(
+    result = await expert_staged_runner.run_expert_staged(
         _project(three_stage=True), "arregla el modulo", model_override="test")
 
     assert corrio["doc"], "dejo de documentar un run que escribio"

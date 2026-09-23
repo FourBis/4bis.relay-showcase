@@ -9,10 +9,11 @@ Cómo correr:
     python -m pytest tests/test_cbm_session.py -q
 """
 from __future__ import annotations
+from relay import cbm_runtime
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from relay import experts
 
@@ -20,9 +21,9 @@ from relay import experts
 def _reset() -> None:
     """Los globals de la sesión son de módulo: sin esto un test contamina
     al siguiente (`_cbm_session_off` es sticky a propósito)."""
-    experts._cbm_toolset = None
-    experts._cbm_transport = None
-    experts._cbm_session_off = False
+    cbm_runtime._cbm_toolset = None
+    cbm_runtime._cbm_transport = None
+    cbm_runtime._cbm_session_off = False
 
 
 class _FakeToolset:
@@ -58,11 +59,11 @@ class TestCbmCallRouting(unittest.IsolatedAsyncioTestCase):
         async def no_cli(*a, **kw):
             self.fail("cayó al CLI teniendo sesión viva")
 
-        with patch.object(experts, "cbm_binary_path", lambda: "cbm.exe"), \
-             patch.object(experts, "cbm_cli_call", no_cli), \
+        with patch.object(cbm_runtime, "cbm_binary_path", lambda: "cbm.exe"), \
+             patch.object(cbm_runtime, "cbm_cli_call", no_cli), \
              patch("relay.mcp_pool.make_toolset", lambda *a, **kw: (fake, None)), \
-             patch("relay.admin._cbm_env", dict):
-            out = await experts.cbm_call("index_status", {"project": "p"})
+             patch("relay.admin_cbm._cbm_env", dict):
+            out = await cbm_runtime.cbm_call("index_status", {"project": "p"})
 
         # El contrato es JSON string, aunque el toolset devuelva dict.
         self.assertEqual(json.loads(out), {"nodes": 7})
@@ -76,17 +77,17 @@ class TestCbmCallRouting(unittest.IsolatedAsyncioTestCase):
             cli_calls.append(tool)
             return '{"desde": "cli"}'
 
-        with patch.object(experts, "cbm_binary_path", lambda: "cbm.exe"), \
-             patch.object(experts, "cbm_cli_call", fake_cli), \
+        with patch.object(cbm_runtime, "cbm_binary_path", lambda: "cbm.exe"), \
+             patch.object(cbm_runtime, "cbm_cli_call", fake_cli), \
              patch("relay.mcp_pool.make_toolset", lambda *a, **kw: (fake, None)), \
-             patch("relay.admin._cbm_env", dict):
-            first = await experts.cbm_call("index_status", {"project": "p"})
-            second = await experts.cbm_call("search_graph", {"project": "p"})
+             patch("relay.admin_cbm._cbm_env", dict):
+            first = await cbm_runtime.cbm_call("index_status", {"project": "p"})
+            second = await cbm_runtime.cbm_call("search_graph", {"project": "p"})
 
         self.assertEqual(json.loads(first), {"desde": "cli"})
         self.assertEqual(json.loads(second), {"desde": "cli"})
         # La sesión muerta queda apagada: el segundo call no la reintenta.
-        self.assertTrue(experts._cbm_session_off)
+        self.assertTrue(cbm_runtime._cbm_session_off)
         self.assertEqual(cli_calls, ["index_status", "search_graph"])
 
     async def test_flag_apaga_la_sesion(self):
@@ -96,10 +97,10 @@ class TestCbmCallRouting(unittest.IsolatedAsyncioTestCase):
             return '{"desde": "cli"}'
 
         with patch.dict("os.environ", {"CBM_MCP_SESSION": "0"}), \
-             patch.object(experts, "cbm_binary_path", lambda: "cbm.exe"), \
-             patch.object(experts, "cbm_cli_call", fake_cli), \
+             patch.object(cbm_runtime, "cbm_binary_path", lambda: "cbm.exe"), \
+             patch.object(cbm_runtime, "cbm_cli_call", fake_cli), \
              patch("relay.mcp_pool.make_toolset", lambda *a, **kw: (fake, None)):
-            out = await experts.cbm_call("index_status", {"project": "p"})
+            out = await cbm_runtime.cbm_call("index_status", {"project": "p"})
 
         self.assertEqual(json.loads(out), {"desde": "cli"})
         self.assertEqual(fake.calls, [])

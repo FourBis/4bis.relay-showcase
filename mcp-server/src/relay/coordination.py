@@ -14,6 +14,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from .task_workspace import TaskWorkspaceError, resolved_project
+
 
 _current: ContextVar = ContextVar("relay_workspace_lease", default=None)
 
@@ -128,12 +130,14 @@ async def _quien_ocupa(db, project, cuerpo: dict) -> None:
             cuerpo["branch"] = fila["branch"]
 
 
-def guard_workspace(db_key, *, source="body"):
+def guard_workspace(db_key, *, source="body", enqueue=False):
     """Valida el proyecto, reserva y conserva el contrato HTTP del handler."""
     def decorate(handler):
         @wraps(handler)
         async def guarded(request):
             db = request.app[db_key]
+            conv_id = ""
+            row = None
             if source == "body":
                 try:
                     body = await request.json()
@@ -164,13 +168,64 @@ def guard_workspace(db_key, *, source="body"):
                                      "reserva ni sobre cuál se trabaja."),
                          "target": destino, "project": propio}, status=400)
                 slug = destino or propio
+                conv_a = body.get("conversation")
+                conv_b = body.get("conversation_id")
+                if conv_a and conv_b and conv_a != conv_b:
+                    return web.json_response(
+                        {"error": "conversation y conversation_id no coinciden"},
+                        status=400)
+                conv_id = (conv_a or conv_b or "").strip() if isinstance(
+                    conv_a or conv_b or "", str) else ""
+                if conv_id:
+                    row = await db.get_conversation(conv_id)
+            elif source == "workspace":
+                slug = request.match_info.get("slug")
+                conv_a = request.query.get("conversation")
+                conv_b = request.query.get("conversation_id")
+                if conv_a and conv_b and conv_a != conv_b:
+                    return web.json_response(
+                        {"error": "conversation y conversation_id no coinciden"},
+                        status=400)
+                conv_id = (conv_a or conv_b or "").strip()
+                if conv_id:
+                    row = await db.get_conversation(conv_id)
             else:
                 getter = db.get_task_graph if source == "graph" else db.get_conversation
                 row = await getter(request.match_info["id"])
                 slug = row.get("project_slug") if row else None
+                if source == "conversation":
+                    conv_id = request.match_info["id"] if row else ""
+                elif row:
+                    conv_id = row.get("conversation_id") or ""
+                    if conv_id:
+                        row = await db.get_conversation(conv_id)
+            if row:
+                row_slug = row.get("project_slug")
+                if slug and row_slug and slug.casefold() != row_slug.casefold():
+                    return web.json_response(
+                        {"error": "la conversación pertenece a otro proyecto",
+                         "conversation_id": conv_id,
+                         "project": slug, "conversation_project": row_slug},
+                        status=400)
+                slug = row_slug or slug
             project = await db.get_project(slug.strip()) if isinstance(slug, str) else None
             if not project:
                 return await handler(request)
+            if enqueue and conv_id and row:
+                task = await db.get_conversation_task(conv_id)
+                if task.get("mode"):
+                    # El endpoint sólo agrega un evento durable. El consumer
+                    # toma la lease al ejecutar; bloquear acá impediría recibir
+                    # feedback mientras el writer está activo.
+                    return await handler(request)
+            if conv_id and row:
+                try:
+                    project = await resolved_project(db, project, conv_id)
+                except TaskWorkspaceError as e:
+                    return web.json_response(
+                        {"error": "task_workspace_blocked", "message": str(e),
+                         "conversation_id": conv_id, "project": project["slug"]},
+                        status=409)
             try:
                 lease = acquire(db, project)
             except WorkspaceBusy as e:

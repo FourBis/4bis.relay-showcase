@@ -29,6 +29,7 @@ Cómo correr:
     python -m pytest tests/test_shell_decodificacion.py -q
 """
 from __future__ import annotations
+from relay import shell_environment
 
 import codecs
 import sys
@@ -65,8 +66,8 @@ def test_decodifica_los_bytes_medidos_con_cp850(monkeypatch):
     de la máquina que corre el test) para que el test sea determinístico
     en cualquier entorno, incluido CI sin consola adjunta.
     """
-    monkeypatch.setattr(shell, "_codepage_consola", lambda: "cp850")
-    assert shell._decodificar(_BYTES_MEDIDOS) == "línea término"
+    monkeypatch.setattr(shell_environment, "_codepage_consola", lambda: "cp850")
+    assert shell_environment._decodificar(_BYTES_MEDIDOS) == "línea término"
 
 
 def test_decodifica_prioriza_utf8_sobre_el_codepage(monkeypatch):
@@ -86,8 +87,8 @@ def test_decodifica_prioriza_utf8_sobre_el_codepage(monkeypatch):
     ascii) el test pasaría igual sin importar el orden, y no serviría.
     """
     texto = "línea término"
-    monkeypatch.setattr(shell, "_codepage_consola", lambda: "cp1252")
-    assert shell._decodificar(texto.encode("utf-8")) == texto
+    monkeypatch.setattr(shell_environment, "_codepage_consola", lambda: "cp1252")
+    assert shell_environment._decodificar(texto.encode("utf-8")) == texto
 
 
 def test_decodifica_no_explota_si_nada_entiende_los_bytes(monkeypatch):
@@ -99,13 +100,13 @@ def test_decodifica_no_explota_si_nada_entiende_los_bytes(monkeypatch):
     puesto el comando entero en vez de devolver una salida (aunque sea
     parcialmente mutilada) que el modelo pueda leer.
     """
-    monkeypatch.setattr(shell, "_codepage_consola", lambda: "ascii")
+    monkeypatch.setattr(shell_environment, "_codepage_consola", lambda: "ascii")
     # 0xFF es inválido tanto en utf-8 como en ascii.
-    resultado = shell._decodificar(b"antes \xff despues")
+    resultado = shell_environment._decodificar(b"antes \xff despues")
     assert "antes" in resultado and "despues" in resultado
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="API de consola de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="API de consola de Windows")
 def test_codepage_consola_lee_getconsoleoutputcp_no_el_locale(monkeypatch):
     """El bug de fondo: `locale.getpreferredencoding()` da cp1252 en esta
     máquina y decodifica MAL (ver el ejemplo del propio docstring). El
@@ -116,16 +117,16 @@ def test_codepage_consola_lee_getconsoleoutputcp_no_el_locale(monkeypatch):
     """
     import ctypes
 
-    shell._codepage_consola.cache_clear()
+    shell_environment._codepage_consola.cache_clear()
     monkeypatch.setattr(
         ctypes.windll.kernel32, "GetConsoleOutputCP", lambda: 850)
     try:
-        assert shell._codepage_consola() == "cp850"
+        assert shell_environment._codepage_consola() == "cp850"
     finally:
-        shell._codepage_consola.cache_clear()
+        shell_environment._codepage_consola.cache_clear()
 
 
-@pytest.mark.skipif(not shell.IS_WINDOWS, reason="API de consola de Windows")
+@pytest.mark.skipif(not shell_environment.IS_WINDOWS, reason="API de consola de Windows")
 def test_codepage_consola_usa_oemcp_sin_consola_adjunta(monkeypatch):
     """Sin consola adjunta (servicio, proceso sin ventana)
     `GetConsoleOutputCP` devuelve 0 — el docstring lo dice explícito.
@@ -134,14 +135,14 @@ def test_codepage_consola_usa_oemcp_sin_consola_adjunta(monkeypatch):
     """
     import ctypes
 
-    shell._codepage_consola.cache_clear()
+    shell_environment._codepage_consola.cache_clear()
     monkeypatch.setattr(
         ctypes.windll.kernel32, "GetConsoleOutputCP", lambda: 0)
     monkeypatch.setattr(
         ctypes.windll.kernel32, "GetOEMCP", lambda: 850)
     try:
-        cp = shell._codepage_consola()
+        cp = shell_environment._codepage_consola()
         assert cp == "cp850"
         codecs.lookup(cp)  # no tiene que lanzar LookupError
     finally:
-        shell._codepage_consola.cache_clear()
+        shell_environment._codepage_consola.cache_clear()

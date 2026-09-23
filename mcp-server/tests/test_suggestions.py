@@ -88,7 +88,7 @@ class TestSuggestFollowups(unittest.IsolatedAsyncioTestCase):
             return ["nunca"]
 
         with patch("relay.experts.suggest_followups", lento), \
-                patch.object(server, "SUGGEST_TIMEOUT_S", 0.05):
+                patch("relay.server_expert_jobs.SUGGEST_TIMEOUT_S", 0.05):
             out = await server._suggest_followups(
                 self.db, user="hola", answer="chau")
         self.assertEqual(out, [])
