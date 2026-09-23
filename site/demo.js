@@ -58,11 +58,11 @@ function renderChats(focus = false) {
     messages.setAttribute("role", "log");
     messages.setAttribute("aria-label", tr("Mensajes", "Messages") + `: ${chatLabel(id)}`);
     const welcome = id === "docs"
-      ? tr("La guía ya tiene un plan. Podés continuar esta conversación mientras revisás otra tarea.", "The guide already has a plan. You can continue this conversation while reviewing another task.")
+      ? tr("La guía ya tiene un plan. Puedes continuar esta conversación mientras revisas otra tarea.", "The guide already has a plan. You can continue this conversation while reviewing another task.")
       : tr("Este chat conserva su propio borrador. Cambiar de ventana no mezcla las conversaciones.", "This chat keeps its own draft. Switching windows does not mix conversations.");
     for (const item of [{text: welcome, author: "relay"}, ...chat.messages]) {
       const bubble = node("p", null, `message${item.author === "user" ? " user" : ""}`);
-      bubble.append(node("span", item.author === "user" ? tr("Vos", "You") : tr("Relay · ejemplo", "Relay · example"), "message-author"));
+      bubble.append(node("span", item.author === "user" ? tr("Tú", "You") : tr("Relay · ejemplo", "Relay · example"), "message-author"));
       bubble.append(document.createTextNode(item.text));
       messages.append(bubble);
     }
@@ -71,7 +71,7 @@ function renderChats(focus = false) {
     input.value = chat.draft;
     input.maxLength = 600;
     input.rows = 2;
-    input.placeholder = tr("Dejá un borrador acá…", "Keep a draft here…");
+    input.placeholder = tr("Deja un borrador aquí…", "Keep a draft here…");
     input.setAttribute("aria-label", tr("Borrador", "Draft") + `: ${chatLabel(id)}`);
     input.addEventListener("input", () => { chat.draft = input.value; });
     input.addEventListener("focus", () => {
@@ -85,7 +85,7 @@ function renderChats(focus = false) {
       event.preventDefault();
       if (!chat.draft.trim()) { input.focus(); return; }
       chat.messages.push({text: chat.draft.trim(), author: "user"}, {author: "relay", text: tr(
-        "Respuesta de ejemplo: el mensaje quedó en esta ventana. En Relay instalado, acá respondería el proveedor configurado.",
+        "Respuesta de ejemplo: el mensaje quedó en esta ventana. En Relay instalado, aquí respondería el proveedor configurado.",
         "Example reply: the message stays in this window. In an installed Relay, your configured provider would respond here.")});
       chat.draft = "";
       active = id;
@@ -95,7 +95,7 @@ function renderChats(focus = false) {
     windows.append(card);
     messages.scrollTop = messages.scrollHeight;
   }
-  if (!windows.childElementCount) windows.append(node("p", tr("Elegí una conversación para recuperar su ventana y borrador.", "Choose a conversation to recover its window and draft."), "scene-note"));
+  if (!windows.childElementCount) windows.append(node("p", tr("Elige una conversación para recuperar su ventana y borrador.", "Choose a conversation to recover its window and draft."), "scene-note"));
   if (focus) windows.querySelector(`[data-chat="${active}"] textarea`)?.focus();
 }
 
