@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>FourBis Relay — Conversaciones que conservan el trabajo</title>
+  <meta name="description" content="Un workspace local y abierto para trabajar con IA sobre varios repositorios. Explorá chats, tareas persistentes y continuidad de PR en una demo simulada.">
+  <link rel="canonical" href="https://fourbis.github.io/4bis.relay-showcase/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#demo" data-en="Skip to the interactive demo">Ir a la demo interactiva</a>
+  <header class="header wrap">
+    <a class="brand" href="#" aria-label="FourBis Relay"><span class="mark" aria-hidden="true">r.</span><strong>relay</strong><span class="byline">by FourBis</span></a>
+    <nav aria-label="Principal" data-en-aria-label="Main navigation">
+      <a href="#demo" data-en="Explore">Explorar</a><a href="#install" data-en="Install">Instalar</a>
+      <a href="https://github.com/FourBis/4bis.relay-showcase">GitHub ↗</a>
+      <button id="language" class="language" aria-label="Switch to English">EN</button>
+    </nav>
+  </header>
+  <main>
+    <section class="hero wrap" aria-labelledby="headline">
+      <div class="hero-copy">
+        <p class="eyebrow" data-en="LOCAL WORKSPACE · OPEN SOURCE">WORKSPACE LOCAL · CÓDIGO ABIERTO</p>
+        <h1 id="headline"><span data-en="Conversations that">Conversaciones que</span> <em data-en="keep the work.">conservan el trabajo.</em></h1>
+        <p class="lead" data-en="Work with AI across repositories. Keep the conversation, the branch and the next step together.">Trabajá con IA sobre varios repositorios. Conservá la conversación, la rama y el próximo paso en un mismo lugar.</p>
+        <div class="actions"><a class="button primary" href="#demo" data-en="Explore the demo ↓">Explorar la demo ↓</a><a class="text-link" href="https://github.com/FourBis/4bis.relay-showcase" data-en="Read the code ↗">Leer el código ↗</a></div>
+        <p class="meta" data-en="MIT · Experimental · Validated on Windows">MIT · Experimental · Validado en Windows</p>
+      </div>
+      <div class="hero-evidence">
+        <div class="evidence-label"><span class="live-dot" aria-hidden="true"></span><span data-en="A workspace built around the conversation">Un workspace alrededor de la conversación</span></div>
+        <a href="#demo" aria-label="Explorar la demo" data-en-aria-label="Explore the demo"><img src="assets/workspace-chats.png" alt="Dos conversaciones de ejemplo abiertas en ventanas de Relay" data-en-alt="Two example conversations open in Relay windows" width="1500" height="900"></a>
+        <p data-en="Actual interface. Fictional conversations. Explore the simulation below.">Interfaz real. Conversaciones ficticias. Explorá la simulación de abajo.</p>
+      </div>
+    </section>
+    <section id="demo" class="demo-section" aria-labelledby="demo-title">
+      <div class="wrap">
+        <div class="section-heading"><div><p class="eyebrow" data-en="TRY THE FLOW">PROBÁ EL FLUJO</p><h2 id="demo-title" data-en="One desk. More than one conversation.">Una mesa. Más de una conversación.</h2></div><p class="simulation" data-en="SIMULATED DEMO · No AI calls or real repositories">DEMO SIMULADA · Sin llamadas a IA ni repositorios reales</p></div>
+        <noscript><p class="notice">Esta demo interactiva necesita JavaScript. El código y la documentación están disponibles en GitHub. / This interactive demo requires JavaScript; code and docs are on GitHub.</p></noscript>
+        <div class="workbench">
+          <div class="workbench-top"><span class="mini-brand">r. <strong>relay</strong></span><span data-en="A fictional project, ready to explore">Un proyecto ficticio, listo para explorar</span><button id="reset" class="quiet" data-en="Reset demo">Reiniciar demo</button></div>
+          <div class="scene-tabs" role="tablist" aria-label="Escenarios de demostración" data-en-aria-label="Demo scenarios">
+            <button id="tab-chats" role="tab" aria-controls="scene-chats" aria-selected="true" data-scene="chats" data-en="01 / Conversations">01 / Conversaciones</button>
+            <button id="tab-workspace" role="tab" aria-controls="scene-workspace" aria-selected="false" tabindex="-1" data-scene="workspace" data-en="02 / Continuity">02 / Continuidad</button>
+            <button id="tab-pr" role="tab" aria-controls="scene-pr" aria-selected="false" tabindex="-1" data-scene="pr" data-en="03 / Same pull request">03 / Misma pull request</button>
+          </div>
+          <section id="scene-chats" class="scene" role="tabpanel" aria-labelledby="tab-chats">
+            <div class="chat-launcher"><p data-en="Open another chat, rename a window or keep a separate draft.">Abrí otro chat, renombrá una ventana o dejá un borrador independiente.</p><div><button class="chip" data-open="docs" data-en="Documentation">Documentación</button><button class="chip" data-open="access" data-en="Access review">Revisar accesos</button></div></div>
+            <div id="chat-windows" class="chat-windows"></div>
+            <p class="scene-note" data-en="Everything you type stays on this page. Replies are scripted, not generated by AI.">Lo que escribís queda en esta página. Las respuestas están preparadas; no las genera una IA.</p>
+          </section>
+          <section id="scene-workspace" class="scene" role="tabpanel" aria-labelledby="tab-workspace" hidden>
+            <div class="task-layout"><div><p class="eyebrow" data-en="FICTIONAL TASK / 017">TAREA FICTICIA / 017</p><h3 data-en="Improve the installation guide">Mejorar la guía de instalación</h3><p data-en="A new message continues the same task. The worktree and branch stay attached to it.">Un mensaje nuevo continúa la misma tarea. El worktree y la rama siguen asociados a ella.</p><button id="resume" class="button primary" data-en="Simulate a restart">Simular un reinicio</button><p id="resume-result" class="result" role="status"></p></div><div class="record"><div><span data-en="Branch">Rama</span><code>codex/demo-guide</code></div><div><span>Workspace</span><code>demo / task-017</code></div><div><span data-en="Completed turns">Turnos completados</span><strong id="turn-count">1</strong></div><div><span data-en="History">Historial</span><strong data-en="Preserved">Conservado</strong></div></div></div>
+          </section>
+          <section id="scene-pr" class="scene" role="tabpanel" aria-labelledby="tab-pr" hidden>
+            <div class="task-layout"><div><p class="eyebrow" data-en="EXAMPLE PULL REQUEST / #17">PULL REQUEST DE EJEMPLO / #17</p><h3 data-en="Feedback joins the same conversation">El feedback vuelve a la misma conversación</h3><p data-en="In Relay, tracking starts disabled. The owner can enable bounded follow-ups. This simulation only shows the states.">En Relay, el seguimiento empieza apagado. El propietario puede activar continuaciones con límites. Esta simulación sólo muestra los estados.</p><button id="feedback" class="button primary" data-en="Simulate review feedback">Simular feedback de revisión</button><p id="feedback-result" class="result" role="status"></p></div><ol class="timeline"><li><span>01</span><div><strong data-en="Change prepared">Cambio preparado</strong><p data-en="Evidence belongs to a specific commit.">La evidencia pertenece a un commit concreto.</p></div></li><li id="review-step"><span>02</span><div><strong data-en="Awaiting review">Esperando revisión</strong><p id="review-copy" data-en="PR #17 keeps its identity.">La PR #17 conserva su identidad.</p></div></li><li><span>03</span><div><strong data-en="Human decision">Decisión humana</strong><p data-en="A published PR does not authorize a merge or deployment.">Publicar una PR no autoriza merge ni despliegue.</p></div></li></ol></div>
+          </section>
+          <div class="workbench-bottom"><span class="live-dot" aria-hidden="true"></span><span data-en="Browser simulation · No backend connection">Simulación en el navegador · Sin conexión a un backend</span><a href="https://github.com/FourBis/4bis.relay-showcase/blob/develop/docs/PERSISTENT_TASKS.md" data-en="How it works ↗">Cómo funciona ↗</a></div>
+        </div>
+      </div>
+    </section>
+    <section class="details wrap" aria-labelledby="details-title">
+      <div class="section-heading"><div><p class="eyebrow" data-en="INSIDE RELAY">DENTRO DE RELAY</p><h2 id="details-title" data-en="The next step has context.">El próximo paso tiene contexto.</h2></div><a class="text-link" href="https://github.com/FourBis/4bis.relay-showcase/blob/develop/docs/RELAY_STORY.md" data-en="Read the engineering story ↗">Leer las decisiones de ingeniería ↗</a></div>
+      <div class="feature-row"><span class="number">01</span><div><h3 data-en="Several conversations, in view">Varias conversaciones a la vista</h3><p data-en="Recover a window with a click, name it and keep its draft while working on another task.">Recuperá una ventana con un clic, poné un nombre y conservá su borrador mientras trabajás en otra tarea.</p></div><img src="assets/workspace-chats.png" alt="Ventanas de chat con nombres y borradores distintos" data-en-alt="Chat windows with separate names and drafts" loading="lazy" width="1500" height="900"></div>
+      <div class="feature-row"><span class="number">02</span><div><h3 data-en="A visible plan">Un plan visible</h3><p data-en="Inspect dependencies and the state of each node from the conversation. The graph keeps the execution history.">Consultá dependencias y estados de cada nodo desde la conversación. El grafo conserva el historial de ejecución.</p></div><img src="assets/workflow-graph.png" alt="Grafo de ejecución con tareas de ejemplo" data-en-alt="Execution graph with example tasks" loading="lazy" width="1440" height="1080"></div>
+      <div class="feature-row"><span class="number">03</span><div><h3 data-en="Activity with evidence">Actividad con evidencia</h3><p data-en="Inspect runs and recorded consumption by project. Separate completed, failed and pending work.">Revisá ejecuciones y consumo registrado por proyecto. Distinguí trabajo completado, fallido y pendiente.</p></div><img src="assets/workflow-metrics.png" alt="Panel de métricas con consumo y actividad ficticios" data-en-alt="Metrics panel with fictional usage and activity" loading="lazy" width="1440" height="1080"></div>
+      <p class="caption" data-en="All screenshots use fictional local data. The full Relay application requires local installation and a configured model provider.">Todas las capturas usan datos locales ficticios. La aplicación Relay completa requiere instalación local y un proveedor de modelos configurado.</p>
+    </section>
+    <section id="install" class="install-section"><div class="wrap install-grid"><div><p class="eyebrow" data-en="FROM DEMO TO YOUR MACHINE">DE LA DEMO A TU EQUIPO</p><h2 data-en="Explore it. Read it. Run it locally.">Exploralo. Leelo. Ejecutalo localmente.</h2><p data-en="Experimental software, under the MIT license. Validated on Windows with Python 3.11+ and PowerShell. Model-provider usage may have its own cost.">Software experimental con licencia MIT. Validado en Windows con Python 3.11+ y PowerShell. El uso de proveedores de modelos puede tener su propio costo.</p><div class="actions"><a class="button primary" href="https://github.com/FourBis/4bis.relay-showcase/blob/develop/docs/SETUP.md" data-en="Installation guide ↗">Guía de instalación ↗</a><a class="text-link" href="https://github.com/FourBis/4bis.relay-showcase/releases" data-en="Experimental releases ↗">Versiones experimentales ↗</a></div></div><div class="code-card"><div><span>PowerShell</span><span data-en="Source code">Código fuente</span></div><pre><code>git clone https://github.com/FourBis/4bis.relay-showcase.git
+cd 4bis.relay-showcase</code></pre><p data-en="Continue with the setup guide to configure your local environment and provider.">Seguí la guía de instalación para configurar el entorno local y el proveedor.</p></div></div></section>
+    <section class="contact wrap"><div><p class="eyebrow">FOURBIS · JEREMÍAS BADILLA</p><h2 data-en="Have a workflow worth improving?">¿Tenés un flujo de trabajo para mejorar?</h2><p data-en="Relay is also a way to show how we build tools: concrete scope, visible state and work that can be inspected.">Relay también muestra cómo construimos herramientas: alcance concreto, estado visible y trabajo que se puede revisar.</p></div><div class="actions"><a class="button primary" href="https://4bis.cl/" data-en="Talk to FourBis ↗">Conversar con FourBis ↗</a><a class="text-link" href="https://github.com/FourBis/4bis.relay-showcase/issues/new" data-en="Share feedback ↗">Dejar feedback ↗</a></div></section>
+  </main>
+  <footer class="wrap"><span>FourBis Relay · MIT</span><span data-en="Built by Jeremías Badilla / FourBis">Creado por Jeremías Badilla / FourBis</span><a href="https://github.com/FourBis/4bis.relay-showcase/blob/develop/docs/VALIDATION.md" data-en="Validation and limits ↗">Validación y límites ↗</a></footer>
+  <dialog id="rename-dialog" aria-labelledby="rename-label"><form method="dialog"><h2 id="rename-label" data-en="Name this window">Nombrar esta ventana</h2><label for="window-name" data-en="Window name">Nombre de la ventana</label><input id="window-name" maxlength="60" required autocomplete="off"><div class="actions"><button value="cancel" formnovalidate class="button" data-en="Cancel">Cancelar</button><button value="save" class="button primary" data-en="Save name">Guardar nombre</button></div></form></dialog>
+</body>
+</html>
