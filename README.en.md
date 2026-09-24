@@ -2,32 +2,75 @@
 
 [Español](README.md) · **English**
 
-**Long-running work, with a plan that can change as it progresses.** FourBis Relay organizes development requests into tasks with dependencies, can split a task during execution, and keeps the conversation, branch, workspace, and changes attached to the work.
+**From sales follow-up to project execution and documentation.**
+
+FourBis Relay is a local workspace for coordinating people, repositories, and
+AI agents around a company's work. Bring a repository and a team together,
+keep the client's context in view, and review changes within your GitHub workflow.
+
+It helps connect what a client needs with who does the work, what is running,
+and the evidence available to review a delivery. A request can continue as a
+task, conversation, code changes, and pull request, keeping its context when
+feedback arrives or work resumes another day.
 
 **Explore the [static demo](https://fourbis.github.io/4bis.relay-showcase/)** — a simulated interface with fictional data. It does not connect to Relay, call an AI provider, or run tools. Relay itself is experimental software intended for local use.
 
 Relay is a FourBis and Jeremías Badilla portfolio project, released under the MIT License. See [LICENSE](LICENSE) for the project license and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party notices.
 
-## What you can explore
+## A workflow from client to delivery
 
-- **A graph that adapts during execution:** when a task reaches its execution budget with work remaining, Relay can split it into subtasks and update downstream dependencies using its partial result.
-- **Team access by project:** explicit Admin, Subadmin, Dev, and Finance scopes; project assignment is separate from connecting a personal GitHub account and enabling write mode for a task.
-- **Continuity and review:** inspect a conversation's diff, keep the worktree between turns, and continue on the same task and pull request.
-- Persistent conversations and searchable project context.
-- Validation tied to the tested commit, with optional feedback tracking on the same pull request.
-- Optional expert runs organized into planning, execution, verification, and documentation stages.
-- A browser workspace where chats, task graphs, tables, and other tools can remain visible together.
-- Optional native tools and MCP servers for repository files, shell commands, SQL, browser, and GitHub workflows.
+1. **Follow the client and the opportunity.** Consult the CRM and link a client
+   or deal to its projects. From there, reach the repository, its GitHub board,
+   issues, and pull requests to review the associated work.
+2. **Organize the team.** Register repositories and assign projects to team
+   members. Admin, Subadmin, Dev, and Finance have different scopes. GitHub
+   actions use the account of the person who performs them.
+3. **Turn the request into work.** Open a task, optionally linked to an issue.
+   Relay can plan it, execute it with the project's tools, and split large work
+   into subtasks with dependencies. The team can follow progress, answer
+   questions, and keep the files when pausing or resuming.
+4. **Review within GitHub.** Inspect the diff and tests on the task's branch.
+   When an administrator authorizes publication, Relay validates the commit
+   and prepares its pull request. Optional tracking can pick up comments,
+   requested changes, and CI failures, then correct and update the same PR.
+5. **Keep what the team learns.** The conversation, results, tests, and requested
+   documentation stay with the project. Ask for an explanation, correct a
+   detail, or continue on the same task while retaining its connection to the work.
 
-In a local run observed on September 24, 2026, a ten-task graph gained four subtasks for one of its tasks and kept running. The overall work was still in progress. Read [the walkthrough and its limits](docs/LONG_RUNNING_WORK.md) (Spanish): each parent may split once, and its children cannot split again. The demo recreates the behavior with fictional data.
+The team defines the scope and decides what to deliver. The current commercial
+integration reads the configured CRM and lets you link its records to projects;
+turning an opportunity into work requires that explicit decision. Publishing a
+pull request leaves the change awaiting review: merging and deployment require
+their own authorization. PR tracking is enabled with time, usage, and iteration limits.
 
-Three concrete ways to use it:
+## An example
 
-1. **Review a repository change:** ask an expert to inspect a project, keep the task in its worktree, and review the verification result tied to the commit.
-2. **Follow a large migration:** keep the conversation beside its graph, see new subtasks during execution, and inspect dependencies, progress, and results.
-3. **Compare project work:** open separate conversations, arrange them together, and keep each draft and project context independent.
+A client requests an application migration. Link the opportunity to the project,
+assign the repository to the team, and open a task linked to its issue. Relay
+organizes the migration into tasks; when a large task needs to be broken down,
+it can split it during execution. Review the changes and checks, request the
+migration documentation, and authorize a pull request. Review adjustments
+continue on that same work.
 
-These examples describe available workflows; they do not imply provider setup, external-service validation, or production readiness. See [the workspace guide](docs/UI_WORKSPACE.md) and [persistent task guide](docs/PERSISTENT_TASKS.md) for behavior and limits.
+This workflow can serve a large migration, a focused fix, or ongoing maintenance
+across several client projects.
+
+## A process that evolves
+
+Relay grew out of everyday work at FourBis. It has developed alongside model
+capabilities and the team's needs for organizing, executing, and documenting
+projects. Its choices around continuity, permissions, and review reflect that
+experience of using it.
+
+Choose models for different stages and configure tools for each project. This
+separation allows new capabilities to be incorporated while keeping the project, team,
+and GitHub workflow as the reference. Each new integration needs configuration
+and verification in the process where it will be used.
+
+See [team access](docs/TEAM_ACCESS.md), [personal accounts](docs/USER_ACCOUNTS.md),
+[persistent tasks and PRs](docs/PERSISTENT_TASKS.md), and [long-running work](docs/LONG_RUNNING_WORK.md)
+for behavior and limits (Spanish). The [workspace guide](docs/UI_WORKSPACE.md)
+shows how to keep chats, graphs, files, and results in view.
 
 ## Screenshots
 
