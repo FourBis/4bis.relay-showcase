@@ -17,10 +17,12 @@ let _openClientId = null;
 // Estado vivo del último job (para polling + para refrescar la grilla
 // sin volver a leer el CRM).
 let _pollHandle = null;
+let _crmReadOnly = false;
+let _actorRole = "owner";
 
 // Dónde vive la app del CRM. Lo dice el relay en /crm/check para no
 // hardcodear el host acá; hasta que responda, el default del compose.
-let _crmBase = "http://localhost:3000/crm";
+let _crmBase = "";
 
 function _crmUrl(path) {
   return `${_crmBase}${path}`;
@@ -52,6 +54,7 @@ async function _checkConn() {
     if (r.app_url) {
       _crmBase = `${r.app_url}/${r.workspace || "crm"}`;
       $("#crm-open").href = r.app_url;
+      $("#crm-open").hidden = false;
     }
     // El Postgres del CRM vuelve solo con Docker, el dev server no: se
     // puede estar conectado y con la app apagada.
@@ -272,7 +275,7 @@ function _clientRow(c) {
     <div class="w-24 shrink-0 text-right text-sm tabular-nums ${total ? "text-zinc-200" : "text-zinc-700"}"
       >${total ? _money(total) : "—"}</div>
 
-    <div class="w-5 shrink-0 text-right">
+    ${_crmReadOnly || !_crmBase ? "" : `<div class="w-5 shrink-0 text-right">
       <a class="text-zinc-600 opacity-0 transition-opacity hover:text-emerald-300 group-hover:opacity-100"
          href="${escape(_crmUrl(`/companies/${c.ext_id}`))}" target="_blank"
          rel="noopener" title="Abrir en el CRM"
@@ -280,20 +283,33 @@ function _clientRow(c) {
         ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2" class="h-3.5 w-3.5"><path d="M7 17L17 7M9 7h8v8"
           stroke-linecap="round" stroke-linejoin="round"/></svg></a>
-    </div>
+    </div>`}
   </div>`;
 }
 
 export async function loadCrm() {
-  // El semáforo va acá y no en `initCrm`: se necesita cuando MIRÁS el
-  // tab, no cuando se carga el admin.
-  _checkConn();
+  if (_crmReadOnly) {
+    $("#crm-open").hidden = true;
+    for (const selector of ["#crm-start", "#crm-sync", "#crm-digest-btn"]) $(selector).hidden = true;
+    api("crm/health").then((health) => {
+      $("#crm-conn").innerHTML = `<span class="badge dim">Snapshot disponible</span>`;
+      $("#crm-summary").textContent = `${health.stale_count || 0} clientes requieren seguimiento`;
+    }).catch((error) => {
+      $("#crm-conn").innerHTML = `<span class="badge err">Salud no disponible</span> <span class="muted">${escape(error.message)}</span>`;
+    });
+  } else {
+    // El semáforo y el acceso externo sólo se muestran a owner.
+    _checkConn();
+  }
   try {
     const r = await api("crm/clients");
     const rows = r.clients || [];
     const grid = $("#crm-grid");
     if (!rows.length) {
       grid.innerHTML = "";
+      $("#crm-empty").textContent = _crmReadOnly
+        ? "No hay snapshot de clientes disponible."
+        : "Sin clientes sincronizados todavía. Pulsa Sincronizar.";
       $("#crm-empty").hidden = false;
       return;
     }
@@ -345,26 +361,33 @@ function _dealPicker(p, deals) {
 /** Fila de un proyecto dentro del panel de cadena. */
 function _projectRow(p, deals) {
   const gp = p.github_project;
-  const kanban = gp
+  const kanban = gp && _actorRole !== "finance"
     ? _extLink(gp.url || `https://github.com/orgs/${gp.owner}/projects/${gp.number}`,
                `tablero #${gp.number}`, "text-xs text-zinc-400 hover:text-emerald-300")
     : `<span class="badge dim" title="Vinculá un tablero desde el tab Proyectos">sin tablero</span>`;
   const git = p.has_git
     ? `<span class="badge ok" title="${escape(p.git_remote_url || p.repo_path || "")}">git</span>`
     : `<span class="badge dim">sin git</span>`;
-  const deal = p.deal_id
+  const deal = p.deal_id && !_crmReadOnly && _crmBase
     ? `<div class="mt-1">${_extLink(_crmUrl(`/deals/${p.deal_id}`),
         p.deal_name || p.deal_id, "text-[11px] text-zinc-500 hover:text-emerald-300")}</div>`
     : "";
+  const dealControl = _crmReadOnly
+    ? `<span class="text-sm text-zinc-300">${escape(p.deal_name || (p.deal_id ? p.deal_id : "—"))}</span>`
+    : _dealPicker(p, deals);
+  const projectInfo = _actorRole === "finance" ? ""
+    : `<div class="truncate text-xs text-zinc-500">${escape(p.repo_path || "")}</div>`;
+  const readOnlyCells = _crmReadOnly
+    ? (_actorRole === "finance"
+      ? `<td>${dealControl}</td><td><span class="badge ${p.enabled ? "ok" : "dim"}">${p.enabled ? "Activo" : "Deshabilitado"}</span></td>`
+      : `<td>${dealControl}${deal}</td><td>${git}</td><td>${kanban}</td>`)
+    : `<td>${dealControl}${deal}</td><td>${git}</td><td>${kanban}</td>
+       <td class="crm-gh muted" data-slug="${escape(p.slug)}">…</td>
+       <td><button class="btn btn-xs crm-unlink" data-slug="${escape(p.slug)}">desvincular</button></td>`;
   return `<tr data-slug="${escape(p.slug)}">
     <td><strong class="text-zinc-100">${escape(p.name || p.slug)}</strong>
-        <div class="truncate text-xs text-zinc-500">${escape(p.repo_path || "")}</div></td>
-    <td>${_dealPicker(p, deals)}${deal}</td>
-    <td>${git}</td>
-    <td>${kanban}</td>
-    <td class="crm-gh muted" data-slug="${escape(p.slug)}">…</td>
-    <td><button class="btn btn-xs crm-unlink" data-slug="${escape(p.slug)}"
-        >desvincular</button></td>
+        ${projectInfo}</td>
+    ${readOnlyCells}
   </tr>`;
 }
 
@@ -427,18 +450,21 @@ export async function openClient(clientId) {
   try {
     const [detail, projResp] = await Promise.all([
       api(`crm/clients/${encodeURIComponent(clientId)}`),
-      api("projects"),
+      _crmReadOnly ? Promise.resolve({ projects: [] }) : api("projects"),
     ]);
     const c = detail.client || {};
     const projects = detail.projects || [];
     const contacts = c.contacts || [];
     const deals = c.deals || [];
+    const contactCount = _actorRole === "finance" ? ""
+      : `${contacts.length} contactos · `;
 
     const rows = projects.length
       ? `<div class="mt-4 overflow-x-auto"><table class="w-full"><thead><tr>
-           <th class="th">Proyecto</th><th class="th">Deal</th>
-           <th class="th">Git</th><th class="th">Kanban</th>
-           <th class="th">Issues / PR</th><th class="th"></th>
+           <th class="th">Proyecto</th>${_crmReadOnly && _actorRole === "finance"
+             ? '<th class="th">Deal</th><th class="th">Estado</th>'
+             : '<th class="th">Deal</th><th class="th">Git</th><th class="th">Kanban</th>'}
+           ${_crmReadOnly || _actorRole === "finance" ? "" : '<th class="th">Issues / PR</th><th class="th"></th>'}
          </tr></thead><tbody>
          ${projects.map((p) => _projectRow(p, deals)).join("")}
          </tbody></table></div>`
@@ -467,12 +493,12 @@ export async function openClient(clientId) {
           <div class="min-w-0">
             <h3 class="truncate text-base font-semibold text-zinc-100">${escape(c.name || "")}</h3>
             <p class="truncate text-xs text-zinc-500">${escape(c.domain || "")} ·
-              ${contacts.length} contactos · ${deals.length} deals ·
+              ${contactCount}${deals.length} deals ·
               ${projects.length} proyectos</p>
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-2">
-          ${_extLink(_crmUrl(`/companies/${c.ext_id}`), "Ver en el CRM", "btn btn-xs")}
+          ${_crmReadOnly ? "" : _extLink(_crmUrl(`/companies/${c.ext_id}`), "Ver en el CRM", "btn btn-xs")}
           <button id="crm-detail-close" class="btn btn-xs" title="Cerrar (Esc)"
             aria-label="Cerrar (Esc)"><svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
         </div>
@@ -480,7 +506,7 @@ export async function openClient(clientId) {
       <div class="side-panel-body">
         ${rows}
         ${sueltosHtml}
-        ${_linkPicker(projResp.projects || [], clientId)}
+        ${_crmReadOnly ? "" : _linkPicker(projResp.projects || [], clientId)}
       </div>`;
 
     onClick("#crm-detail-close", _closeDetail);
@@ -520,7 +546,7 @@ export async function openClient(clientId) {
     });
 
     const linkBtn = $("#crm-link-btn");
-    onClick("#crm-link-btn", async () => {
+    if (!_crmReadOnly) onClick("#crm-link-btn", async () => {
       const slug = $("#crm-link-slug").value;
       linkBtn.disabled = true;
       try {
@@ -535,7 +561,7 @@ export async function openClient(clientId) {
       }
     });
 
-    _fillGithubCounts(projects.map((p) => p.slug));
+    if (!_crmReadOnly) _fillGithubCounts(projects.map((p) => p.slug));
   } catch (e) {
     _dbg("openClient ERROR", e.message);
     el.innerHTML = `<pre class="fail">${escape(e.message)}</pre>`;
@@ -613,7 +639,17 @@ async function _digestSend() {
   }
 }
 
-export function initCrm() {
+export function initCrm(actor) {
+  _actorRole = actor?.role || "";
+  _crmReadOnly = _actorRole !== "owner";
+  if (_crmReadOnly) {
+    if (_actorRole === "finance") {
+      $("#crm-description").textContent = "Vista financiera de datos comerciales agregados. No muestra información de contacto ni permite sincronizar o editar.";
+    }
+    $("#crm-open").hidden = true;
+    for (const selector of ["#crm-start", "#crm-sync", "#crm-digest-btn"]) $(selector).hidden = true;
+  }
+  if (!_crmReadOnly) {
   onClick("#crm-sync", syncCrm);
   onClick("#crm-start", startCrm);
   onClick("#crm-digest-btn", () => {
@@ -622,6 +658,7 @@ export function initCrm() {
   });
   onClick("#crm-digest-refresh", _digestPreview);
   onClick("#crm-digest-send", _digestSend);
+  }
   // Escape cierra el panel lateral, como los modales del admin.
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape" && $("#crm-detail").classList.contains("open")) {

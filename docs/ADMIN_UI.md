@@ -9,6 +9,7 @@ como una ventana del mismo workspace.
 | Conversar y consultar | Chat, Proyectos, Skills, Diagramas |
 | Seguir ejecuciones | Estado, En curso, Informe, Métricas, Logs |
 | Organizar trabajo | Gestión, CRM, Night Runs, Zombies |
+| Administrar accesos | Equipo, Mi cuenta |
 | Preparar el entorno | Indexación, Huérfanos, Voz, Comandos, MCPs, Modelos, Config |
 
 ## Primer uso
@@ -20,6 +21,11 @@ como una ventana del mismo workspace.
 
 Un servicio sin modelos configurados puede mostrar la interfaz; las ejecuciones
 que requieran un proveedor necesitan esa configuración.
+
+En **Equipo**, el Admin edita roles y asigna proyectos. **Mi cuenta** conecta
+GitHub y Google/Gmail por persona. Una tarea de solo lectura requiere después
+**Habilitar escritura** y **Continuar** desde sus controles. Consulta
+[Equipo](TEAM_ACCESS.md) para el recorrido y los límites de cada rol.
 
 ## Ventanas y resultados
 

@@ -1,0 +1,55 @@
+.hero-task { padding:22px; background:linear-gradient(145deg,#17271d,#101a14); color:#e5eee7; }
+.hero-task-top,.hero-task-meta { display:flex; justify-content:space-between; gap:12px; color:#a9bdae; font:.68rem Consolas,monospace; }
+.state-pill { color:#9fe3b9; }
+.hero-task>strong { display:block; margin-top:25px; font-size:clamp(1.2rem,2.4vw,1.8rem); letter-spacing:-.04em; }
+.hero-task-meta { margin-top:20px; flex-wrap:wrap; }
+.hero-progress { height:4px; margin-top:11px; background:#304537; }
+.hero-progress span { display:block; width:58%; height:100%; background:#59d59c; }
+.hero-task>p { margin-top:14px; color:#a4b7a9; font-size:.77rem; }
+.task-links { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:25px; color:#9cb5a4; font-size:.8rem; }
+.task-links>span { width:100%; }
+.text-button { border:1px solid #4f715b; border-radius:5px; padding:6px 9px; background:#1b2c21; color:#d4e3d7; font-size:.78rem; }
+.diff { margin-top:23px; border-top:1px solid #304537; padding-top:14px; font-size:.82rem; }
+.diff summary { cursor:pointer; color:#b3e3c6; }
+.diff p { font-size:.78rem; }
+.diff pre { overflow:auto; padding:12px; background:#0b130e; border:1px solid #304537; border-radius:5px; color:#b3e3c6; font-size:.73rem; }
+.task-children { list-style:none; margin:12px 0 0; padding:0; border:1px solid #3d5946; border-radius:7px; }
+.task-children li { display:flex; justify-content:space-between; gap:8px; padding:10px; border-bottom:1px solid #2c4635; font-size:.76rem; }
+.task-children li:last-child { border:0; }
+.task-children li span { color:#9fe3b9; white-space:nowrap; }
+.team-controls { display:grid; gap:13px; margin:22px 0 8px; padding:16px; border:1px solid #3d5946; border-radius:7px; }
+.team-controls legend { padding:0 6px; color:#b3e3c6; font-size:.8rem; }
+.team-controls label { display:flex; align-items:flex-start; gap:9px; font-size:.83rem; }
+.team-controls input { accent-color:#35ae7d; width:18px; height:18px; margin:2px 0 0; flex:0 0 18px; }
+.team-state { margin-top:0; }
+.button:not(.primary) { color:inherit; }
+.graph-wrap,.team-account,.team-permissions { margin-top:21px; padding:14px; border:1px solid #3d5946; border-radius:7px; }
+.graph-label { margin:0 0 10px; color:#9fe3b9; font:.68rem/1.6 Consolas,monospace; letter-spacing:.08em; }
+.graph-flow { display:grid; justify-items:center; list-style:none; gap:6px; margin:0; padding:0; }
+.graph-flow li:not(.graph-edge) { display:grid; gap:3px; width:min(100%,360px); padding:9px 12px; border:1px solid #3d5946; border-radius:5px; background:#142219; font-size:.8rem; }
+.graph-flow li span,.dependent-node>span { color:#9cb5a4; font-size:.72rem; }
+.graph-edge { color:#80d6a7; line-height:1; }
+.graph-explanation { margin:0 0 12px!important; font-size:.8rem!important; }
+.dependent-node { display:grid; justify-items:center; gap:6px; padding:13px 8px 0; text-align:center; }
+.dependent-node>span:first-child { color:#80d6a7; font-size:1.2rem; }
+.dependent-node strong { padding:9px 12px; border:1px dashed #718b77; border-radius:5px; font-size:.8rem; }
+.team-layout { grid-template-columns:1fr; gap:14px; }
+.team-table { width:100%; border-collapse:collapse; margin:16px 0; font-size:.83rem; }
+.team-table th,.team-table td { padding:10px; border:1px solid #344d3d; text-align:left; vertical-align:top; }
+.team-table th { color:#9fe3b9; font-weight:500; }
+.team-panel { display:grid; justify-items:start; gap:10px; margin:14px 0; padding:14px; border:1px solid #3d5946; border-radius:7px; }
+.team-panel label { font-size:.82rem; }
+.team-panel select { min-width:min(100%,300px); padding:8px; background:#101a14; color:#e5eee7; border:1px solid #496a53; border-radius:4px; }
+.team-account p:not(.graph-label) { font-size:.82rem; color:#b4c9bc; }
+.team-account .button,.team-permissions .button { margin-top:12px; }
+.team-state { margin-top:0; }
+.team-permissions .scene-note { margin-bottom:6px; }
+@media(max-width:760px) {
+  .hero-task { padding:17px; }
+  .hero-task>strong { margin-top:18px; }
+  .team-controls { padding:12px; }
+  .team-table { font-size:.72rem; }
+  .team-table th,.team-table td { padding:7px 5px; overflow-wrap:anywhere; }
+  .graph-wrap,.team-account,.team-permissions { padding:10px; }
+  .task-children li { align-items:flex-start; }
+}

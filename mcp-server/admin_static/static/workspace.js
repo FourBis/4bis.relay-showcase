@@ -9,11 +9,14 @@ let modules = new Map(), loaders = {}, activeId = '', restoreObject;
 let stage, layer, dock, launcher;
 let saveTimer;
 let focusOrder = 0;
+let closeOrder = 0;
 let taskContext = { conversationId: '', projectSlug: '' };
 let primaryTaskContext = taskContext;
 const mobile = () => matchMedia('(max-width: 760px)').matches;
 const descriptions = {
   chat: ['Conversar', 'Conversaciones, respuestas y memoria'],
+  account: ['Cuenta', 'Conexiones personales y Gmail'],
+  team: ['Trabajar', 'Integrantes y permisos de Relay'],
   projects: ['Trabajar', 'Proyectos, agentes y repositorios'],
   gestion: ['Trabajar', 'Tareas, responsables y seguimiento'],
   crm: ['Trabajar', 'Clientes y oportunidades'],
@@ -104,7 +107,8 @@ export function readLayout(raw, validModules) {
       customTitle: typeof w.customTitle === 'string' ? w.customTitle.trim().slice(0, 120) : '',
       restore: w.module ? null : w.restore,
       rect: { x: number(w.rect?.x, 0), y: number(w.rect?.y, 0), w: number(w.rect?.w, 860), h: number(w.rect?.h, 640) },
-      closed: w.closed === true, minimized: w.minimized === true, maximized: w.maximized === true,
+      closed: w.closed === true, closedAt: number(w.closedAt, 0),
+      minimized: w.minimized === true, maximized: w.maximized === true,
     }));
   } catch { return []; }
 }
@@ -137,7 +141,7 @@ function persist() {
   saveTimer = setTimeout(() => {
     const saved = [...windows.values()].filter(w => w.module || w.restore).map(w => ({
       id: w.id, module: w.module, title: w.title, customTitle: w.customTitle, restore: w.restore,
-      rect: w.rect, closed: w.closed, minimized: w.minimized, maximized: w.maximized,
+      rect: w.rect, closed: w.closed, closedAt: w.closedAt, minimized: w.minimized, maximized: w.maximized,
     }));
     try { localStorage.setItem(STORAGE, JSON.stringify({ version: 1, windows: saved.slice(-40) })); }
     catch { /* El workspace sigue funcionando aunque el storage no esté disponible. */ }
@@ -221,6 +225,7 @@ function renderDock() {
 }
 
 function closeWindow(w) {
+  if (!w.closed) w.closedAt = ++closeOrder;
   w.closed = true;
   if (w.module) modules.get(w.module).panel.hidden = true;
   w.onClose?.();
@@ -422,10 +427,10 @@ async function restoreSavedObject(saved) {
 
 function renderRecent() {
   const root = document.getElementById('workspace-recent'); root.replaceChildren();
-  const closed = [...windows.values()].filter(w => w.closed);
+  const closed = recentlyClosed([...windows.values()]);
   if (!closed.length) return;
   const title = document.createElement('h3'); title.className = 'workspace-group-title'; title.textContent = 'Cerrados recientemente'; root.append(title);
-  closed.slice(-8).reverse().forEach(w => {
+  closed.forEach(w => {
     const b = document.createElement('button'); b.className = 'workspace-recent-item'; b.textContent = w.title;
     b.onclick = () => {
       launcher.close();
@@ -434,6 +439,12 @@ function renderRecent() {
       else activate(w, true);
     }; root.append(b);
   });
+}
+
+export function recentlyClosed(entries) {
+  return entries.map((w, index) => ({ w, index })).filter(entry => entry.w.closed)
+    .sort((a, b) => (b.w.closedAt || 0) - (a.w.closedAt || 0) || b.index - a.index)
+    .slice(0, 8).map(entry => entry.w);
 }
 
 export function openWorkspaceLauncher(query = '') {
@@ -464,7 +475,7 @@ export function visibleWorkspaceModules() {
   return new Set([...windows.values()].filter(w => w.module && !w.el.hidden).map(w => w.module));
 }
 
-export function initWorkspace({ moduleLoaders, restoreChatObject }) {
+export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = null, accessMessage = "" }) {
   const originalHash = location.hash;
   loaders = moduleLoaders; restoreObject = restoreChatObject;
   stage = document.getElementById('main'); layer = document.getElementById('workspace-windows');
@@ -497,8 +508,14 @@ export function initWorkspace({ moduleLoaders, restoreChatObject }) {
     if (document.activeElement === w.frame) activate(w);
     if (activeId === w.id) taskContext = w.context;
   });
-  const buttons = [...nav.querySelectorAll('.tab')]; nav.replaceChildren();
-  for (const groupName of ['Conversar', 'Trabajar', 'Observar', 'Preparar', 'Configurar']) {
+  const buttons = [...nav.querySelectorAll('.tab')]
+    .filter(button => allowedTabs === null || allowedTabs.has(button.dataset.tab)); nav.replaceChildren();
+  document.getElementById('workspace-launcher').hidden = buttons.length === 0;
+  document.getElementById('workspace-access-message').hidden = buttons.length > 0;
+  document.getElementById('workspace-access-detail').textContent = accessMessage
+    || 'Tu cuenta todavía no tiene herramientas asignadas. Pide al administrador que revise Equipo.';
+  document.getElementById('workspace-welcome').hidden = buttons.length === 0;
+  for (const groupName of ['Conversar', 'Trabajar', 'Observar', 'Preparar', 'Configurar', 'Cuenta']) {
     const group = document.createElement('div'); group.className = 'workspace-module-group';
     const title = document.createElement('h3'); title.className = 'workspace-group-title'; title.textContent = groupName; group.append(title);
     for (const b of buttons) {
@@ -529,7 +546,11 @@ export function initWorkspace({ moduleLoaders, restoreChatObject }) {
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openWorkspaceLauncher(); }
   });
-  document.querySelectorAll('[data-workspace-open]').forEach(b => b.onclick = () => openWorkspaceModule(b.dataset.workspaceOpen));
+  document.querySelectorAll('[data-workspace-open]').forEach(b => {
+    b.hidden = !modules.has(b.dataset.workspaceOpen);
+    b.onclick = () => openWorkspaceModule(b.dataset.workspaceOpen);
+  });
+  document.getElementById('workspace-chat-new').hidden = !modules.has('chat');
   document.getElementById('workspace-chat-new').onclick = () => document.getElementById('chat-new').click();
   document.getElementById('workspace-home').onclick = () => {
     for (const w of windows.values()) if (!w.closed) w.minimized = true;
@@ -549,6 +570,8 @@ export function initWorkspace({ moduleLoaders, restoreChatObject }) {
   };
   new ResizeObserver(() => { for (const w of windows.values()) place(w); visibility(); }).observe(stage);
   let saved = []; try { saved = readLayout(localStorage.getItem(STORAGE), [...modules.keys()]); } catch { /* storage bloqueado */ }
+  if (!modules.has('chat')) saved = saved.filter(entry => entry.module || !entry.restore);
+  closeOrder = Math.max(closeOrder, ...saved.map(entry => entry.closedAt || 0));
   for (const entry of saved) {
     if (entry.module) {
       if (!entry.closed) { openWorkspaceModule(entry.module, entry); const w = windows.get(entry.id); w.minimized = entry.minimized; }
@@ -565,8 +588,10 @@ export function initWorkspace({ moduleLoaders, restoreChatObject }) {
   let initial = originalHash.match(/^#\/([a-z-]+)/)?.[1];
   if (['consults', 'chats', 'conversations'].includes(initial)) initial = 'chat';
   if (originalHash) history.replaceState(null, '', originalHash);
-  if (initial === 'workspace' && saved.length) nextActive();
-  else openWorkspaceModule(modules.has(initial) ? initial : 'chat');
-  window.addEventListener('hashchange', () => openWorkspaceModule(route() || 'chat'));
+  if (modules.size && initial === 'workspace' && saved.length) nextActive();
+  else if (modules.size) openWorkspaceModule(modules.has(initial) ? initial : modules.keys().next().value);
+  window.addEventListener('hashchange', () => {
+    if (modules.size) openWorkspaceModule(modules.has(route()) ? route() : modules.keys().next().value);
+  });
   visibility();
 }

@@ -20,10 +20,12 @@ const htmlFor = (urlBase) => `<!doctype html><html><head><meta charset="utf-8"><
     pr_url:'https://example.invalid/pr/1', validation:{head_sha:'abc123',status:'ok',detail:'fixture: validación simulada'},
     pending_events:2, tracking:{enabled:false,max_iterations:3,max_tokens:50000}};
   const originalFetch = window.fetch;
+  window.__actions = [];
   window.fetch = async (url, opts = {}) => {
     if (!String(url).includes('/conversations/fixture/task')) return originalFetch(url, opts);
     if (opts.method === 'POST') {
       const body = JSON.parse(opts.body || '{}');
+      window.__actions.push(body.action);
       task = {...task, state: body.action === 'cancel' ? 'cancelled' : body.action === 'pause' ? 'paused' : body.action === 'continue' ? 'running' : task.state,
         tracking: body.action === 'track' ? {...task.tracking, enabled: !!body.enabled} : task.tracking};
     }
@@ -76,6 +78,13 @@ try {
   await page.screenshot({path:`${out}/task-panel-validado.png`, fullPage:true});
   await page.evaluate(() => window.__setTask({id:'fixture-task',mode:'write',state:'blocked',error:'fixture: error simulado',uncertain_events:[],tracking:{enabled:false,max_iterations:3,max_tokens:50000}}));
   await page.screenshot({path:`${out}/task-panel-error.png`, fullPage:true});
+  await page.evaluate(() => window.__setTask({id:'fixture-task',mode:'write',state:'ready',
+    can_control:false,allowed_actions:['continue','pause','cancel'],tracking:{enabled:false}}));
+  const beforeDevClick = await page.evaluate(() => window.__actions.length);
+  await page.getByRole('button', {name:'Continuar'}).click();
+  await page.waitForFunction((before) => window.__actions.length === before + 1, beforeDevClick);
+  if (await page.evaluate(() => window.__actions.at(-1)) !== 'continue') throw new Error('Dev no envió Continue autorizado');
+  if (await page.locator('[data-task-action="publish"], [data-task-track]').count()) throw new Error('Dev recibió publicación o seguimiento');
   const mobile = await browser.newPage({viewport:{width:360,height:740}});
   mobile.on('pageerror', error => pageErrors.push(error.message));
   await mobile.goto(`${base}/fixture.html`, {waitUntil:'domcontentloaded'});
@@ -83,7 +92,7 @@ try {
   if (await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('overflow mobile');
   await mobile.screenshot({path:`${out}/task-panel-mobile-360.png`, fullPage:true});
   if (pageErrors.length) throw new Error(pageErrors.join('\n'));
-  console.log(JSON.stringify({out, keyboard:'Continuar focused and activated', toggle:'track enabled', error:'rendered', mobile:'360x740'}));
+  console.log(JSON.stringify({out, keyboard:'Continuar focused and activated', dev:'redacted task allowed_actions sends Continue POST', toggle:'track enabled', error:'rendered', mobile:'360x740'}));
 } finally {
   await browser.close();
   server.close();

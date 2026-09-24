@@ -118,17 +118,9 @@ async def resolve(request: web.Request) -> str:
 
 # ---------- roles (fase 2) ----------
 #
-# Dos, no cinco. `viewer` (solo lectura) se agrega si aparece alguien que
-# de verdad lo necesite, no antes.
-#
-#   owner  — todo, como siempre.
-#   member — correr expertos y ver lo que salió. Sin config, sin MCPs,
-#            sin modo nocturno, sin SQL con escritura, sin borrar nada.
-#
-# La tabla `users` NOMBRA A LOS OWNERS: quien no está es member. No hace
-# falta dar de alta a nadie para que entre, porque para llegar hasta acá
-# ya tuvo que pasar la policy de Access — el alta de verdad se hace ahí,
-# y sacar a alguien también.
+# Roles del equipo. Los identificadores owner/member se conservan por
+# compatibilidad; la UI los presenta como Admin/Dev. Una identidad nueva
+# debe registrarse: pasar Access no concede acceso automático al equipo.
 OWNER_ROLE = "owner"
 MEMBER_ROLE = "member"
 
@@ -136,12 +128,28 @@ MEMBER_ROLE = "member"
 # motivo que `_jwks_client`: una app por proceso, y así el chequeo de rol
 # es un lookup en un dict y no una consulta a SQLite por request.
 _roles: dict[str, str] = {}
+_disabled: set[str] = set()
+_names: dict[str, str] = {}
+_project_grants: dict[str, list[str]] = {}
+ROLE_LABELS = {"owner": "Admin", "subadmin": "Subadmin",
+               "member": "Dev", "finance": "Finanzas"}
+ROLE_TABS = {
+    "owner": None,
+    "subadmin": ["chat", "team", "crm", "report", "metrics", "account"],
+    "member": ["chat", "account"],
+    "finance": ["crm", "report", "metrics", "account"],
+}
 
 
 def load_roles(rows) -> None:
     """Refresca el cache de roles. `rows` son filas con email/role."""
-    global _roles
+    global _roles, _disabled, _names, _project_grants
+    rows = list(rows)
     _roles = {r["email"].strip().lower(): r["role"] for r in rows}
+    _disabled = {r["email"].strip().lower() for r in rows
+                 if not r.get("enabled", True)}
+    _names = {r["email"].strip().lower(): r.get("display_name", "") for r in rows}
+    _project_grants = {r["email"].strip().lower(): r.get("project_slugs") or [] for r in rows}
     logger.info("roles cargados: %d", len(_roles))
 
 
@@ -152,7 +160,41 @@ def role_of(request: web.Request) -> str:
     # tiene la máquina, un rol no lo va a frenar.
     if who == OWNER:
         return OWNER_ROLE
-    return _roles.get(who, MEMBER_ROLE)
+    if who in _disabled:
+        return "disabled"
+    role = _roles.get(who, "unregistered")
+    return role if role in ROLE_LABELS else "unregistered"
+
+
+def display_name(request: web.Request) -> str:
+    return _names.get(requester(request), "")
+
+
+def project_slugs(request: web.Request) -> list[str]:
+    return list(_project_grants.get(requester(request), []))
+
+
+def user_can_write_project(user: dict, slug: str) -> bool:
+    if not user.get("enabled", True):
+        return False
+    return user.get("role") == "owner" or (
+        user.get("role") in {"member", "subadmin"}
+        and bool(slug) and slug in (user.get("project_slugs") or []))
+
+
+def can_write_project(request: web.Request, project: dict) -> bool:
+    if not project or not project.get("enabled", True):
+        return False
+    if (project.get("defaults_json") or {}).get("read_only"):
+        return False
+    return user_can_write_project({"role": role_of(request),
+        "project_slugs": project_slugs(request)}, project.get("slug", ""))
+
+
+async def can_write_conversation(request: web.Request, db, conv_id: str) -> bool:
+    conv = await db.get_conversation(conv_id)
+    project = await db.get_project(conv["project_slug"]) if conv else None
+    return can_write_project(request, project)
 
 
 # Lo que puede tocar un member. Es allowlist y no blocklist a propósito:
@@ -220,12 +262,46 @@ MEMBER_ALLOWED = frozenset({
     ("GET", "/conversations/{id}/branch"),
     ("GET", "/conversations/{id}/diff"),
     ("GET", "/conversations/{id}/pr"),
+    ("POST", "/conversations/{id}/task"),
     # adjuntar una imagen al prompt y volver a verla
     ("POST", "/attachments"), ("GET", "/attachments/{attach_id}"),
 })
 
 
+_SESSION_ROUTES = frozenset({
+    ("GET", "/admin"), ("GET", "/admin/"),
+    ("GET", "/admin/static/{filename}"), ("GET", "/admin/api/me"),
+})
+_FINANCE_ROUTES = _SESSION_ROUTES | frozenset({
+    ("GET", "/admin/api/projects"),
+    ("GET", "/admin/api/report"),
+    ("GET", "/admin/api/metrics/summary"),
+    ("GET", "/admin/api/metrics/trends"),
+    ("GET", "/admin/api/crm/clients"),
+    ("GET", "/admin/api/crm/clients/{cid}"),
+    ("GET", "/admin/api/crm/health"),
+})
+_TEAM_ROUTES = frozenset({
+    ("GET", "/admin/api/users"), ("PUT", "/admin/api/users"),
+    ("DELETE", "/admin/api/users/{email}"),
+})
+_ACCOUNT_ROUTES = frozenset({
+    ("GET", "/admin/api/account/connections"),
+    ("POST", "/admin/api/account/{provider}/connect"),
+    ("GET", "/admin/api/account/{provider}/callback"),
+    ("DELETE", "/admin/api/account/{provider}"),
+    ("GET", "/admin/api/account/gmail/messages"),
+    ("GET", "/admin/api/account/gmail/messages/{id}"),
+    ("POST", "/admin/api/account/gmail/send"),
+    ("GET", "/admin/api/account/gmail/drafts"),
+})
+
+
 def _allowed_for_member(request: web.Request) -> bool:
+    return _allowed(request, MEMBER_ALLOWED)
+
+
+def _allowed(request: web.Request, allowed) -> bool:
     route = request.match_info.route
     resource = route.resource if route is not None else None
     if resource is None:
@@ -235,7 +311,7 @@ def _allowed_for_member(request: web.Request) -> bool:
         return True
     # HEAD lo registra aiohttp solo por cada GET; sigue al GET.
     method = "GET" if request.method == "HEAD" else request.method
-    return (method, resource.canonical) in MEMBER_ALLOWED
+    return (method, resource.canonical) in allowed
 
 
 @web.middleware
@@ -245,7 +321,13 @@ async def require_role(request: web.Request, handler):
     Va acá y no en el menú a propósito: si la validación vive en la UI
     no es control, es decoración — basta un fetch a mano para saltearla.
     """
-    if role_of(request) == OWNER_ROLE or _allowed_for_member(request):
+    role = role_of(request)
+    allowed = {
+        "member": MEMBER_ALLOWED | _ACCOUNT_ROUTES,
+        "subadmin": MEMBER_ALLOWED | _FINANCE_ROUTES | _TEAM_ROUTES | _ACCOUNT_ROUTES,
+        "finance": _FINANCE_ROUTES | _ACCOUNT_ROUTES,
+    }.get(role, _SESSION_ROUTES)
+    if role == OWNER_ROLE or _allowed(request, allowed):
         return await handler(request)
     # WARNING solo para lo que intenta HACER algo. Un GET rechazado es la
     # UI poll-eando tabs que no le tocan (night/questions cada 5s) y a
@@ -256,7 +338,7 @@ async def require_role(request: web.Request, handler):
         request.method, request.path)
     return web.json_response(
         {"error": "forbidden",
-         "message": "Esta acción es del owner del relay."},
+         "message": "Tu cuenta no tiene permiso para esta acción."},
         status=403)
 
 
@@ -276,6 +358,14 @@ async def access_identity(request: web.Request, handler):
     from .execution_policy import request_role
     token = request_role.set(role_of(request))
     try:
+        from .app_state import DB_KEY
+        from .user_accounts import AccountError, bind_actor
+        if DB_KEY in request.app:
+            with bind_actor(request.app[DB_KEY], requester(request)):
+                return await handler(request)
         return await handler(request)
+    except AccountError as exc:
+        return web.json_response({"error": str(exc), "connect_url": "/admin/#/account"},
+                                 status=409, headers={"Cache-Control": "no-store"})
     finally:
         request_role.reset(token)

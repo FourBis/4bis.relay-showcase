@@ -1,9 +1,7 @@
 """Lectura de GitHub para el panel de seguimiento (fase 0 del plan).
 
-Todo pasa por el CLI `gh`, que ya está instalado y autenticado en esta
-máquina (lo usa `git_flow` para abrir los PRs) y cuyo token ya trae los
-scopes `repo`, `project` y `read:org`. Con eso alcanza para Issues Y
-para Projects v2 sin escribir un cliente GraphQL a mano.
+Todo acceso remoto pasa por `gh` con la cuenta GitHub del actor actual;
+no se usa autenticación global de la máquina ni fallback administrativo.
 
 Por qué NO se reusa `mcp_servers/github_mcp.py`: ese es un subproceso MCP
 que se adquiere por run para el EXPERTO, y además no habla Projects v2.
@@ -66,9 +64,11 @@ async def _gh(*args: str, cwd: Optional[str] = None) -> tuple[int, str]:
     estar parados en el repo.
     """
     try:
+        from .github_credentials import gh_env
         proc = await asyncio.create_subprocess_exec(
             "gh", *args, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=await gh_env())
     except (OSError, ValueError) as e:
         return 127, f"gh spawn falló: {e}"
     try:
@@ -125,7 +125,10 @@ async def _gh_json(key: tuple, *args: str, cwd: Optional[str] = None) -> Any:
     El error se loggea una vez y se cachea igual: si `gh` no está
     autenticado, no queremos reintentar en cada refresh del panel.
     """
-    hit, value = _cached(key)
+    from .github_credentials import actor_cache_key
+    actor = await actor_cache_key()
+    scoped_key = ("actor", actor, *key)
+    hit, value = _cached(scoped_key)
     if hit:
         return value
     rc, out = await _gh(*args, cwd=cwd)
@@ -137,7 +140,7 @@ async def _gh_json(key: tuple, *args: str, cwd: Optional[str] = None) -> Any:
             logger.warning("gh %s: salida no-JSON (%s)", args[0], out[:200])
     else:
         logger.info("gh %s falló (rc=%d): %s", " ".join(args), rc, out[:200])
-    _cache[key] = (time.monotonic(), result)
+    _cache[scoped_key] = (time.monotonic(), result)
     return result
 
 
@@ -279,7 +282,9 @@ async def create_board(owner: str, title: str) -> Optional[dict]:
     except json.JSONDecodeError:
         logger.warning("gh project create: salida no-JSON: %s", out[:200])
         return None
-    _cache.pop(("boards", owner), None)   # el desplegable tiene que verlo ya
+    for cache_key in list(_cache):
+        if cache_key[-2:] == ("boards", owner):
+            _cache.pop(cache_key, None)
     return data
 
 

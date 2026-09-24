@@ -13,6 +13,13 @@ de herramientas y la vista del prompt efectivo requieren el rol `owner`.
 Las URLs Git mostradas por la API omiten credenciales, parámetros y fragmentos;
 el archivo local de configuración Git conserva su valor original.
 
+Dev y Subadmin pueden recibir proyectos explícitamente en **Equipo**. Una
+asignación habilita edición y ejecución de comandos de compilación/pruebas
+con la cuenta del servicio: el worktree no aísla procesos. Asigna escritura
+solo a desarrolladores de confianza. La asignación no habilita escritura SQL,
+MCP externos ni publicación de PR. Las cuentas externas son personales y
+se conectan desde **Mi cuenta**, sin recurrir al token de otra persona.
+
 Las trazas y la captura de contenido están desactivadas por defecto. Activar las
 trazas no habilita por sí solo el envío de prompts o respuestas: esa captura
 requiere una opción adicional explícita. El envío a Logfire requiere un token

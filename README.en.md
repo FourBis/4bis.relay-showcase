@@ -2,7 +2,7 @@
 
 [Español](README.md) · **English**
 
-FourBis Relay is a local workspace for working with conversational AI across multiple repositories. It keeps project conversations and execution context together, while letting you inspect tasks, tools, and results in one browser workspace.
+**Long-running work, with a plan that can change as it progresses.** FourBis Relay organizes development requests into tasks with dependencies, can split a task during execution, and keeps the conversation, branch, workspace, and changes attached to the work.
 
 **Explore the [static demo](https://fourbis.github.io/4bis.relay-showcase/)** — a simulated interface with fictional data. It does not connect to Relay, call an AI provider, or run tools. Relay itself is experimental software intended for local use.
 
@@ -10,16 +10,21 @@ Relay is a FourBis and Jeremías Badilla portfolio project, released under the M
 
 ## What you can explore
 
+- **A graph that adapts during execution:** when a task reaches its execution budget with work remaining, Relay can split it into subtasks and update downstream dependencies using its partial result.
+- **Team access by project:** explicit Admin, Subadmin, Dev, and Finance scopes; project assignment is separate from connecting a personal GitHub account and enabling write mode for a task.
+- **Continuity and review:** inspect a conversation's diff, keep the worktree between turns, and continue on the same task and pull request.
 - Persistent conversations and searchable project context.
-- Tasks that can keep a worktree between messages and associate validation with a commit.
+- Validation tied to the tested commit, with optional feedback tracking on the same pull request.
 - Optional expert runs organized into planning, execution, verification, and documentation stages.
 - A browser workspace where chats, task graphs, tables, and other tools can remain visible together.
 - Optional native tools and MCP servers for repository files, shell commands, SQL, browser, and GitHub workflows.
 
+In a local run observed on September 24, 2026, a ten-task graph gained four subtasks for one of its tasks and kept running. The overall work was still in progress. Read [the walkthrough and its limits](docs/LONG_RUNNING_WORK.md) (Spanish): each parent may split once, and its children cannot split again. The demo recreates the behavior with fictional data.
+
 Three concrete ways to use it:
 
 1. **Review a repository change:** ask an expert to inspect a project, keep the task in its worktree, and review the verification result tied to the commit.
-2. **Follow a multi-step investigation:** keep the conversation beside its task graph while checking dependencies, progress, and results.
+2. **Follow a large migration:** keep the conversation beside its graph, see new subtasks during execution, and inspect dependencies, progress, and results.
 3. **Compare project work:** open separate conversations, arrange them together, and keep each draft and project context independent.
 
 These examples describe available workflows; they do not imply provider setup, external-service validation, or production readiness. See [the workspace guide](docs/UI_WORKSPACE.md) and [persistent task guide](docs/PERSISTENT_TASKS.md) for behavior and limits.
@@ -37,6 +42,10 @@ Multiple conversations with independent drafts.
 ![Task graph](docs/images/workflow-graph.png)
 
 Task dependencies and progress.
+
+![Team: explicit project access](docs/images/team-access.png)
+
+Team roles and project assignment, using fictional identities.
 
 *These screenshots show a demonstration with fictional data. They do not represent provider activity or a public installation.*
 
@@ -69,6 +78,9 @@ Start-Process http://127.0.0.1:8413/admin/
 - [Admin UI](docs/ADMIN_UI.md)
 - [Workspace behavior and keyboard access](docs/UI_WORKSPACE.md)
 - [Persistent tasks, validation, and limits](docs/PERSISTENT_TASKS.md)
+- [Long-running work and task subdivision](docs/LONG_RUNNING_WORK.md) (Spanish)
+- [Team access and project assignment](docs/TEAM_ACCESS.md) (Spanish)
+- [Personal GitHub and Google/Gmail accounts](docs/USER_ACCOUNTS.md) (Spanish)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Validation evidence and known limits](docs/VALIDATION.md)
 - [Security boundaries](SECURITY.md)

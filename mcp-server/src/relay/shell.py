@@ -18,7 +18,7 @@ logger = logging.getLogger("relay.shell")
 async def run(
     cmd: str, *, cwd: Optional[str] = None, timeout: float = 300.0,
     shell_kind: str = "auto", env_extra: Optional[dict] = None,
-    base: Optional[str] = None,
+    base: Optional[str] = None, env_base: Optional[dict] = None,
 ) -> dict:
     """Ejecuta `cmd` y devuelve `{exit, out, timed_out, duration_ms, shell}`.
 
@@ -54,7 +54,7 @@ async def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,           # una sola cronología
         cwd=cwd or None,
-        env=shell_environment._env_for_run(env_extra, kind=kind),
+        env=shell_environment._env_for_run(env_extra, kind=kind, base_env=env_base),
         **kwargs,
     )
     try:
@@ -156,6 +156,7 @@ BG_LOG_DIR = Path(os.environ.get(
 async def lanzar(
     cmd: str, *, cwd: Optional[str] = None, shell_kind: str = "auto",
     env_extra: Optional[dict] = None, base: Optional[str] = None,
+    env_base: Optional[dict] = None,
 ) -> dict:
     """Larga `cmd` y **no lo espera**. Devuelve `{pid, log, shell, out}`.
 
@@ -233,7 +234,7 @@ async def lanzar(
                 shell=shell_environment.IS_WINDOWS and kind == "cmd",
                 stdin=subprocess.DEVNULL, stdout=fh,
                 stderr=subprocess.STDOUT, cwd=cwd or None,
-                env=shell_environment._env_for_run(env_extra, kind=kind), **kwargs)
+                env=shell_environment._env_for_run(env_extra, kind=kind, base_env=env_base), **kwargs)
         finally:
             # El hijo ya tiene su copia del handle; la nuestra no sirve.
             fh.close()

@@ -540,20 +540,27 @@ async def _correr_grafo_bg(app: web.Application, project: dict,
         graph_progress.finished = True
 
 
-def _largar_grafo(app: web.Application, project: dict, graph_id: str) -> None:
+def _largar_grafo(app: web.Application, project: dict, graph_id: str,
+                  actor_email: str | None = None) -> None:
+    from . import user_accounts
     grafos: dict = app[GRAFOS_KEY]
+    current = user_accounts.current_actor.get()
+    actor = actor_email or (current[1] if current else None)
     async def in_workspace():
         from . import task_service, task_workspace
-        graph = await app[DB_KEY].get_task_graph(graph_id)
+        db = app[DB_KEY]
+        graph = await db.get_task_graph(graph_id)
         effective = project
         if graph and graph.get("conversation_id"):
-            task_state = await app[DB_KEY].get_conversation_task(graph["conversation_id"])
+            task_state = await db.get_conversation_task(graph["conversation_id"])
             if task_state.get("state") in task_service.STOPPED:
                 raise RuntimeError("La tarea está detenida; continúa desde sus controles")
-            effective = await task_workspace.resolved_project(app[DB_KEY], project, graph["conversation_id"])
-        return await coordination.spawn_workspace(
-            app[DB_KEY], effective, _correr_grafo_bg(app, effective, graph_id))
+            effective = await task_workspace.resolved_project(db, project, graph["conversation_id"])
+        with user_accounts.bind_actor(db, actor):
+            return await coordination.spawn_workspace(
+                db, effective, _correr_grafo_bg(app, effective, graph_id))
     task = asyncio.create_task(in_workspace())
+    task.relay_actor = actor
     coordination.hold_current(task)
     grafos[graph_id] = task
     bg_tasks: set = app[BG_TASKS_KEY]

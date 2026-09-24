@@ -23,13 +23,17 @@ import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import github
+from relay import github, github_credentials
 from relay.db import Database
 from relay.server import DB_KEY, create_app
 
 
 @pytest.fixture(autouse=True)
-def _sin_cache():
+def _sin_cache(monkeypatch):
+    async def fake_account(provider):
+        assert provider == "github"
+        return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+    monkeypatch.setattr(github_credentials.user_accounts, "require_account", fake_account)
     github.clear_cache()
     yield
     github.clear_cache()
@@ -65,6 +69,24 @@ async def test_ttl_vencido_vuelve_a_consultar():
             patch.object(github, "CACHE_TTL_S", -1):
         await github.issues("Foo/bar")
         await github.issues("Foo/bar")
+    assert len(llamadas) == 2
+
+
+async def test_cache_se_separa_por_actor_y_revalida_antes_del_hit(monkeypatch):
+    actors = iter(("actor-a", "actor-b"))
+    llamadas = []
+
+    async def actor_key():
+        return next(actors)
+
+    async def fake_gh(*args, cwd=None):
+        llamadas.append(args)
+        return 0, '[{"actor": %d}]' % len(llamadas)
+
+    monkeypatch.setattr(github_credentials, "actor_cache_key", actor_key)
+    with patch.object(github, "_gh", fake_gh):
+        assert (await github.issues("Foo/bar"))[0]["actor"] == 1
+        assert (await github.issues("Foo/bar"))[0]["actor"] == 2
     assert len(llamadas) == 2
 
 

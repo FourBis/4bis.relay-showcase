@@ -76,9 +76,11 @@ def shell_tools(*, repo: str, techo_s: float, bitacora, en_vuelo) -> list[Tool]:
                 dependientes y comprueba cada errorlevel; un pipeline de
                 cmd no verifica todos sus pasos.
         """
+        from .github_credentials import shell_env
+        env_base = await shell_env()
         if background:
             res = await shell_mod.lanzar(
-                cmd, cwd=cwd or None, base=repo, shell_kind=shell_kind)
+                cmd, cwd=cwd or None, base=repo, shell_kind=shell_kind, env_base=env_base)
             # Misma bitácora que el camino normal: "largué esto y me
             # dio este pid" tiene que sobrevivir a la elisión del
             # historial, sobre todo porque después hay que bajarlo.
@@ -101,7 +103,8 @@ def shell_tools(*, repo: str, techo_s: float, bitacora, en_vuelo) -> list[Tool]:
             # el harness contestaba que no existe. Ver
             # `shell._resolver_cwd`.
             res = await shell_mod.run(
-                cmd, cwd=cwd or None, base=repo, timeout=secs, shell_kind=shell_kind)
+                cmd, cwd=cwd or None, base=repo, timeout=secs, shell_kind=shell_kind,
+                env_base=env_base)
         salida = res["out"]
         # El rastro va a la bitácora ANTES de devolver: la salida se
         # va a elidir en unas cuantas llamadas más, pero "corrí esto

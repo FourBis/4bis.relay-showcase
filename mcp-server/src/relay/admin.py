@@ -99,6 +99,9 @@ from .admin_runs import (  # noqa: F401
 def register_admin_routes(app: web.Application) -> None:
     """Registra todas las rutas /admin/* en el orden contractual."""
     admin_observability._install_ring_handler()
+    from . import account_oauth, user_mail
+    account_oauth.register_routes(app)
+    user_mail.register_routes(app)
     app.router.add_get("/admin/api/me", admin_commands.api_me)
     app.router.add_get("/admin/api/users", admin_commands.api_users_list)
     app.router.add_put("/admin/api/users", admin_commands.api_user_upsert)

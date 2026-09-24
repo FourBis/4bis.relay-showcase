@@ -17,6 +17,23 @@ class DatabaseSchemaMixin:
         conn = self._connect()
         try:
             conn.executescript(SCHEMA)
+            # Equipo: agrega las columnas nuevas sin reescribir usuarios previos.
+            _user_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(users)")
+            }
+            if "display_name" not in _user_columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN display_name "
+                    "TEXT NOT NULL DEFAULT ''")
+            if "enabled" not in _user_columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN enabled "
+                    "INTEGER NOT NULL DEFAULT 1")
+            if "project_slugs_json" not in _user_columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN project_slugs_json "
+                    "TEXT NOT NULL DEFAULT '[]'")
+            conn.commit()
             # Migración best-effort para DBs existentes (iter 4.5, 2026-07-07):
             # la columna native_tools se agregó después. Si la tabla ya
             # existía, CREATE TABLE IF NOT EXISTS no la agrega — ALTER TABLE

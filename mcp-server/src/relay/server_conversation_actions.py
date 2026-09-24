@@ -10,6 +10,7 @@ from .server_common import DB_KEY, _require_auth, _spawn_bg, logger, relay_confi
 from . import bot_control
 from . import coordination
 from . import git_flow
+from . import identity
 from . import task_service, task_workspace
 from .db import Database
 from .server_conversation_helpers import compact_live_conversation
@@ -113,10 +114,12 @@ async def conversations_close(request: web.Request) -> web.Response:
     project = await _conversation_project(db, conv)
     branch = conv.get("branch")
     pr_state = "skipped"
-    if was_open and branch and project and project.get("repo_path") and not pr_url:
+    if (identity.role_of(request) == "owner" and was_open and branch
+            and project and project.get("repo_path") and not pr_url):
         _spawn_bg(_finalize_pr_bg(db, conv_id, conv["project_slug"],
                                   project, branch, conv.get("summary") or "",
-                                  issue_number=conv.get("issue_number")))
+                                  issue_number=conv.get("issue_number"),
+                                  requested_by=identity.requester(request)))
         pr_state = "running"
 
     compaction = "skipped"
@@ -424,7 +427,9 @@ async def conversation_git_action(request: web.Request) -> web.Response:
         if managed.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa o reconcilia la tarea antes de publicar"}, status=409)
         await db.update_conversation_task(conv_id, publish_allowed=True, state="ready")
-        await db.enqueue_conversation_event(conv_id, "publish:" + key, "publish", {"role": "owner"})
+        await db.enqueue_conversation_event(
+            conv_id, "publish:" + key, "publish",
+            {"role": "owner", "requested_by": identity.requester(request)})
         task_service.start_pending(request.app, conv_id)
         return web.json_response({"id": conv_id, "branch": branch, "state": "queued", "pr_url": conv.get("pr_url")}, status=202)
 

@@ -8,6 +8,7 @@ import uuid
 from typing import Optional
 
 from aiohttp import web
+from . import identity
 
 from .server_common import DB_KEY, GRAFOS_KEY, _require_auth, logger
 from . import coordination
@@ -59,7 +60,7 @@ async def graphs_create(request: web.Request) -> web.Response:
                 requested_by=identity.requester(request), publish_allowed=False, tracking={"enabled": False})
             try:
                 await task_workspace.initialize_task(db, project, conv_id,
-                    read_only=identity.role_of(request) != "owner" or bool((project.get("defaults_json") or {}).get("read_only")))
+                    read_only=not identity.can_write_project(request, project))
             except (RuntimeError, OSError) as exc:
                 return web.json_response({"error": str(exc), "conversation_id": conv_id}, status=422)
     if conv_id:
@@ -69,8 +70,8 @@ async def graphs_create(request: web.Request) -> web.Response:
         task = await db.get_conversation_task(conv_id)
         if task.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa la tarea desde sus controles"}, status=409)
-        if task.get("mode") == "write" and identity.role_of(request) != "owner":
-            return web.json_response({"error": "Esta tarea de escritura requiere owner"}, status=403)
+        if task.get("mode") == "write" and not identity.can_write_project(request, project):
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         try:
             project = await task_workspace.resolved_project(db, project, conv_id)
         except RuntimeError as exc:
@@ -121,7 +122,8 @@ async def graphs_create(request: web.Request) -> web.Response:
         _PLANIFICANDO.discard(planning_key)
 
     if body.get("arrancar", True):
-        _largar_grafo(request.app, project, g["id"])
+        from . import identity
+        _largar_grafo(request.app, project, g["id"], identity.requester(request))
     return web.json_response(_grafo_publico(g), status=202)
 
 
@@ -279,12 +281,16 @@ async def graphs_resume(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": f"el proyecto {g.get('project_slug')!r} ya no existe"},
             status=409)
+    if not identity.can_write_project(request, project):
+        state = await db.get_conversation_task(g.get("conversation_id"))
+        if state.get("mode") == "write":
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
     # Un grafo cancelado o fallado vuelve a `activo`: retomarlo es
     # justamente decir "esto sigue". Si no, `estado_del_grafo` lo dejaría
     # como estaba y el panel mostraría un plan muerto avanzando.
     if g["estado"] != "activo":
         await db.set_task_graph_state(graph_id, "activo")
-    _largar_grafo(request.app, project, graph_id)
+    _largar_grafo(request.app, project, graph_id, identity.requester(request))
     return web.json_response(
         _grafo_publico(await db.get_task_graph(graph_id)), status=202)
 
@@ -304,6 +310,9 @@ async def graphs_cancel(request: web.Request) -> web.Response:
     if g is None:
         return web.json_response({"error": "not found"}, status=404)
     task = request.app[GRAFOS_KEY].get(graph_id)
+    state = await db.get_conversation_task(g.get("conversation_id"))
+    if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, g.get("conversation_id")):
+        return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
     if task is not None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -382,6 +391,17 @@ async def expert_question_answer(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": f"opción {choice!r} no está en la pregunta"},
                 status=400)
+
+    active_gid = pregunta.get("graph_id") or ""
+    if not active_gid and q.get("conversation_id"):
+        active = await db.active_task_graph(q["conversation_id"])
+        active_gid = (active or {}).get("id") or ""
+    active_task = request.app[GRAFOS_KEY].get(active_gid)
+    active_actor = getattr(active_task, "relay_actor", None) if active_task else None
+    if active_task and active_actor != identity.requester(request):
+        return web.json_response(
+            {"error": "El grafo pertenece a otra persona; inicia un nuevo turno cuando termine.",
+             "graph_id": active_gid}, status=409)
 
     ok = await db.answer_expert_question(
         q_id, json.dumps({"choice": choice, "label": etiqueta,
@@ -485,7 +505,8 @@ async def _retomar_grafo_tras_respuesta(
         if not g or not project or gid in request.app[GRAFOS_KEY]:
             return {"graph_id": gid, "decision": decision,
                     "corriendo": gid in request.app[GRAFOS_KEY]}
-        _largar_grafo(request.app, project, gid)
+        from . import identity
+        _largar_grafo(request.app, project, gid, identity.requester(request))
         return {"graph_id": gid, "decision": decision, "corriendo": True}
     except Exception:  # noqa: BLE001
         logger.exception("no pude retomar el grafo tras la respuesta")

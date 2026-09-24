@@ -66,8 +66,10 @@ async def conversations_create(request: web.Request) -> web.Response:
     publish_allowed = body.get("publish_allowed", False)
     if not isinstance(read_only, bool) or not isinstance(publish_allowed, bool):
         return web.json_response({"error": "read_only y publish_allowed deben ser booleanos"}, status=400)
+    if not identity.can_write_project(request, project):
+        read_only = True
     if identity.role_of(request) != "owner":
-        read_only, publish_allowed = True, False
+        publish_allowed = False
     if project["slug"].lower() == "notes":
         read_only, publish_allowed = True, False
     is_git = await git_flow.is_git_repo(project.get("repo_path") or "")

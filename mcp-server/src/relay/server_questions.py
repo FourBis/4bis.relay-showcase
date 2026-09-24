@@ -7,7 +7,8 @@ from typing import Optional
 
 from aiohttp import web
 
-from .server_common import DB_KEY, _require_auth
+from .server_common import DB_KEY, NIGHT_KEY, _require_auth
+from . import identity
 from . import attachments as attachments_mod
 from .db import Database
 @_require_auth
@@ -67,6 +68,15 @@ async def night_question_answer(request: web.Request) -> web.Response:
     409 si ya está respondida (idempotente, gana la primera)."""
     db: Database = request.app[DB_KEY]
     q_id = request.match_info.get("q_id", "")
+    existing = await db.get_night_question(q_id)
+    if existing is None:
+        return web.json_response({"error": f"question {q_id!r} desconocida"}, status=404)
+    active = (request.app.get(NIGHT_KEY) or {}).get(existing.get("run_id"))
+    active_actor = getattr(active[0], "relay_actor", None) if active else None
+    if active and active_actor != identity.requester(request):
+        return web.json_response(
+            {"error": "Esta pregunta pertenece a otra persona; inicia un nuevo turno."},
+            status=409)
     try:
         body: dict = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -81,11 +91,6 @@ async def night_question_answer(request: web.Request) -> web.Response:
     ok = await db.answer_night_question(q_id, answer)
     if not ok:
         # Ya respondida o no existe — distinguir para el cliente.
-        existing = await db.get_night_question(q_id)
-        if existing is None:
-            return web.json_response(
-                {"error": f"question {q_id!r} desconocida"},
-                status=404)
         return web.json_response(
             {"error": "ya respondida",
              "answered_at": existing.get("answered_at"),

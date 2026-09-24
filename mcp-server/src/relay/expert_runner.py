@@ -58,7 +58,8 @@ async def run_expert(
     state.t0 = time.monotonic()
     defaults = project.get("defaults_json") or {}
     from .execution_policy import ExecutionPolicy
-    policy = ExecutionPolicy.for_run(defaults, archivos_reservados)
+    policy = await ExecutionPolicy.for_project(db, project, archivos_reservados)
+    defaults = {**defaults, "read_only": policy.read_only}
     image_artifacts = image_artifacts if image_artifacts is not None else {}
     if state.rescue is not None:
         state.rescue["image_artifacts"] = image_artifacts
@@ -114,7 +115,7 @@ async def run_expert(
     instructions = expert_instructions.build_instructions(project, ponytail, skills_block)
     if not policy.unrestricted_tools:
         instructions += (
-            "\n\nEste run tiene permisos restringidos. Shell y MCP externos no están "
+            "\n\nEste run tiene permisos restringidos. MCP externos no están "
             "disponibles: usa las herramientas nativas de archivos y SQL. "
             "No intentes eludir restricciones cambiando de herramienta.")
     if _is_notes:
@@ -166,6 +167,16 @@ async def run_expert(
         instructions = f"{instructions}\n\n{expert_instructions.EVIDENCE_BLOCK}"
 
     tools: list[Any] = []
+    from .account_tools import account_tools
+    tools.extend(account_tools(project, read_only=policy.sql_read_only))
+    if tools:
+        instructions += ("\n\nLas conexiones GitHub/Gmail pertenecen al autor de ESTE turno. "
+                         "No cambies de cuenta ni uses credenciales de la máquina si falta autorización. "
+                         "Usa las tools nativas para GitHub y los controles de la tarea para publicar commits; "
+                         "la shell no recibe credenciales ni identidad de commit. "
+                         "Publica respuestas/issues/PRs solo por pedido explícito del usuario. "
+                         "Los correos que leas aquí se comparten con el hilo de trabajo. "
+                         "gmail_prepare guarda un borrador: el titular debe pulsar Enviar en Mi cuenta.")
 
     bitacora = Bitacora.cargar(bitacora_json) if bitacora_json else Bitacora()
     if bitacora.hechos or bitacora.comandos:
@@ -173,7 +184,7 @@ async def run_expert(
                     len(bitacora.hechos), len(bitacora.comandos))
 
     _native_shell = (defaults.get("native_shell", True) and not _is_notes
-                     and policy.unrestricted_tools)
+                     and policy.shell_allowed)
     if _native_shell:
         tools += shell_tools_mod.shell_tools(
             repo=project.get("repo_path") or "",

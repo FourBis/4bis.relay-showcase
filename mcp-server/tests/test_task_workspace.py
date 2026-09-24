@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import admin_workspace, coordination, task_workspace
+from relay import admin_workspace, coordination, task_workspace, github_credentials
 from relay.app_state import DB_KEY
 from relay.db import Database
 from relay.task_workspace import (
@@ -19,6 +19,14 @@ from relay.task_workspace import (
     inspect_workspace,
     resolved_project,
 )
+
+
+@pytest.fixture(autouse=True)
+def explicit_github_account(monkeypatch):
+    async def fake_account(provider):
+        assert provider == "github"
+        return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+    monkeypatch.setattr(github_credentials.user_accounts, "require_account", fake_account)
 
 
 def test_run_git_normaliza_timeout_sin_filtrar_comando(monkeypatch, tmp_path):
@@ -345,6 +353,37 @@ async def test_read_only_no_crea_worktree_y_aplica_policy(tmp_path, repo):
     assert task["workspace_path"] == str(Path(project["repo_path"]).resolve())
     assert resolved["defaults_json"]["read_only"] is True
     assert resolved["_task_source_repo"] == task["source_repo"]
+
+
+@pytest.mark.asyncio
+async def test_promote_read_only_keeps_identity_and_creates_isolated_workspace(tmp_path, repo):
+    db, project = ctx(tmp_path, repo)
+    cid = str(uuid.uuid4())
+    await db.update_conversation_task(cid, requested_by="dev@example.test", publish_allowed=False)
+    original = await initialize_task(db, project, cid, read_only=True)
+    unchanged = await initialize_task(db, project, cid)
+    assert unchanged["mode"] == "read_only"
+
+    promoted = await initialize_task(db, project, cid, promote=True)
+    assert promoted["mode"] == "write"
+    assert promoted["workspace_path"] != original["workspace_path"]
+    assert promoted["requested_by"] == "dev@example.test"
+    assert promoted["publish_allowed"] is False
+    assert promoted["branch"] == f"codex/task-{cid}"
+    assert not git(Path(project["repo_path"]), "status", "--porcelain")
+    assert git(Path(project["repo_path"]), "branch", "--show-current") == "develop"
+
+
+@pytest.mark.asyncio
+async def test_promote_refuses_dirty_develop_and_preserves_read_only_task(tmp_path, repo):
+    db, project = ctx(tmp_path, repo)
+    cid = str(uuid.uuid4())
+    before = await initialize_task(db, project, cid, read_only=True)
+    Path(project["repo_path"], "same.txt").write_text("user change\n", encoding="utf-8")
+    with pytest.raises(TaskWorkspaceError):
+        await initialize_task(db, project, cid, promote=True)
+    assert await db.get_conversation_task(cid) == before
+    assert Path(project["repo_path"], "same.txt").read_text() == "user change\n"
 
 
 @pytest.mark.asyncio

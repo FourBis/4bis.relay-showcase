@@ -550,13 +550,38 @@ CREATE TABLE IF NOT EXISTS models (
 );
 CREATE INDEX IF NOT EXISTS idx_models_enabled ON models(enabled, provider);
 
--- ADR-037 fase 2: roles. La tabla NOMBRA A LOS OWNERS — quien cruzó
--- Cloudflare Access y no está acá es `member`. Nadie necesita alta para
--- entrar: la lista de quién puede llegar vive en la policy de Access.
+-- Equipo: Access verifica la identidad; esta tabla autoriza el acceso.
+-- Las cuentas ausentes o deshabilitadas no reciben permisos de trabajo.
 CREATE TABLE IF NOT EXISTS users (
     email      TEXT PRIMARY KEY,   -- siempre en minúsculas
-    role       TEXT NOT NULL DEFAULT 'member',  -- owner|member
+    role       TEXT NOT NULL DEFAULT 'member',  -- owner|subadmin|member|finance
+    display_name TEXT NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    project_slugs_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_accounts (
+    email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK(provider IN ('github','google')),
+    subject TEXT NOT NULL,
+    login TEXT NOT NULL,
+    account_email TEXT NOT NULL,
+    token_blob TEXT NOT NULL,
+    expires_at REAL NOT NULL DEFAULT 0,
+    refresh_expires_at REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'connected',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY(email,provider),
+    UNIQUE(provider,subject)
+);
+CREATE TABLE IF NOT EXISTS account_mail_sends (
+    email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    message_id TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    PRIMARY KEY(email,request_id)
 );
 """
 

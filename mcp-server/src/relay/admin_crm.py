@@ -103,6 +103,19 @@ async def api_project_deal_link(request: web.Request) -> web.Response:
         "client_name": client.get("name"),
     })
 
+def _finance_client(client: dict) -> dict:
+    """Vista comercial: no publicar blobs libres ni contactos personales."""
+    result = {k: v for k, v in client.items() if k in {
+        "id", "name", "domain", "project_count", "last_sync_at",
+        "last_sync_status", "last_activity_at"}}
+    result["deals"] = [{k: v for k, v in d.items()
+                        if k in {"id", "name", "stage", "amount", "value", "currency"}}
+                       for d in client.get("deals", []) if isinstance(d, dict)]
+    result["contacts"] = []
+    result["restricted_view"] = True
+    return result
+
+
 async def api_crm_client_detail(request: web.Request) -> web.Response:
     """GET /admin/api/crm/clients/{cid} — el cliente y su cadena.
 
@@ -145,6 +158,12 @@ async def api_crm_client_detail(request: web.Request) -> web.Response:
             "deal_name": deal.get("name") if deal else None,
             "deal_stage": deal.get("stage") if deal else None,
         })
+    from . import identity
+    if identity.role_of(request) == "finance":
+        client = _finance_client(client)
+        out_projects = [{k: v for k, v in p.items()
+                         if k in {"slug", "name", "enabled", "deal_id", "deal_name", "deal_stage"}}
+                        for p in out_projects]
     return web.json_response(_serialize({
         "client": client,
         "projects": out_projects,
@@ -167,6 +186,9 @@ async def api_crm_clients_list(request: web.Request) -> web.Response:
         "last_sync_status": c.get("last_sync_status"),
         "last_activity_at": c.get("last_activity_at"),
     } for c in clients]
+    from . import identity
+    if identity.role_of(request) == "finance":
+        out = [_finance_client(c) for c in out]
     return web.json_response({"clients": out})
 
 async def api_crm_sync_post(request: web.Request) -> web.Response:
@@ -277,7 +299,7 @@ def _crm_dsn_public() -> str:
     scheme, rest = dsn.split("://", 1)
     return f"{scheme}://{rest.split('@', 1)[1]}"
 
-async def _crm_health_rows(db: Any) -> list[dict]:
+async def _crm_health_rows(db: Any, *, include_github: bool = True) -> list[dict]:
     """Una fila por cliente CRM con proyectos vinculados: silencio +
     resumen de GitHub. Base de `/crm/health` y `/crm/digest`.
 
@@ -289,7 +311,7 @@ async def _crm_health_rows(db: Any) -> list[dict]:
     clients = [c for c in await db.list_crm_clients() if c["project_count"] > 0]
     rows: list[dict] = []
     for c in clients:
-        projects = await db.list_projects_for_client(c["id"])
+        projects = await db.list_projects_for_client(c["id"]) if include_github else []
         repos = []
         for p in projects:
             slug = await github_mod.repo_slug(p.get("repo_path") or "")
@@ -340,7 +362,8 @@ async def api_crm_health(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "stale_days debe ser entero"},
                                  status=400)
-    rows = await _crm_health_rows(db)
+    from . import identity
+    rows = await _crm_health_rows(db, include_github=identity.role_of(request) != "finance")
     stale = sum(1 for r in rows
                if r["days_silent"] is None or r["days_silent"] >= stale_days)
     return web.json_response({

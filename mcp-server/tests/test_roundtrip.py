@@ -1,9 +1,9 @@
-"""Tests del endpoint /mcp (JSON-RPC) y los tools Google mockeados.
+"""Tests del endpoint /mcp (JSON-RPC) y tools personales bloqueados sin actor.
 
 Historia: este archivo cubría el diseño viejo de "agents" (POST /agents,
 agt_*, AgentStore) que se eliminó del relay — hoy las sesiones VS Code
 van por /agents/handshake (ADR-009) y los expertos por /experts/run
-(ADR-012/024). Queda lo vigente: gmail mock + /mcp.
+(ADR-012/024). Gmail sólo usa cuenta OAuth del actor; sin actor se bloquea.
 
 Cómo correr:
     cd mcp-server
@@ -20,19 +20,12 @@ from relay.server import create_app
 from relay.tools.gmail import GmailReadTool
 
 
-class TestGmailMock(unittest.IsolatedAsyncioTestCase):
-    async def test_empty_query_returns_all(self) -> None:
+class TestGmailActor(unittest.IsolatedAsyncioTestCase):
+    async def test_read_without_actor_is_blocked(self) -> None:
         tool = GmailReadTool()
         out = await tool.call({"max_results": 10})
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["source"], "mock")
-        self.assertGreaterEqual(len(out["messages"]), 1)
-
-    async def test_query_filters(self) -> None:
-        tool = GmailReadTool()
-        out = await tool.call({"query": "client@example.com", "max_results": 10})
-        self.assertTrue(out["ok"])
-        self.assertEqual([m["from"] for m in out["messages"]], ["client@example.com"])
+        self.assertFalse(out["ok"])
+        self.assertIn("Mi cuenta", out["error"])
 
 
 class TestMcpEndpoint(unittest.IsolatedAsyncioTestCase):
@@ -49,13 +42,13 @@ class TestMcpEndpoint(unittest.IsolatedAsyncioTestCase):
 
             r = await client.post("/mcp", json={
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "gmail_read", "arguments": {"query": "client@example.com"}},
+                "params": {"name": "gmail_read", "arguments": {"query": "alex@example.test"}},
             })
             body = await r.json()
             self.assertIn("result", body)
             content = json.loads(body["result"]["content"][0]["text"])
-            self.assertTrue(content["ok"])
-            self.assertEqual(content["source"], "mock")
+            self.assertFalse(content["ok"])
+            self.assertIn("Mi cuenta", content["error"])
 
 
 if __name__ == "__main__":

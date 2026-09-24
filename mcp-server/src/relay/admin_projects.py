@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 from aiohttp import web
-from . import config as relay_config
-from . import admin_cbm, identity
+from . import config as relay_config, identity
+from . import admin_cbm
 from . import github as github_mod
 from .experts import cbm_binary_path
 from .app_state import DB_KEY, NIGHT_KEY, SKILLS_KEY
@@ -24,6 +24,10 @@ async def api_projects(request: web.Request) -> web.Response:
     """GET /admin/api/projects — lista con estado de index."""
     db = request.app[DB_KEY]
     projects = await db.list_projects(enabled_only=False)
+    if identity.role_of(request) == "finance":
+        return web.json_response({"projects": [
+            {"slug": p["slug"], "name": p["name"], "enabled": bool(p.get("enabled", 1))}
+            for p in projects]})
     indexed: dict[str, dict] = {}
     try:
         # Bug 2026-07-22: el listado NO puede colgarse por las stats de

@@ -4,8 +4,19 @@ import asyncio
 
 import pytest
 
-from relay import task_service
+from relay import github_credentials, task_service
 from tests.test_task_continuity import create_task, make_client
+
+
+async def _fake_github_account(provider):
+    assert provider == "github"
+    return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+
+
+@pytest.fixture(autouse=True)
+def explicit_github_oauth_fixture(monkeypatch):
+    monkeypatch.setattr(
+        github_credentials.user_accounts, "require_account", _fake_github_account)
 
 
 @pytest.mark.asyncio

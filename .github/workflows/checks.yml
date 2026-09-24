@@ -36,6 +36,16 @@ jobs:
           mcp-server/tests/test_conversations_ui.py
           mcp-server/tests/test_memories_ui.py
           mcp-server/tests/test_identity.py
+          mcp-server/tests/test_active_actor.py
+          mcp-server/tests/test_github_actor.py
+          mcp-server/tests/test_github_mcp_token.py
+          mcp-server/tests/test_google_tools.py
+          mcp-server/tests/test_roundtrip.py
+          mcp-server/tests/test_team_access.py
+          mcp-server/tests/test_team_users_db.py
+          mcp-server/tests/test_user_accounts.py
+          mcp-server/tests/test_user_mail.py
+          mcp-server/tests/test_project_code_permissions.py
           mcp-server/tests/test_project_privacy.py
           mcp-server/tests/test_task_persistence.py
           mcp-server/tests/test_task_workspace.py
@@ -52,4 +62,11 @@ jobs:
           mcp-server/tests/test_tool_timeout.py
           mcp-server/tests/test_db.py
           mcp-server/tests/test_ui_contrato_experts_run.py
+          -q
+      - name: Check focused orchestrator autosplit behavior
+        shell: pwsh
+        run: >-
+          python -m pytest
+          mcp-server/tests/test_orquestador.py
+          -k "split or subdiv or fan_out or flag_apagado or subtarea"
           -q

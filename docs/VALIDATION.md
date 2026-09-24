@@ -1,6 +1,6 @@
 # Validación de la versión de portafolio
 
-Revisiones locales del 16, 17 y 22 de septiembre de 2026. Relay se presenta como proyecto
+Revisiones locales del 16, 17, 22 y 24 de septiembre de 2026. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.
@@ -214,3 +214,54 @@ error de PR, y el cierre de tareas administradas comprueba que no borre su rama
 ni sus archivos. Los resultados no acreditan un despliegue ni un ciclo con
 proveedores reales. Detalles y reproducción en la
 [evidencia pública](qa/persistent-tasks-public-2026-09-22.md).
+
+### Equipo, cuentas y trabajo largo — 24 de septiembre de 2026
+
+Esta transferencia incorpora Equipo, los roles Admin/Subadmin/Dev/Finanzas,
+asignaciones por proyecto y GitHub/Google por actor. Las tareas persistentes,
+múltiples chats y el visor de diff ya formaban parte del repositorio público;
+se actualizan los controles de escritura y su presentación.
+
+Se conservan el historial Git público independiente, los filtros de metadatos
+y estado para no administradores, las protecciones de Host/Origin y las
+dependencias del renderer público. La nueva respuesta `allowed_actions` se
+combina con un resumen sin rutas privadas. Un error de cuenta puede orientar
+a **Mi cuenta**; otros errores de ejecución no revelan rutas a miembros.
+
+No se trasladaron el roster operativo, registros OAuth, identificadores de
+clientes, configuraciones, conversaciones o bases locales. Los ejemplos y las
+capturas nuevas usan identidades ficticias. El código instalado requiere los
+clientes OAuth y las autorizaciones personales de su propia instalación.
+
+La demo ES/EN ahora representa una subdivisión acotada durante la ejecución,
+dependencias actualizadas, Equipo editable, cuenta personal, escritura explícita
+y revisión de diff. La publicación de PR se muestra como paso separado de la
+integración. [Recorridos reproducibles](qa/public-launch.md).
+
+El check visual de Equipo se compartió con el repo local y pasó contra sus
+fuentes con API simulada. La adaptación de `can_control` al nuevo contrato
+es específica del resumen restringido que ya existía en el showcase; no se
+trasladó ese contrato público al Relay privado. No se reinició su proceso.
+
+Las pruebas no ejecutan una migración real ni conectan cuentas. El caso de uso
+documenta por separado una observación local de trabajo aún en curso, sin
+presentarla como evidencia de finalización o de ahorro medido.
+
+Resultados locales de esta transferencia:
+
+- Conjunto completo de `checks.yml`: **437 passed y 6 subtests passed**,
+  en 183,89 segundos. No se ejecutó toda la suite general del repositorio.
+- Subdivisión acotada: **10 passed, 98 deselected**.
+- Tras las correcciones finales se repitieron permisos de proyecto (**14 passed**),
+  controles JS de tarea/workspace (**16 passed**) y CSS (**4 passed**).
+  Son comprobaciones parcialmente superpuestas, no totales acumulables.
+- Los recorridos de navegador de demo pública, Equipo, panel de tarea y múltiples
+  chats pasaron. Incluyen recuperación tras F5 y el POST autorizado de un Dev.
+- Equipo pasó también contra las fuentes del Relay local con API simulada.
+- Referencias locales de Markdown y `git diff --check` correctos. Escaneo de
+  identidades operativas sin coincidencias; Gitleaks 8.30.1 sin hallazgos en
+  el árbol exportable y el historial público, conservando las excepciones
+  precisas de fixtures ya existentes.
+
+La validación de código y navegador es local. Integración del PR y publicación
+de Pages se comprueban por separado; los borradores sociales no se enviaron.

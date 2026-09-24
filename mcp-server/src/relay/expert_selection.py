@@ -167,6 +167,12 @@ async def _catalog_toolsets(
     rows = _one_per_capability(await db.mcp_servers_for_project(
         project["id"], names=sel, capabilities=sel), selection)
     visible = await db.mcp_servers_for_project(project["id"], all_visible=True)
+    # GitHub usa tools nativas con OAuth resuelto por llamada. El proceso
+    # MCP global no comparte credenciales entre integrantes.
+    def personal_github(row):
+        return (row.get("capability") or "").lower() == "github" or row.get("name") == "github-mcp"
+    rows = [row for row in rows if not personal_github(row)]
+    visible = [row for row in visible if not personal_github(row)]
 
     toolsets: list[Any] = []
     attached: list[dict] = []

@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import identity, task_pr, task_service, task_workspace
+from relay import identity, task_pr, task_service, task_workspace, github_credentials
 from relay.db import Database
 from relay.app_state import (
     BG_TASKS_KEY, DB_KEY, GRAFOS_KEY, MCP_POOL_KEY, NOTIFY_KEY,
@@ -19,6 +19,16 @@ from relay.app_state import (
 from relay.server_conversation_routes import conversations_create
 from relay.server_expert_routes import experts_run, experts_status
 from relay.server_task_routes import task_action, task_get
+
+
+async def _fake_require_account(provider):
+    assert provider == "github"
+    return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+
+
+@pytest.fixture(autouse=True)
+def explicit_github_account(monkeypatch):
+    monkeypatch.setattr(github_credentials.user_accounts, "require_account", _fake_require_account)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -45,6 +55,37 @@ def make_repo(tmp_path: Path) -> Path:
     git(source, "config", "user.email", "relay@example.test")
     git(source, "config", "user.name", "Relay Test")
     return source
+
+
+@pytest.mark.asyncio
+async def test_event_without_actor_does_not_reuse_task_creator(monkeypatch):
+    class DB:
+        async def get_conversation_task(self, _cid):
+            return {"state": "ready", "requested_by": "creator@example.test", "mode": "read"}
+
+        async def claim_conversation_event(self, _cid):
+            return {"id": 7, "kind": "run", "payload": {"role": "member"}}
+
+        async def finish_conversation_event(self, event_id, **kwargs):
+            self.finished = (event_id, kwargs)
+
+        async def update_conversation_task(self, _cid, **kwargs):
+            self.blocked = kwargs
+
+    db = DB()
+    called = False
+
+    async def should_not_run(*_args):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(task_service, "_run_event", should_not_run)
+    role_before = task_service.execution_policy.request_role.get()
+    await task_service._consume({DB_KEY: db}, {}, "conv")
+    assert not called
+    assert db.finished[1]["state"] == "uncertain"
+    assert db.blocked["state"] == "blocked"
+    assert task_service.execution_policy.request_role.get() == role_before
 
 
 class FakeSkills:
@@ -218,9 +259,11 @@ async def test_request_file_commit_validate_pr_and_duplicate_request(tmp_path, m
         dirty = Path(after["workspace_path"]) / "dirty.txt"
         dirty.write_text("preserve across restart\n", encoding="utf-8")
         await db.enqueue_conversation_event(cid, "restart:processing", "feedback",
-                                             {"user": "restart", "role": "owner"})
+                                             {"user": "restart", "role": "owner",
+                                              "requested_by": "owner"})
         await db.enqueue_conversation_event(cid, "restart:pending", "feedback",
-                                             {"user": "later", "role": "owner"})
+                                             {"user": "later", "role": "owner",
+                                              "requested_by": "owner"})
         assert await db.claim_conversation_event(cid)
         reopened = Database(path=tmp_path / "relay.db")
         assert await reopened.recover_conversation_events() == [cid]
@@ -239,11 +282,13 @@ async def test_feedback_pending_restart_uncertain_and_workspace_guard(tmp_path, 
     client, db, source, app = await make_client(tmp_path, monkeypatch)
     try:
         cid = await create_task(client, publish_allowed=False)
-        run = await db.enqueue_conversation_event(cid, "request:r", "run", {"user": "run", "role": "owner"})
+        run = await db.enqueue_conversation_event(cid, "request:r", "run", {
+            "user": "run", "role": "owner", "requested_by": "owner"})
         claimed = await db.claim_conversation_event(cid)
         assert claimed["id"] == run["id"]
         feedback = await db.enqueue_conversation_event(cid, "pr:feedback", "feedback",
-                                                        {"user": "corrige", "role": "owner"})
+                                                        {"user": "corrige", "role": "owner",
+                                                         "requested_by": "owner"})
         assert await db.claim_conversation_event(cid) is None
         restarted = Database(path=tmp_path / "relay.db")
         assert await restarted.recover_conversation_events() == [cid]
@@ -294,7 +339,8 @@ async def test_feedback_arriving_during_model_run_is_fifo_and_single_writer(tmp_
         drain = asyncio.create_task(task_service._drain(app, cid))
         await asyncio.wait_for(started.wait(), timeout=5)
         feedback = await db.enqueue_conversation_event(
-            cid, "feedback:1", "feedback", {"user": "corrige", "role": "owner"})
+            cid, "feedback:1", "feedback", {
+                "user": "corrige", "role": "owner", "requested_by": "owner"})
         assert feedback["state"] == "pending"
         assert await db.claim_conversation_event(cid) is None
         gate.set()
