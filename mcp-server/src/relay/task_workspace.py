@@ -23,11 +23,12 @@ def _norm(path: str | Path) -> str:
     return os.path.normcase(str(Path(path).resolve()))
 
 
-def _run_git(repo: str | Path, *args: str, check: bool = True) -> str:
+def _run_git(repo: str | Path, *args: str, check: bool = True,
+             env: dict[str, str] | None = None) -> str:
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), *args], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=60,
+            encoding="utf-8", errors="replace", timeout=60, env=env,
         )
     except subprocess.TimeoutExpired as exc:
         # El objeto de TimeoutExpired puede incluir comando y salida; no se
@@ -42,7 +43,11 @@ def _run_git(repo: str | Path, *args: str, check: bool = True) -> str:
 
 
 async def _git(repo: str | Path, *args: str, check: bool = True) -> str:
-    return await asyncio.to_thread(_run_git, repo, *args, check=check)
+    env = None
+    if args and args[0] == "fetch":
+        from .github_credentials import git_env
+        env = await git_env()
+    return await asyncio.to_thread(_run_git, repo, *args, check=check, env=env)
 
 
 async def _persist(db: Any, conv_id: str, **fields: Any) -> dict:
@@ -136,7 +141,7 @@ async def _strict_develop_guard(source: Path) -> tuple[str, str]:
 
 
 async def initialize_task(
-    db: Any, project: dict, conv_id: str, *, read_only: bool = False,
+    db: Any, project: dict, conv_id: str, *, read_only: bool = False, promote: bool = False,
 ) -> dict:
     """Serializa el único aprovisionamiento permitido por conversación."""
     locks = getattr(db, "_task_workspace_init_locks", None)
@@ -148,7 +153,7 @@ async def initialize_task(
     async with lock:
         try:
             return await _initialize_task(
-                db, project, conv_id, read_only=read_only)
+                db, project, conv_id, read_only=read_only, promote=promote)
         except Exception as exc:
             task = await db.get_conversation_task(conv_id)
             # Sólo un fallo anterior a la intención Git es reintentable. Si
@@ -164,14 +169,17 @@ async def initialize_task(
 
 
 async def _initialize_task(
-    db: Any, project: dict, conv_id: str, *, read_only: bool = False,
+    db: Any, project: dict, conv_id: str, *, read_only: bool = False, promote: bool = False,
 ) -> dict:
     """Crea una sola vez el workspace de ``conv_id`` y persiste su estado."""
     existing = await db.get_conversation_task(conv_id)
+    upgrading = promote and existing.get("mode") == "read_only" and not read_only
+    if upgrading:
+        _safe_task_paths(db, project, conv_id, existing)
     # task_json también guarda autorización/rol antes de provisionar. Sólo
     # mode+raíces significan que ya hubo una intención de workspace.
-    if existing.get("mode") or existing.get("source_repo") \
-            or existing.get("workspace_path"):
+    if not upgrading and (existing.get("mode") or existing.get("source_repo")
+                          or existing.get("workspace_path")):
         inspected = await inspect_workspace(db, project, conv_id)
         if (existing.get("state") == "provisioning"
                 and inspected.get("workspace_state") == "ok"):
@@ -358,6 +366,7 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
     resolved = dict(project)
     resolved["repo_path"] = task["workspace_path"]
     resolved["_task_id"] = conv_id
+    resolved["_task_mode"] = task.get("mode")
     resolved["_task_source_repo"] = task["source_repo"]
     defaults = dict(resolved.get("defaults_json") or {})
     if task.get("mode") == "read_only":
@@ -397,11 +406,13 @@ async def cleanup_workspace(db: Any, project: dict, conv_id: str) -> dict:
     pr_url = (conv or {}).get("pr_url") or task.get("pr_url")
     if not pr_url:
         raise TaskWorkspaceError("la tarea no tiene PR")
+    from .github_credentials import gh_env
     gh = await asyncio.to_thread(
         subprocess.run,
         ["gh", "pr", "view", pr_url, "--json",
          "state,mergedAt,baseRefName,headRefName"],
         cwd=str(workspace), capture_output=True, text=True, timeout=30,
+        env=await gh_env(),
     )
     try:
         pr = json.loads(gh.stdout or "{}") if gh.returncode == 0 else {}

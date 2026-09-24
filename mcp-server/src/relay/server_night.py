@@ -117,7 +117,10 @@ async def night_start(request: web.Request) -> web.Response:
         directive=directiva,
         error_logs=body.get("error_logs") or "",
         notify=notify, state_dir=state_dir)
-    task = asyncio.create_task(orch.run())
+    from . import identity, user_accounts
+    orch.relay_actor = identity.requester(request)
+    with user_accounts.bind_actor(db, identity.requester(request)):
+        task = asyncio.create_task(orch.run())
     coordination.hold_current(task)
     registry[orch.run_id] = (orch, task)
 

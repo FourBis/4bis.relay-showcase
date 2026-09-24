@@ -1,7 +1,9 @@
 """Repositorios de CRM, modelos y usuarios."""
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from typing import Optional
 
 from .db_support import now_iso
@@ -256,33 +258,151 @@ class DatabaseCrmModelsMixin:
 
     async def list_users(self) -> list[dict]:
         rows = await self.run(
-            "SELECT email, role, created_at FROM users ORDER BY email")
-        return [dict(r) for r in rows]
+            "SELECT email, role, display_name, enabled, created_at, "
+            "project_slugs_json "
+            "FROM users ORDER BY email")
+        users = []
+        for row in rows:
+            user = dict(row)
+            try:
+                project_slugs = json.loads(user.pop("project_slugs_json", "[]") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                project_slugs = []
+            user["project_slugs"] = project_slugs if isinstance(project_slugs, list) else []
+            users.append(user)
+        return users
 
-    async def set_user_role(self, email: str, role: str) -> None:
-        """Alta o cambio de rol (2026-08-21: ya tiene UI y endpoints).
-
-        El email se normaliza a minúsculas acá y no en el caller porque
-        `identity.role_of` busca por email en minúsculas: una fila con
-        mayúsculas sería un owner que nunca resuelve como owner.
-        """
-        if role not in ("owner", "member"):
+    async def set_user_role(
+        self, email: str, role: str, *, display_name: Optional[str] = None,
+        enabled: bool = True,
+        manageable_roles: Optional[tuple[str, ...]] = None,
+        project_slugs: Optional[list[str]] = None,
+    ) -> None:
+        """Alta/cambio atómico, protegiendo al último owner activo."""
+        valid_roles = ("owner", "subadmin", "member", "finance")
+        if not isinstance(role, str) or role not in valid_roles:
             raise ValueError(f"rol desconocido: {role!r}")
-        email = (email or "").strip().lower()
-        if not email:
-            raise ValueError("email vacío")
-        await self.run(
-            "INSERT INTO users (email, role, created_at) VALUES (?,?,?) "
-            "ON CONFLICT(email) DO UPDATE SET role=excluded.role",
-            (email, role, now_iso()))
+        if not isinstance(email, str):
+            raise ValueError("email inválido")
+        email = email.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("email inválido")
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name inválido")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled inválido")
+        if project_slugs is not None:
+            if (not isinstance(project_slugs, list) or len(project_slugs) > 50
+                    or any(not isinstance(slug, str) or not slug or len(slug) > 100
+                           for slug in project_slugs)
+                    or len(set(project_slugs)) != len(project_slugs)):
+                raise ValueError("project_slugs inválido")
+            if project_slugs and role not in ("member", "subadmin"):
+                raise ValueError("project_slugs_role")
+        if manageable_roles is not None and (
+                not isinstance(manageable_roles, tuple)
+                or any(not isinstance(r, str) or r not in valid_roles
+                       for r in manageable_roles)):
+            raise ValueError("manageable_roles inválido")
+
+        await asyncio.to_thread(
+            self._set_user_role_sync, email, role, display_name, enabled,
+            manageable_roles, project_slugs)
+
+    def _set_user_role_sync(
+        self, email: str, role: str, display_name: Optional[str],
+        enabled: bool, manageable_roles: Optional[tuple[str, ...]],
+        project_slugs: Optional[list[str]],
+    ) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT role, enabled, display_name, project_slugs_json "
+                "FROM users WHERE email=? COLLATE NOCASE",
+                (email,)).fetchone()
+            if manageable_roles is not None and (
+                    role not in manageable_roles
+                    or (current is not None
+                        and current["role"] not in manageable_roles)):
+                raise ValueError("forbidden_role")
+            if project_slugs:
+                marks = ",".join("?" for _ in project_slugs)
+                enabled_slugs = {row[0] for row in conn.execute(
+                    f"SELECT slug FROM projects WHERE enabled=1 AND slug IN ({marks})",
+                    tuple(project_slugs))}
+                if enabled_slugs != set(project_slugs):
+                    raise ValueError("project_slugs_catalog")
+
+            if (current is not None and current["role"] == "owner"
+                    and current["enabled"]):
+                if role != "owner" or not enabled:
+                    active_owners = conn.execute(
+                        "SELECT COUNT(*) FROM users "
+                        "WHERE role='owner' AND enabled=1").fetchone()[0]
+                    if active_owners <= 1:
+                        raise ValueError("last_admin")
+
+            encoded_projects = (json.dumps(project_slugs, ensure_ascii=False)
+                                if project_slugs is not None else
+                                (current["project_slugs_json"] if current is not None else "[]"))
+            if role not in ("member", "subadmin"):
+                encoded_projects = "[]"
+            if current is None:
+                conn.execute(
+                    "INSERT INTO users "
+                    "(email, role, display_name, enabled, project_slugs_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (email, role, display_name or "", int(enabled),
+                     encoded_projects, now_iso()))
+            else:
+                name = (display_name if display_name is not None
+                        else current["display_name"])
+                conn.execute(
+                    "UPDATE users SET role=?, display_name=?, enabled=?, "
+                    "project_slugs_json=? "
+                    "WHERE email=? COLLATE NOCASE",
+                    (role, name, int(enabled), encoded_projects, email))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     async def delete_user(self, email: str) -> bool:
-        """Saca la fila. NO es "sacarle el acceso": quien no está en la
-        tabla es `member`, y el alta/baja de verdad la hace la policy de
-        Access (ver `identity`). Esto solo lo devuelve a member."""
-        rows = await self.run(
-            "DELETE FROM users WHERE email=? COLLATE NOCASE RETURNING email",
-            ((email or "").strip().lower(),))
-        return bool(rows)
+        """Hard delete compatible con callers legacy; protege último owner."""
+        if not isinstance(email, str):
+            raise ValueError("email inválido")
+        email = email.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("email inválido")
+        return await asyncio.to_thread(self._delete_user_sync, email)
+
+    def _delete_user_sync(self, email: str) -> bool:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT role, enabled FROM users "
+                "WHERE email=? COLLATE NOCASE", (email,)).fetchone()
+            if current is None:
+                conn.commit()
+                return False
+            if current["role"] == "owner" and current["enabled"]:
+                active_owners = conn.execute(
+                    "SELECT COUNT(*) FROM users "
+                    "WHERE role='owner' AND enabled=1").fetchone()[0]
+                if active_owners <= 1:
+                    raise ValueError("last_admin")
+            conn.execute("DELETE FROM users WHERE email=? COLLATE NOCASE",
+                         (email,))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # ---- chats (índice; el .md es la verdad) ----

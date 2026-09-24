@@ -31,6 +31,10 @@
     </div>
   </header>
   <main id="main" tabindex="-1" class="workspace-stage" aria-label="Espacio de trabajo">
+    <section id="workspace-access-message" class="empty-state" hidden role="status" aria-live="polite">
+      <p class="empty-state-title">Acceso al Relay no habilitado</p>
+      <p id="workspace-access-detail" class="empty-state-sub">Tu cuenta todavía no tiene herramientas asignadas.</p>
+    </section>
     <div id="workspace-welcome" class="workspace-welcome">
       <span class="workspace-eyebrow">ESPACIO DE TRABAJO</span>
       <h1>Todo lo que necesitas.<br>A tu manera.</h1>
@@ -760,12 +764,12 @@
         <header class="mb-5 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 class="panel-title">CRM</h2>
-            <p class="panel-sub">Espejo read-only de tus empresas, deals y
+            <p id="crm-description" class="panel-sub">Espejo read-only de tus empresas, deals y
               contactos. Se edita en el CRM; acá se cruza con los proyectos:
               cada proyecto es un deal.</p>
           </div>
           <a id="crm-open" class="btn btn-primary" target="_blank"
-             rel="noopener" href="http://localhost:3000">
+             rel="noopener" href="" hidden>
             Abrir el CRM
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" class="h-3.5 w-3.5"><path d="M7 17L17 7M9 7h8v8"
@@ -1757,49 +1761,49 @@
           </div>
         </section>
 
-        <!-- Usuarios / roles (2026-08-21). Hasta ahora la tabla `users`
-             se editaba por SQL y el cambio recien valia al reiniciar.
-             OJO con lo que esto NO es: no da ni saca acceso al relay,
-             eso lo decide la policy de Cloudflare Access. Aca solo se
-             dice cual de los que YA entran es owner. -->
-        <section class="form-section mt-4">
+        <h3 class="section-title">Efectivo ahora</h3>
+        <div id="cfg-effective-grid" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+      </section>
+
+      <!-- Equipo: permisos de Relay para identidades que ya entran por Access. -->
+      <section id="tab-team" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Equipo</h2>
+          <p class="panel-sub">Revisa qué puede hacer cada persona y en qué proyectos. Desactivar conserva el historial y bloquea nuevas acciones.</p>
+        </header>
+        <section class="form-section">
           <header class="form-section-head">
-            <h3 class="form-section-title">Usuarios y roles</h3>
-            <p class="form-section-sub">Quien no está en la lista entra como
-              <code>member</code>: puede correr expertos y ver los resultados,
-              pero no tocar config, MCPs, modo nocturno ni borrar nada. Esto
-              <strong>no</strong> da ni quita acceso al relay — de eso se
-              encarga la policy de Access.</p>
+            <h3 class="form-section-title">Integrantes</h3>
+            <p class="form-section-sub">Los proyectos asignados permiten editar, compilar y probar. No conceden administración del equipo ni publicar o integrar cambios.</p>
           </header>
-          <div class="form-grid">
-            <div class="field">
-              <label class="field-label" for="cfg-user-email">Email</label>
-              <input id="cfg-user-email" type="email" class="input"
-                     placeholder="alguien@example.test" autocomplete="off">
-            </div>
-            <div class="field">
-              <label class="field-label" for="cfg-user-role">Rol</label>
-              <select id="cfg-user-role" class="select">
-                <option value="owner">owner — todo</option>
-                <option value="member">member — correr y ver</option>
-              </select>
-            </div>
-          </div>
-          <div class="field-actions">
-            <button id="cfg-user-add" class="btn btn-primary">Guardar usuario</button>
-            <span id="cfg-user-msg" class="muted"></span>
-          </div>
-          <div class="table-wrap mt-4">
-            <table id="cfg-users-table">
-              <thead><tr><th class="th">email</th><th class="th">rol</th>
-                <th class="th">desde</th><th class="th"></th></tr></thead>
+          <div class="table-wrap mt-3">
+            <table id="team-table">
+              <thead><tr><th class="th">Persona</th><th class="th">Proyectos y alcance</th><th class="th">Estado</th><th class="th text-right">Acciones</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
         </section>
+        <section class="form-section mt-4">
+          <header class="form-section-head">
+            <h3 class="form-section-title">Agregar o editar integrante</h3>
+            <p class="form-section-sub">Usa el correo confirmado. Las cuentas nuevas comienzan sin proyectos asignados.</p>
+          </header>
+          <div id="team-form" class="form-grid"></div>
+          <div class="field-actions">
+            <button id="team-save" class="btn btn-primary">Guardar integrante</button>
+            <button id="team-cancel" class="btn" hidden>Cancelar edición</button>
+            <span id="team-message" class="muted" role="status" aria-live="polite"></span>
+          </div>
+        </section>
+      </section>
 
-        <h3 class="section-title">Efectivo ahora</h3>
-        <div id="cfg-effective-grid" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4"></div>
+      <!-- Mi cuenta: conexiones personales y correo privado del usuario actual. -->
+      <section id="tab-account" class="panel" hidden>
+        <header class="mb-5">
+          <h2 class="panel-title">Mi cuenta</h2>
+          <p class="panel-sub">Conecta tus cuentas personales. Gmail en esta vista no se guarda en Relay; los correos que pidas leer en un chat se comparten con ese hilo.</p>
+        </header>
+        <div id="account-root" aria-live="polite"></div>
       </section>
 
       <!-- Informe (UI 2026-07-20: gasto de tokens tipo registro) -->
@@ -1922,6 +1926,10 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="9.5" y="4" width="5" height="10" rx="1"/><rect x="16" y="4" width="5" height="13" rx="1"/></svg>
         Gestión
       </button>
+      <button id="tabbtn-team" aria-controls="tab-team" class="tab nav-item" data-tab="team">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20v-1.5a6.5 6.5 0 0 1 13 0V20zM16 4.8a3.5 3.5 0 0 1 0 6.5M18 14a5.5 5.5 0 0 1 3.5 5.2V20" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Equipo
+      </button>
       <button id="tabbtn-voice" aria-controls="tab-voice" class="tab nav-item" data-tab="voice">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Voz
@@ -1992,6 +2000,11 @@
       <button id="tabbtn-logs" aria-controls="tab-logs" class="tab nav-item" data-tab="logs">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5.5h14M5 9.5h10M5 13.5h14M5 17.5h7" stroke-linecap="round"/></svg>
         Logs
+      </button>
+      <div class="workspace-group-title">Cuenta</div>
+      <button id="tabbtn-account" aria-controls="tab-account" class="tab nav-item" data-tab="account">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0" stroke-linecap="round"/></svg>
+        Mi cuenta
       </button>
     </nav>
   <p id="workspace-empty-filter" class="muted" hidden>No hay herramientas con ese nombre.</p>

@@ -1,53 +1,11 @@
-"""MCP server stdio propio: GitHub REST API.
-
-4bis.relay — el relé lo registra como `github-mcp` (capability=github).
-
-Lectura + issues. Lee issues/PRs/commits, y desde 2026-08-26 tambien
-CREA issues y comentarios (`create_issue`, `comment_issue`). Sigue sin
-tocar codigo: nada de push, ni PR create, ni merge — para eso estan
-`git_flow` y el `gh` de la maquina.
-
-OJO, esto ya no es solo-lectura: escribe en repos de clientes. La fila
-de la tabla `mcp_servers` tiene `read_only=0` para que la Admin UI no
-mienta. Ese flag hoy es descriptivo —nadie lo aplica— asi que el unico
-freno real es apagar el MCP o no adjuntarlo al proyecto.
-
-Tools:
-  get_repo(owner, repo)              → metadata (stars, default_branch, etc)
-  list_issues(owner, repo,
-              state="open",
-              limit=20)               → issues (sin body, solo header)
-  get_issue(owner, repo, number)     → issue completo con body + comments
-  list_pulls(owner, repo,
-             state="open",
-             limit=20)                → PRs (sin diff, solo header)
-  get_pull(owner, repo, number)      → PR con body + archivos cambiados
-  list_commits(owner, repo,
-               branch=None,
-               limit=20)              → commits (sha + msg + author + date)
-  search_issues(owner, repo,
-                query, limit=20)      → search "is:issue is:open label:bug"
-
-Diseño:
-  - httpx async client (ya está en el venv).
-  - Auth via env: `GITHUB_TOKEN` (opcional, sin token = 60 req/h por IP).
-  - Singleton async con lock — el client se reusa.
-  - Errores → texto en el resultado (incluido rate limit).
-  - Auth: `GITHUB_TOKEN`, y si falta, el token del CLI `gh` — ver
-    `_resolver_token`. Sin token no se ven repos privados (GitHub
-    contesta 404, no 403).
-
-Por qué wrapper propio y no el `@modelcontextprotocol/server-github`
-oficial: mismo problema que con Postgres (oficial deprecated /
-depende de bun / etc). 80 líneas nuestras > 2000 líneas ajenas que
-no andan.
-"""
+"""GitHub MCP legado. Relay usa account_tools con OAuth por llamada.
+Este proceso solo admite un token y actor explícitos; nunca usa gh auth.
+No se comparte en el pool del Relay multiusuario."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 from typing import Optional
 
@@ -65,48 +23,14 @@ _client: Optional[httpx.AsyncClient] = None
 _lock = asyncio.Lock()
 
 
-#: Token resuelto una sola vez por proceso. `gh auth token` es un spawn, y
-#: en Windows eso cuesta ~200ms (cargar la imagen de gh.exe, NO antivirus
-#: — ver docstring de experts.cbm_cli_call) — mismo motivo por el que
-#: `relay.github` cachea sus llamadas a `gh`.
-_token_cache: Optional[str] = None
-
-
 def _resolver_token() -> str:
-    """`GITHUB_TOKEN` del entorno; si no está, el del CLI `gh`.
-
-    2026-08-26. Sin el fallback este MCP corría ANÓNIMO: 60 req/h y, lo
-    que de verdad importa, cero acceso a repos privados. GitHub contesta
-    404 —no 403— a un repo privado que no podés ver, así que el síntoma
-    era "el repo no existe" y el experto se ponía a probar variantes del
-    nombre. Por ejemplo, `AuroraDemo/auth-demo` puede devolver 404 sin
-    autenticación y 200 con un token que tenga acceso al repositorio.
-
-    Se resuelve desde `gh` y no desde un `GITHUB_TOKEN` en el .env
-    porque la máquina YA está autenticada —`git_flow` y `relay.github`
-    abren PRs con ese mismo token— y duplicar el secreto en un archivo
-    agrega una copia que vence y que hay que rotar aparte.
-    """
-    global _token_cache
-    if _token_cache is not None:
-        return _token_cache
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        try:
-            r = subprocess.run(["gh", "auth", "token"], capture_output=True,
-                               text=True, timeout=15)
-            if r.returncode == 0:
-                token = (r.stdout or "").strip()
-        except (OSError, subprocess.SubprocessError):
-            # `gh` no instalado o sin login: seguimos anónimos, que es el
-            # comportamiento que había. Nunca romper el MCP por esto.
-            token = ""
-    _token_cache = token
-    return token
-
+    """Sin actor explícito, nunca usar una credencial global de la máquina."""
+    if not os.environ.get("RELAY_GITHUB_ACTOR", "").strip():
+        return ""
+    return os.environ.get("GITHUB_TOKEN", "").strip()
 
 def _auth_headers() -> dict:
-    """Token opcional. Sin token = 60 req/h y sin repos privados."""
+    """Credencial explícita del actor; las llamadas sin ella se rechazan."""
     token = _resolver_token()
     h = {
         "Accept": "application/vnd.github+json",
@@ -121,6 +45,8 @@ def _auth_headers() -> dict:
 async def _get(path: str, params: Optional[dict] = None) -> tuple[int, dict | str]:
     """Wrapper sobre httpx con manejo de errores legible.
     Devuelve (status, body_dict_o_texto)."""
+    if not _resolver_token():
+        return 403, 'Conecta tu cuenta GitHub en Relay; la credencial de máquina no está permitida.'
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
@@ -151,6 +77,8 @@ async def _post(path: str, payload: dict) -> tuple[int, dict | str]:
 
     OJO: esto ya no es un MCP de lectura. Escribe en repos de clientes.
     """
+    if not _resolver_token():
+        return 403, 'Conecta tu cuenta GitHub en Relay; la credencial de máquina no está permitida.'
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
@@ -364,6 +292,8 @@ async def search_issues(owner: str, repo: str,
 
 
 async def _close() -> None:
+    if not _resolver_token():
+        return 403, 'Conecta tu cuenta GitHub en Relay; la credencial de máquina no está permitida.'
     global _client
     if _client is not None:
         try:

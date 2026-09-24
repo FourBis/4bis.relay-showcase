@@ -117,11 +117,11 @@ async def _make_client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Databas
         }
     )
     await db.set_config("DISCORD_GUILD_ID", "SYNTHETIC_GUILD")
+    await db.set_user_role("member@example.test", "member")
 
     from relay.server import create_app
 
     app = create_app()
-    identity.load_roles([])
     client = TestClient(TestServer(app))
     await client.start_server()
     return client, db, app

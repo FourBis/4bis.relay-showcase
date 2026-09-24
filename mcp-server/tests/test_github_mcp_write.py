@@ -35,7 +35,8 @@ def gm(monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     sys.modules["gm_write"] = mod
     spec.loader.exec_module(mod)
-    mod._token_cache = "gho_falso"
+    monkeypatch.setenv("RELAY_GITHUB_ACTOR", "actor@example.test")
+    monkeypatch.setenv("GITHUB_TOKEN", "gho_falso")
     return mod
 
 

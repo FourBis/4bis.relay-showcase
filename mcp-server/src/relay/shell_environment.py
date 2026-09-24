@@ -113,8 +113,8 @@ def bash_exe() -> str:
     return ""
 
 
-def _env_for_run(extra: Optional[dict] = None, *, kind: str = "") -> dict:
-    env = dict(os.environ)
+def _env_for_run(extra: Optional[dict] = None, *, kind: str = "", base_env: Optional[dict] = None) -> dict:
+    env = dict(os.environ if base_env is None else base_env)
     env.update(_NONINTERACTIVE_ENV)
     if extra:
         env.update({k: str(v) for k, v in extra.items()})

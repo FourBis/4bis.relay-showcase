@@ -229,83 +229,6 @@ async function loadBoards() {
   }
 }
 
-// ---- usuarios / roles (2026-08-21) ----
-//
-// La tabla `users` nombra a los OWNERS; quien no esta es member. El
-// backend recarga `identity._roles` en cada escritura, asi que el cambio
-// vale al instante y no al proximo reinicio — que es como estaba y por
-// eso "no habia gestion".
-
-export async function loadUsers() {
-  const tbody = $("#cfg-users-table tbody");
-  if (!tbody) return;
-  try {
-    const r = await api("users");
-    const users = r.users || [];
-    if (!users.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty">nadie cargado: todos entran como member</td></tr>`;
-      return;
-    }
-    const owners = users.filter((u) => u.role === "owner").length;
-    tbody.innerHTML = users.map((u) => {
-      const yo = u.email === r.me
-        ? ' <span class="badge dim" title="sos vos">vos</span>' : "";
-      // Al unico owner no se le ofrece el boton: el backend igual lo
-      // frena con un 409, pero un boton que solo sirve para mostrar un
-      // error es peor que no tenerlo.
-      const ultimo = u.role === "owner" && owners === 1;
-      const quitar = ultimo
-        ? '<span class="muted text-xs" title="es el unico owner">—</span>'
-        : `<button class="btn btn-xs danger user-del" data-email="${escape(u.email)}"
-             title="volver a member">quitar</button>`;
-      return `<tr>
-        <td><code>${escape(u.email)}</code>${yo}</td>
-        <td><span class="badge ${u.role === "owner" ? "ok" : "dim"}">${escape(u.role)}</span></td>
-        <td class="whitespace-nowrap">${escape((u.created_at || "").slice(0, 10) || "—")}</td>
-        <td>${quitar}</td>
-      </tr>`;
-    }).join("");
-    tbody.querySelectorAll(".user-del").forEach((b) =>
-      b.onclick = () => deleteUser(b.dataset.email));
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty fail">error: ${escape(e.message)}</td></tr>`;
-  }
-}
-
-async function saveUser() {
-  const email = ($("#cfg-user-email").value || "").trim().toLowerCase();
-  const role = $("#cfg-user-role").value;
-  const msg = $("#cfg-user-msg");
-  if (!email.includes("@")) { msg.textContent = "email invalido"; return; }
-  try {
-    await api("users", {
-      method: "PUT", body: JSON.stringify({ email, role }),
-    });
-    $("#cfg-user-email").value = "";
-    msg.textContent = `${email} → ${role} (aplica ya, sin reiniciar)`;
-    loadUsers();
-  } catch (e) {
-    msg.textContent = "error: " + e.message;
-  }
-}
-
-async function deleteUser(email) {
-  if (!await confirmModal({
-    title: `Quitar a ${email}`,
-    body: "Vuelve a ser `member`: va a poder correr expertos y ver los "
-      + "resultados, pero no tocar configuración.\n\nNo pierde el acceso al "
-      + "relay: eso lo decide la policy de Access, no esta tabla.",
-    confirmText: "Quitar", danger: true,
-  })) return;
-  try {
-    await api(`users/${encodeURIComponent(email)}`, { method: "DELETE" });
-    $("#cfg-user-msg").textContent = `${email} volvio a member`;
-    loadUsers();
-  } catch (e) {
-    $("#cfg-user-msg").textContent = "error: " + e.message;
-  }
-}
-
 // ---------------------------------------------------------------------
 // Plantillas de directiva del modo nocturno (2026-08-27)
 //
@@ -429,8 +352,6 @@ export function initConfig() {
   on("#tpl-nueva", "click", limpiarTemplate);
 
   onClick("#cfg-save", saveConfig);
-  onClick("#cfg-user-add", saveUser);
-  $("#cfg-user-email").onkeydown = (e) => { if (e.key === "Enter") saveUser(); };
   $("#cfg-relay-host").onchange = updateLanWarning;
   onClick("#cfg-gh-load", loadBoards);
 

@@ -240,7 +240,7 @@ async def api_metrics_summary(request: web.Request) -> web.Response:
         return win["error"]
     status = q.get("status", "").strip()
     role = q.get("role", "").strip()
-    return web.json_response(await db.metrics_summary(
+    data = await db.metrics_summary(
         win["days"],
         from_date=win["from_date"],
         to_date=win["to_date"],
@@ -248,7 +248,12 @@ async def api_metrics_summary(request: web.Request) -> web.Response:
         status=status if status in _METRICS_STATUSES else "",
         provider=q.get("provider", "").strip(),
         role=role if role in _METRICS_ROLES else "",
-    ))
+    )
+    from . import identity
+    if identity.role_of(request) != "owner":
+        # Los mensajes de error pueden contener código, rutas o datos de tools.
+        data["error_breakdown"] = []
+    return web.json_response(data)
 
 async def api_metrics_trends(request: web.Request) -> web.Response:
     """GET /admin/api/metrics/trends — slice diario para gráfica.

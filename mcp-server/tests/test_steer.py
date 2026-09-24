@@ -292,7 +292,7 @@ class TestSteerEndpoint(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_queue_404_and_409(self) -> None:
-        from relay.server import create_app, PROGRESS_KEY
+        from relay.server import create_app, PROGRESS_KEY, DB_KEY
 
         async def fake_send(self_, agent_id, kind, message, metadata=None):
             return True
@@ -307,9 +307,13 @@ class TestSteerEndpoint(unittest.IsolatedAsyncioTestCase):
 
                 cb = progress.make_progress_callback(
                     store=app[PROGRESS_KEY], notify=None,
-                    chat_id="cafe1234", target="demo", model="test")
+                    chat_id=await app[DB_KEY].create_chat(
+                        project_slug="demo", source="test", author="test",
+                        target="demo", requested_by="owner"),
+                    target="demo", model="test")
                 self.assertTrue(callable(cb))
-                rp = app[PROGRESS_KEY]["cafe1234"]
+                chat_id = next(iter(app[PROGRESS_KEY]))
+                rp = app[PROGRESS_KEY][chat_id]
 
                 # body vacío → 400 (no encolamos ruido)
                 r = await client.post("/experts/steer/cafe1234",
@@ -317,7 +321,7 @@ class TestSteerEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status, 400)
 
                 # por prefijo, como /status y /cancel
-                r = await client.post("/experts/steer/cafe12",
+                r = await client.post(f"/experts/steer/{chat_id[:6]}",
                                       json={"message": NUDGE})
                 self.assertEqual(r.status, 200)
                 self.assertEqual((await r.json())["queued"], 1)
@@ -325,7 +329,17 @@ class TestSteerEndpoint(unittest.IsolatedAsyncioTestCase):
 
                 # run terminado → 409: ya no es un steer, es un turno nuevo
                 rp.finished = True
-                r = await client.post("/experts/steer/cafe1234",
+                r = await client.post(f"/experts/steer/{chat_id}",
+                                      json={"message": NUDGE})
+                self.assertEqual(r.status, 409)
+
+                other_id = await app[DB_KEY].create_chat(
+                    project_slug="demo", source="test", author="test",
+                    target="demo", requested_by="alice@example.test")
+                progress.make_progress_callback(
+                    store=app[PROGRESS_KEY], notify=None, chat_id=other_id,
+                    target="demo", model="test")
+                r = await client.post(f"/experts/steer/{other_id}",
                                       json={"message": NUDGE})
                 self.assertEqual(r.status, 409)
 

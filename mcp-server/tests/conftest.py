@@ -80,11 +80,16 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
     monkeypatch.setenv("GOOGLE_REAL", "0")  # Las pruebas optan por Google real explícitamente.
     # El warmup es independiente del watcher y antes iniciaba el CBM real
     # desde cada TestServer, aun con CBM_AUTO_WATCH=0.
-    from relay import config, server_lifecycle
+    from relay import config, server_lifecycle, user_accounts
     from relay import shell
     from relay.db import Database
 
-    config.set_runtime_config({})
+    # Nunca leer OAuth real del HKCU/entorno de la máquina de desarrollo.
+    # Los tests OAuth setean sus valores explícitos después de este fixture.
+    for name in user_accounts.OAUTH_CONFIG_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(user_accounts, "_read_user_environment", lambda: {})
+    monkeypatch.setattr(user_accounts, "_oauth_config", {})
 
     # ponytail: tests use temporary schema defaults because runtime settings
     # intentionally ignore environment variables. No writes to the real home.
@@ -99,6 +104,7 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
         monkeypatch.setitem(config.PANEL_SETTINGS, key, {
             **config.PANEL_SETTINGS[key], "default": str(_fourbis_tmp / dirname),
         })
+    config.set_runtime_config({})
 
     async def no_warmup(app):
         pass

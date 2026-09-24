@@ -1,5 +1,5 @@
 "use strict";
-// ponytail: three fixed, local scenarios. A real Relay connection belongs in
+// ponytail: fixed, local scenarios. A real Relay connection belongs in
 // the installed application, never in this public simulation.
 let english = new URLSearchParams(location.search).get("lang") === "en";
 const $ = selector => document.querySelector(selector);
@@ -8,7 +8,7 @@ const initialChats = () => ({
   docs: {name: null, draft: "", messages: [], open: true},
   access: {name: null, draft: "", messages: [], open: false},
 });
-let chats = initialChats(), active = "docs", turns = 1, feedback = false, renaming;
+let chats = initialChats(), active = "docs", turns = 1, feedback = false, split = false, continued = false, published = false, githubConnected = false, writeEnabled = false, alexProjects = new Set(), renaming;
 const chatLabel = id => chats[id].name || (id === "docs" ? tr("Documentación", "Documentation") : tr("Revisar accesos", "Access review"));
 const windows = $("#chat-windows");
 const dialog = $("#rename-dialog");
@@ -101,11 +101,37 @@ function renderChats(focus = false) {
 
 function renderTask() {
   $("#turn-count").textContent = turns;
-  $("#resume-result").textContent = turns > 1 ? tr("Misma rama, mismo workspace. El siguiente turno continúa el historial de ejemplo.", "Same branch, same workspace. The next turn continues the example history.") : "";
+  $("#resume-result").textContent = turns > 1 ? tr("Misma rama y workspace ficticios; el plan sigue visible.", "Same fictional branch and workspace; the plan stays visible.") : "";
   $("#review-step").classList.toggle("reviewed", feedback);
-  $("#review-copy").textContent = feedback ? tr("Feedback aplicado en la misma PR #17. Nueva validación pendiente.", "Feedback applied to the same PR #17. New validation pending.") : tr("La PR #17 conserva su identidad.", "PR #17 keeps its identity.");
-  $("#feedback-result").textContent = feedback ? tr("Simulación completada. No se creó ni modificó ninguna PR real.", "Simulation complete. No real PR was created or changed.") : "";
-  $("#feedback").disabled = feedback;
+  $("#review-copy").textContent = published ? tr("PR de ejemplo publicada; no se hizo merge ni integración.", "Example PR published; no merge or integration took place.") : tr("Sin publicar. No se simula merge ni integración.", "Not published. No merge or integration is simulated.");
+  $("#feedback-result").textContent = feedback ? tr("Feedback ficticio recibido; no se creó ni modificó ninguna PR real.", "Fictional feedback received; no real PR was created or changed.") : "";
+  $("#feedback").disabled = !published || feedback;
+  $("#split-task").disabled = split;
+  $("#split-result").textContent = split ? tr("Presupuesto agotado: el padre se sustituyó una vez por cuatro subtareas; la prueba dependiente espera a las cuatro.", "Budget exhausted: the parent was replaced once by four subtasks; the dependent check waits for all four.") : "";
+  $("#subtask-count").textContent = split ? "4" : "0";
+  $("#graph-before").hidden = split;
+  $("#graph-after").hidden = !split;
+  const children = $("#task-children");
+  children.replaceChildren();
+  if (split) {
+    for (const [name, status] of [[tr("Migrar base de navegación", "Migrate navigation shell"), tr("Completada", "Completed")], [tr("Integrar rutas nuevas", "Integrate new routes"), tr("En curso", "In progress")], [tr("Ajustar componentes", "Update components"), tr("Pendiente", "Pending")], [tr("Actualizar pruebas visuales", "Update visual checks"), tr("Pendiente", "Pending")]]) {
+      const item = node("li"); item.append(node("strong", name), node("span", status)); children.append(item);
+    }
+  }
+  const projectNames = {web: tr("Migración del cliente web", "Web client migration"), shared: tr("Componentes compartidos", "Shared components"), docs: tr("Documentación", "Documentation")};
+  $("#alex-projects").textContent = alexProjects.size ? [...alexProjects].map(id => projectNames[id]).join(", ") : tr("Ninguno", "None");
+  $("#allow-write").disabled = !alexProjects.has("web") || !githubConnected || writeEnabled;
+  $("#connect-github").disabled = githubConnected;
+  $("#continue-task").disabled = !writeEnabled || continued;
+  $("#assignment-state").textContent = alexProjects.has("web") ? tr("Proyecto web asignado", "Web project assigned") : tr("Solo lectura", "Read-only");
+  $("#repo-state").textContent = githubConnected ? tr("Cuenta personal conectada (simulación)", "Personal account linked (simulation)") : tr("No conectada", "Not connected");
+  $("#write-state").textContent = writeEnabled ? tr("Habilitado explícitamente", "Explicitly enabled") : tr("Deshabilitado", "Disabled");
+  $("#execution-state").textContent = continued ? tr("Continuada explícitamente", "Explicitly continued") : tr("En pausa", "Paused");
+  $("#team-result").textContent = continued ? tr("Alex continuó la tarea explícitamente. No hubo ejecución automática.", "Alex explicitly continued the task. No autorun took place.") : "";
+  $("#assignment-result").textContent = alexProjects.size ? tr("Cambios guardados para Alex.", "Changes saved for Alex.") : "";
+  $("#github-result").textContent = githubConnected ? tr("Cuenta personal de Alex conectada en esta simulación.", "Alex's personal account is linked in this simulation.") : "";
+  $("#publish-task").disabled = !continued || published;
+  $("#publish-result").textContent = published ? tr("Admin Ana publicó la PR ficticia. Sigue sin merge ni integración.", "Admin Ana published the fictional PR. It remains unmerged and not integrated.") : "";
 }
 
 function translate() {
@@ -118,7 +144,7 @@ function translate() {
   }
   $("#language").textContent = english ? "ES" : "EN";
   $("#language").setAttribute("aria-label", english ? "Cambiar a español" : "Switch to English");
-  document.title = tr("FourBis Relay — Conversaciones que conservan el trabajo", "FourBis Relay — Conversations that keep the work");
+  document.title = tr("FourBis Relay — Tareas largas que se adaptan", "FourBis Relay — Long tasks that adapt");
   renderChats(); renderTask();
 }
 
@@ -161,9 +187,17 @@ tabs.forEach((button, index) => {
   });
 });
 $("#resume").addEventListener("click", () => { turns++; renderTask(); });
+$("#split-task").addEventListener("click", () => { split = true; renderTask(); });
+$("#edit-alex").addEventListener("click", () => { $("#edit-project-panel").hidden = false; for (const option of $("#project-picker").options) option.selected = alexProjects.has(option.value); $("#project-picker").focus(); });
+$("#save-projects").addEventListener("click", () => { alexProjects = new Set([...$("#project-picker").selectedOptions].map(option => option.value)); if (!alexProjects.has("web")) { writeEnabled = false; continued = false; } $("#edit-project-panel").hidden = true; renderTask(); });
+$("#connect-github").addEventListener("click", () => { githubConnected = true; renderTask(); });
+$("#allow-write").addEventListener("click", () => { if (alexProjects.has("web") && githubConnected) writeEnabled = true; renderTask(); });
+$("#continue-task").addEventListener("click", () => { continued = true; renderTask(); });
+$("#publish-task").addEventListener("click", () => { published = true; renderTask(); });
 $("#feedback").addEventListener("click", () => { feedback = true; renderTask(); });
 $("#reset").addEventListener("click", () => {
-  chats = initialChats(); active = "docs"; turns = 1; feedback = false;
+  chats = initialChats(); active = "docs"; turns = 1; feedback = false; split = false; continued = false; published = false; githubConnected = false; writeEnabled = false; alexProjects = new Set();
+  $("#edit-project-panel").hidden = true; for (const option of $("#project-picker").options) option.selected = false;
   renderChats(); renderTask(); selectScene("chats");
 });
 translate();

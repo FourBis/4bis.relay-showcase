@@ -47,7 +47,7 @@ async def test_sin_headers_es_owner():
 async def test_email_sin_jwt_es_403():
     """El header de mail solo es texto plano: quien no cruzó el portón
     puede escribirlo a mano. Sin JWT no vale."""
-    req = _req({"Cf-Access-Authenticated-User-Email": "intruso@ejemplo.com"})
+    req = _req({"Cf-Access-Authenticated-User-Email": "intruso@example.test"})
     with pytest.raises(web.HTTPForbidden):
         await identity.access_identity(req, _ok_handler)
 
@@ -100,14 +100,14 @@ def test_verify_falla_antes_de_red_si_falta_configuracion(monkeypatch):
 
 def _claims(**over) -> dict:
     now = int(time.time())
-    base = {"email": "user@example.com", "aud": identity.AUD,
+    base = {"email": "user@example.test", "aud": identity.AUD,
             "iat": now, "exp": now + 3600}
     base.update(over)
     return base
 
 
 def test_verify_acepta_el_token_de_la_app(firma):
-    assert identity.verify(firma(_claims())) == "user@example.com"
+    assert identity.verify(firma(_claims())) == "user@example.test"
 
 
 def test_verify_rechaza_otra_aud(firma):
@@ -141,9 +141,11 @@ def test_verify_tolera_reloj_atrasado(firma):
 
 @pytest.fixture
 def roles(monkeypatch):
-    """Un owner y nadie más: el resto cae en member por ausencia."""
+    """Equipo explícito: Access autentica, la tabla autoriza."""
     monkeypatch.setattr(
-        identity, "_roles", {"jefa@example.test": identity.OWNER_ROLE})
+        identity, "_roles", {"alex@example.test": identity.OWNER_ROLE,
+                            "sam@example.test": "member", "taylor@example.test": "member"})
+    monkeypatch.setattr(identity, "_disabled", set())
 
 
 def _routed(method: str, canonical: str, quien: str):
@@ -170,13 +172,14 @@ async def test_localhost_sigue_siendo_owner(roles):
 
 
 async def test_owner_de_la_tabla_puede_todo(roles):
-    req = _routed("PUT", "/admin/api/config", "jefa@example.test")
+    req = _routed("PUT", "/admin/api/config", "alex@example.test")
     assert (await identity.require_role(req, _handler)).status == 200
 
 
-async def test_desconocido_es_member(roles):
+async def test_desconocido_no_recibe_acceso_automatico(roles):
     req = _routed("GET", "/chats", "nuevo@example.test")
-    assert identity.role_of(req) == identity.MEMBER_ROLE
+    assert identity.role_of(req) == "unregistered"
+    assert (await identity.require_role(req, _handler)).status == 403
 
 
 async def test_member_puede_correr_expertos(roles):
@@ -186,11 +189,11 @@ async def test_member_puede_correr_expertos(roles):
                          ("GET", "/chats/{id}/md"),
                          ("POST", "/questions/{q_id}/answer"),
                          # 2026-08-18: sin estas dos un member no puede
-                         # ni abrir un chat ni cerrarlo. Javier se comió
+                         # ni abrir un chat ni cerrarlo. Una persona se topó
                          # el 403 en POST /conversations el primer día.
                          ("POST", "/conversations"),
                          ("POST", "/conversations/{id}/close")]:
-        req = _routed(method, path, "pepe@example.test")
+        req = _routed(method, path, "sam@example.test")
         resp = await identity.require_role(req, _handler)
         assert resp.status == 200, f"{method} {path} deberia estar permitido"
 
@@ -201,7 +204,7 @@ async def test_member_ve_el_plan_de_su_propio_hilo(roles):
     for method, path in [("GET", "/conversations/{id}/plan"),
                          ("POST", "/graphs/{id}/resume"),
                          ("POST", "/graphs/{id}/cancel")]:
-        req = _routed(method, path, "pepe@example.test")
+        req = _routed(method, path, "sam@example.test")
         resp = await identity.require_role(req, _handler)
         assert resp.status == 200, f"{method} {path} deberia estar permitido"
 
@@ -212,7 +215,7 @@ async def test_member_puede_contestar_preguntas_de_night(roles):
     for method, path in [("GET", "/admin/api/night/questions"),
                          ("POST", "/admin/api/night/questions/{q_id}/answer"),
                          ("POST", "/admin/api/night/questions/{q_id}/skip")]:
-        req = _routed(method, path, "pepe@example.test")
+        req = _routed(method, path, "sam@example.test")
         resp = await identity.require_role(req, _handler)
         assert resp.status == 200, f"{method} {path} deberia estar permitido"
 
@@ -234,7 +237,7 @@ async def test_member_no_toca_lo_que_manda(roles):
                          ("POST", "/admin/api/restart"),
                          ("POST", "/commands/{name}/run"),
                          ("DELETE", "/conversations/{id}/branch")]:
-        req = _routed(method, path, "pepe@example.test")
+        req = _routed(method, path, "sam@example.test")
         resp = await identity.require_role(req, _handler)
         assert resp.status == 403, f"{method} {path} NO deberia pasar"
 
@@ -243,16 +246,16 @@ async def test_member_no_escribe_por_una_ruta_que_lee(roles):
     """La allowlist es por (método, ruta): poder leer un proyecto no
     habilita el PATCH sobre el mismo path."""
     assert (await identity.require_role(
-        _routed("GET", "/admin/api/projects/{slug}", "pepe@example.test"),
+        _routed("GET", "/admin/api/projects/{slug}", "sam@example.test"),
         _handler)).status == 200
     assert (await identity.require_role(
-        _routed("PATCH", "/admin/api/projects/{slug}", "pepe@example.test"),
+        _routed("PATCH", "/admin/api/projects/{slug}", "sam@example.test"),
         _handler)).status == 403
 
 
 async def test_ruta_nueva_nace_owner_only(roles):
     """El punto de la allowlist: lo que se agregue mañana no se cuela."""
-    req = _routed("POST", "/admin/api/lo-que-venga", "pepe@example.test")
+    req = _routed("POST", "/admin/api/lo-que-venga", "sam@example.test")
     assert (await identity.require_role(req, _handler)).status == 403
 
 
@@ -262,7 +265,7 @@ async def test_path_inexistente_da_404_y_no_403(roles):
     from unittest import mock
     req = make_mocked_request("GET", "/favicon.ico")
     req.match_info.route.resource = None       # SystemRoute del 404
-    req[identity.IDENTITY_KEY] = "pepe@example.test"
+    req[identity.IDENTITY_KEY] = "sam@example.test"
     assert (await identity.require_role(req, _handler)).status == 200
 
 
@@ -279,7 +282,7 @@ async def test_el_chat_completo_de_un_member(roles):
              ("GET", "/conversations/{id}/pr")]
     for method, path in flujo:
         resp = await identity.require_role(
-            _routed(method, path, "javier.davis@example.test"), _handler)
+            _routed(method, path, "taylor@example.test"), _handler)
         assert resp.status == 200, f"{method} {path} corta el flujo del chat"
 
 
@@ -294,5 +297,5 @@ async def test_la_allowlist_existe_de_verdad():
         if r.resource is not None:
             metodo = "GET" if r.method == "HEAD" else r.method
             reales.add((metodo, r.resource.canonical))
-    huerfanas = identity.MEMBER_ALLOWED - reales
+    huerfanas = (identity.MEMBER_ALLOWED | identity._FINANCE_ROUTES | identity._TEAM_ROUTES | identity._ACCOUNT_ROUTES) - reales
     assert not huerfanas, f"la allowlist nombra rutas inexistentes: {huerfanas}"

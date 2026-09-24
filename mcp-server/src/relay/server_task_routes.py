@@ -12,6 +12,25 @@ from aiohttp import web
 from . import identity, task_pr, task_service, task_workspace
 from .app_state import DB_KEY, GRAFOS_KEY
 from .server_common import _require_auth
+from .user_accounts import AccountError
+
+
+async def _task_snapshot(request, db, cid):
+    state = await task_service.snapshot(db, cid)
+    if not state:
+        return state
+    conv = await db.get_conversation(cid)
+    project = await db.get_project(conv["project_slug"]) if conv else None
+    actions = []
+    owner = identity.role_of(request) == "owner"
+    if owner:
+        actions = ["continue", "pause", "cancel", "publish", "track"]
+    elif identity.can_write_project(request, project):
+        actions = ["continue", "pause", "cancel"]
+    if state.get("mode") == "read_only" and identity.can_write_project(request, project):
+        actions.append("enable_write")
+    visible = task_service.visible_task(state, owner=owner)
+    return {**visible, "allowed_actions": actions}
 
 
 @_require_auth
@@ -28,9 +47,7 @@ async def task_get(request):
                 await task_workspace.inspect_workspace(db, project, cid)
             except (RuntimeError, OSError):
                 pass  # el diagnóstico durable forma parte del estado
-    return web.json_response(task_service.visible_task(
-        await task_service.snapshot(db, cid),
-        owner=identity.role_of(request) == identity.OWNER_ROLE))
+    return web.json_response(await _task_snapshot(request, db, cid))
 
 
 def _bounded(body, key, default, lower, upper):
@@ -94,9 +111,6 @@ async def task_action(request):
 
 async def _apply_task_action(request):
     db, cid = request.app[DB_KEY], request.match_info["id"]
-    # La ruta también es owner-only en el middleware; mantener el borde al reutilizar handler.
-    if identity.role_of(request) != "owner":
-        return web.json_response({"error": "Los controles de tarea requieren owner"}, status=403)
     try:
         body = await request.json()
         if not isinstance(body, dict):
@@ -111,11 +125,23 @@ async def _apply_task_action(request):
         if not project or not project.get("enabled"):
             raise ValueError("El proyecto está deshabilitado o no existe")
         action = body.get("action")
+        actions = (await _task_snapshot(request, db, cid)).get("allowed_actions", [])
+        if action not in actions:
+            return web.json_response({"error": "No tienes permiso para esta acción de la tarea."}, status=403)
         terminal = state.get("state") in {"cancelled", "finished", "cleaned"}
         runners = request.app.get(task_service.TASK_RUNNERS_KEY, {})
         writer_active = bool(runners.get(cid) and not runners[cid].done())
         processing = bool(await db.list_conversation_events(cid, states=["processing"]))
-        if action == "pause":
+        if action == "enable_write":
+            if terminal or writer_active or processing:
+                raise ValueError("La tarea debe estar detenida y sin ejecuciones antes de habilitar escritura")
+            graph = await db.active_task_graph(cid)
+            if graph and graph["id"] in request.app.get(GRAFOS_KEY, {}):
+                raise ValueError("Espera a que el plan deje de ejecutar antes de habilitar escritura")
+            if await db.list_conversation_events(cid, states=["pending", "uncertain"]):
+                raise ValueError("Reconcilia los eventos pendientes antes de habilitar escritura")
+            await task_workspace.initialize_task(db, project, cid, promote=True)
+        elif action == "pause":
             if terminal:
                 raise ValueError("La tarea ya terminó")
             await db.update_conversation_task(cid, state="paused", tracking={"enabled": False})
@@ -146,14 +172,16 @@ async def _apply_task_action(request):
                 raise ValueError("Una consulta no publica cambios")
             if await db.run("SELECT id FROM conversation_events WHERE conversation_id=? AND event_key=?",
                             (cid, "publish:" + key)):
-                return web.json_response(await task_service.snapshot(db, cid))
+                return web.json_response(await _task_snapshot(request, db, cid))
             if state.get("state") in task_service.STOPPED:
-                raise ValueError("Reconciliá o continuá la tarea antes de publicar")
+                raise ValueError("Reconcilia o continúa la tarea antes de publicar")
             if not writer_active and not processing:
                 await db.update_conversation_task(cid, publish_allowed=True, state="ready")
             else:
                 await db.update_conversation_task(cid, publish_allowed=True)
-            await db.enqueue_conversation_event(cid, "publish:" + key, "publish", {"role": "owner"})
+            await db.enqueue_conversation_event(
+                cid, "publish:" + key, "publish",
+                {"role": "owner", "requested_by": identity.requester(request)})
             if not writer_active and not processing:
                 task_service.start_pending(request.app, cid)
         elif action == "track":
@@ -183,7 +211,7 @@ async def _apply_task_action(request):
                     if previous.get("key") == key and previous.get("payload") != receipt:
                         raise ValueError("request_id ya usado con distinto payload")
                     if previous.get("key") == key:
-                        return web.json_response(await task_service.snapshot(db, cid))
+                        return web.json_response(await _task_snapshot(request, db, cid))
                 patch = {"tracking": tracking, "tracking_receipts": {receipt_id: {"key": key, "payload": receipt}},
                          "tracking_error": "", "tracking_stop": "", "error": ""}
                 updated = await db.run("UPDATE conversations SET task_json=json_patch(task_json, ?) "
@@ -197,6 +225,12 @@ async def _apply_task_action(request):
                 await db.update_conversation_task(cid, tracking={"enabled": False})
         else:
             raise ValueError("Acción desconocida")
-        return web.json_response(await task_service.snapshot(db, cid))
+        return web.json_response(await _task_snapshot(request, db, cid))
+    except AccountError as exc:
+        return web.json_response({"error": str(exc),
+                                  "connect_url": "/admin/#/account",
+                                  "conversation_id": cid}, status=422)
     except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
-        return web.json_response({"error": str(exc), "conversation_id": cid}, status=422)
+        message = str(exc) if identity.role_of(request) == identity.OWNER_ROLE else (
+            "No se pudo completar la acción. Revisa los permisos y el estado de la tarea.")
+        return web.json_response({"error": message, "conversation_id": cid}, status=422)

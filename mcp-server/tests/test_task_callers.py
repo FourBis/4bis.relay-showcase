@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from pydantic_ai.usage import RunUsage
 
-from relay import expert_iteration, file_tools, identity, planificador, server, task_service
+from relay import expert_iteration, file_tools, github_credentials, identity, planificador, server, task_service
 from relay.app_state import DB_KEY, GRAFOS_KEY, PROGRESS_KEY, RUNNING_KEY
 from relay.db import Database
 from relay.execution_policy import ExecutionPolicy
@@ -92,6 +92,11 @@ async def test_member_cannot_pause_write_task_through_legacy_cancel(tmp_path, mo
 
 
 async def test_graph_without_conversation_plans_inside_persisted_workspace(tmp_path, monkeypatch):
+    async def fake_github_account(provider):
+        assert provider == "github"
+        return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+    monkeypatch.setattr(
+        github_credentials.user_accounts, "require_account", fake_github_account)
     source = make_repo(tmp_path)
     db = Database(path=tmp_path / "relay.db")
     await db.init_schema()

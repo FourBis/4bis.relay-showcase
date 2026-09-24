@@ -23,20 +23,23 @@ class ExecutionPolicy:
     read_only: bool
     sql_read_only: bool
     unrestricted_tools: bool
+    shell_allowed: bool
 
     @classmethod
-    def for_run(cls, defaults: dict, reserved=()):
+    def for_run(cls, defaults: dict, reserved=(), *, code_write=False, role=None):
         """Politica de un run. `reserved` NO restringe: ver abajo.
 
-        `unrestricted_tools=False` saca la shell y los MCP externos del
-        run entero. Es un martillo, y por eso solo lo levantan las dos
+        `unrestricted_tools=False` saca los MCP externos del run.
+        `shell_allowed` permite comandos de código a Dev asignados;
+        no concede escritura SQL ni operaciones de cuentas externas.
+        Las restricciones que siempre se conservan son las dos
         cosas que de verdad son un limite de confianza:
 
         - `read_only` / `rutas_vedadas` del proyecto: la shell no sabe
           respetarlas —no hay forma de acotarle las rutas a un comando
           arbitrario—, asi que la unica opcion honesta es no dartela.
-        - un rol que no es `owner`: es el permiso del humano que pidio
-          el run, y tiene que valer aunque el agente cambie de tool.
+        - un rol sin asignación explícita: el permiso del humano debe
+          valer aunque el agente cambie de tool.
 
         `reserved` son los archivos que OTRA tarea del mismo grafo tiene
         tomados. Eso es coordinacion, no confianza: dice "no escribas
@@ -56,8 +59,25 @@ class ExecutionPolicy:
         working tree. Si algun dia se afloja aquella regla, este agujero
         se reabre.
         """
-        read_only = bool(defaults.get("read_only"))
-        member = request_role.get() != "owner"
+        member = (role or request_role.get()) != "owner"
+        read_only = bool(defaults.get("read_only")) or (member and not code_write)
         feedback = bool(defaults.get("task_feedback"))
         restricted = read_only or member or feedback or bool(defaults.get("rutas_vedadas"))
-        return cls(read_only, read_only or member or feedback, not restricted)
+        shell = not (read_only or feedback or bool(defaults.get("rutas_vedadas")))
+        return cls(read_only, read_only or member or feedback, not restricted, shell)
+
+    @classmethod
+    async def for_project(cls, db, project: dict, reserved=()):
+        from . import identity, user_accounts
+        role = request_role.get()
+        actor = user_accounts.current_actor.get()
+        granted = role == "owner"
+        if actor and actor[1] != "owner":
+            rows = await db.list_users() if db is not None else []
+            user = next((row for row in rows if row["email"] == actor[1]), {})
+            role = user.get("role", "unregistered") if user.get("enabled", True) else "disabled"
+            granted = identity.user_can_write_project(user, project.get("slug", ""))
+        if project.get("_task_mode") == "write" and not granted:
+            raise RuntimeError("Ya no tienes permiso de escritura en este proyecto; revisa la asignación en Equipo.")
+        return cls.for_run(project.get("defaults_json") or {}, reserved,
+                           code_write=granted, role=role)

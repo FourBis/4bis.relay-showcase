@@ -40,7 +40,7 @@ def _horas_legibles(ms: int) -> str:
     return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
-async def _finalize_pr_bg(db: Database, conv_id: str, project_slug: str,
+async def _finalize_pr_bg_bound(db: Database, conv_id: str, project_slug: str,
                           project: dict, branch: str, summary: str,
                           issue_number: Optional[int] = None) -> None:
     """Verify + PR a develop, fuera del request de /close.
@@ -123,6 +123,17 @@ async def _finalize_pr_bg(db: Database, conv_id: str, project_slug: str,
                            branch, cleanup["error"])
     logger.info("PR background conv=%s → %s", conv_id[:8],
                 outcome.get("pr_url") or outcome.get("error"))
+
+
+async def _finalize_pr_bg(db: Database, conv_id: str, project_slug: str,
+                          project: dict, branch: str, summary: str,
+                          issue_number: Optional[int] = None,
+                          requested_by: Optional[str] = None) -> None:
+    """Run the close PR job with the conversation's durable actor."""
+    from . import user_accounts
+    with user_accounts.bind_actor(db, requested_by):
+        await _finalize_pr_bg_bound(db, conv_id, project_slug, project, branch,
+                                    summary, issue_number=issue_number)
 
 
 async def _compact_and_store(db: Database, conv_id: str,

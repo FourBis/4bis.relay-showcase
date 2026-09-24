@@ -5,8 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from relay import task_pr, task_service, task_workspace
+from relay import task_pr, task_service, task_workspace, github_credentials
 from tests.test_task_continuity import create_task, git, make_client
+
+
+async def _fake_require_account(provider):
+    assert provider == "github"
+    return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+
+
+@pytest.fixture(autouse=True)
+def explicit_github_account(monkeypatch):
+    monkeypatch.setattr(github_credentials.user_accounts, "require_account", _fake_require_account)
 
 
 def remote_head(repo: Path, branch: str) -> str:

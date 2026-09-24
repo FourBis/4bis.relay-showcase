@@ -134,6 +134,8 @@ async def _warm_cbm_session(app: web.Application) -> None:
 
 
 async def _on_startup(app: web.Application) -> None:
+    from . import user_accounts
+    user_accounts.load_oauth_config()
     from . import config as relay_config
     # Health-check al iniciar (bug fix 2026-07-08): avisar de qué
     # ejecutable está cargando este código. Si NO es el venv del

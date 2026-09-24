@@ -228,7 +228,8 @@ class Permisos:
         if not self.escribir:
             raise SinPermiso(
                 f"este proyecto está en modo solo-lectura: no puedo {que}. "
-                "El humano lo cambia en la Admin UI (proyecto → read_only).")
+                "El humano revisa la asignación del proyecto en Equipo y el modo de esta tarea. "
+                "Cambiar read_only del proyecto no habilita una tarea que nació solo lectura.")
 
     def exigir_escribible(self, p: Path) -> None:
         """Lanza si `p` cae en una raíz de solo lectura.

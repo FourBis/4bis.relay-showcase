@@ -5,6 +5,23 @@ import logging
 
 logger = logging.getLogger("relay.git_flow")
 
+_GIT_NETWORK = frozenset({"fetch", "push", "pull", "clone", "ls-remote", "submodule"})
+
+
+def _git_env(args: tuple[str, ...]) -> dict | None:
+    index = 0
+    while index < len(args):
+        option = args[index]
+        if option in {"-c", "-C"}:
+            index += 2
+            continue
+        if option.startswith("-c") or option.startswith("-C"):
+            index += 1
+            continue
+        break
+    verb = args[index] if index < len(args) else ""
+    return {"kind": "network"} if verb in _GIT_NETWORK else ({"kind": "commit"} if verb == "commit" else None)
+
 GIT_TIMEOUT_S = 60.0
 PUSH_TIMEOUT_S = 120.0
 GH_TIMEOUT_S = 60.0
@@ -45,9 +62,15 @@ async def _git_out(repo: str, *args: str,
     name-only, ls-files, el texto del diff) usa esta.
     """
     try:
+        env = None
+        kind = _git_env(args)
+        if kind:
+            from .github_credentials import git_env
+            env = await git_env(commit=kind["kind"] == "commit")
         proc = await asyncio.create_subprocess_exec(
             "git", *args, cwd=repo,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **({"env": env} if env is not None else {}))
     except (OSError, ValueError) as e:
         return 127, "", f"git spawn falló (cwd={repo!r}): {e}"
     try:
@@ -71,9 +94,14 @@ async def _exec(repo: str, program: str, *args: str,
     """Como _git pero para cualquier programa (p.ej. `gh`). Sin shell: cada
     arg va literal, así el título/body del PR no necesitan escaping."""
     try:
+        env = None
+        if program == "gh":
+            from .github_credentials import gh_env
+            env = await gh_env()
         proc = await asyncio.create_subprocess_exec(
             program, *args, cwd=repo,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            **({"env": env} if env is not None else {}))
     except (OSError, ValueError) as e:
         return 127, f"{program} spawn falló (cwd={repo!r}): {e}"
     try:

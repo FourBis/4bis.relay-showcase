@@ -10,6 +10,13 @@ La decisión reutiliza la API y los módulos existentes. No requirió migracione
 
 ## Continuidad y evidencia
 
+El plan también puede cambiar durante la ejecución: cuando una tarea llega a
+su presupuesto con trabajo pendiente, Relay puede crear subtareas a partir de
+su resultado parcial y actualizar las dependencias. El [caso de trabajo largo](LONG_RUNNING_WORK.md)
+describe una observación local, el mecanismo y su límite de una subdivisión por
+padre. [Equipo](TEAM_ACCESS.md) hace explícito quién puede trabajar cada proyecto
+y [Mi cuenta](USER_ACCOUNTS.md) mantiene la atribución personal de las acciones.
+
 Para tareas de escritura, Relay puede asociar una conversación con un worktree y mantenerlo entre mensajes. La validación se relaciona con el commit probado; si cambia el contenido o el `HEAD`, esa evidencia queda obsoleta. La cola de eventos y sus recibos viven en SQLite para conservar el orden y permitir reconciliar una interrupción antes de repetir un efecto. El seguimiento de una PR es opcional y tiene límites de tiempo, iteraciones y consumo.
 
 Estas decisiones reducen confusiones de estado, pero no convierten el worktree en un sandbox. Comparte Git, procesos, puertos y credenciales del equipo. El servicio está pensado para uso local de un propietario; el repositorio no acredita aislamiento multiusuario. Del mismo modo, una prueba con proveedor simulado no demuestra una integración real.

@@ -11,7 +11,7 @@ Cómo correr:
     python -m pytest tests/test_git_flow.py -q
 """
 from __future__ import annotations
-from relay import git_branches, git_conversations, git_process
+from relay import git_branches, git_conversations, git_process, github_credentials
 
 import asyncio
 import os
@@ -29,6 +29,23 @@ from relay.db import Database
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR",
              "FOURBIS_COMPACTOR_MODEL", "FOURBIS_MODEL")
+
+
+async def _fake_require_account(provider):
+    assert provider == "github"
+    return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+
+
+def setUpModule():
+    # Las pruebas de procesos necesitan una identidad explícita; la prueba
+    # de bloqueo sin actor vive en test_github_actor.py.
+    patcher = patch.object(github_credentials.user_accounts, "require_account", _fake_require_account)
+    patcher.start()
+    globals()["_github_account_patcher"] = patcher
+
+
+def tearDownModule():
+    globals().pop("_github_account_patcher").stop()
 
 
 def _git(repo: Path, *args: str) -> None:

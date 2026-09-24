@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.9",
     "httpx>=0.27",
+    "cryptography>=43",  # tokens OAuth personales cifrados; ya instalada en el runtime
     "google-api-python-client>=2.120",
     "google-auth>=2.27",
     "tenacity>=8.2",  # reintentos para el notify

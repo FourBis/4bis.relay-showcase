@@ -223,8 +223,8 @@ async def experts_run(request: web.Request) -> web.Response:
                           f"{conversation['project_slug']!r}, no a "
                           f"{project['slug']!r}"},
                 status=400)
-        if managed.get("mode") == "write" and identity.role_of(request) != "owner":
-            return web.json_response({"error": "Esta tarea de escritura requiere owner"}, status=403)
+        if managed.get("mode") == "write" and not identity.can_write_project(request, project):
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         if managed.get("state") in task_service.STOPPED:
             return web.json_response({"error": managed.get("error") or "Continúa la tarea desde sus controles",
                                       "conversation_id": conv_id}, status=409)
@@ -257,7 +257,7 @@ async def experts_run(request: web.Request) -> web.Response:
                 requested_by=identity.requester(request))
             from . import git_flow
             if await git_flow.is_git_repo(project.get("repo_path") or ""):
-                read_only = identity.role_of(request) != "owner" or bool((project.get("defaults_json") or {}).get("read_only"))
+                read_only = not identity.can_write_project(request, project)
                 await db.update_conversation_task(new_id, role=identity.role_of(request),
                                                   requested_by=identity.requester(request), publish_allowed=False,
                                                   tracking={"enabled": False})
@@ -292,7 +292,7 @@ async def experts_run(request: web.Request) -> web.Response:
                 readonly = body.get("read_only", bool((project.get("defaults_json") or {}).get("read_only")))
                 if not isinstance(readonly, bool):
                     return web.json_response({"error": "read_only debe ser booleano"}, status=400)
-                readonly = readonly or identity.role_of(request) != "owner"
+                readonly = readonly or not identity.can_write_project(request, project)
                 cid = await db.create_conversation(project_slug=target, author=author,
                     requested_by=identity.requester(request), conversation_id=cid)
                 await db.update_conversation_task(cid, role=identity.role_of(request),
@@ -381,8 +381,8 @@ async def experts_run(request: web.Request) -> web.Response:
 
     if conversation and await db.get_conversation_task(conversation["id"]):
         managed = await db.get_conversation_task(conversation["id"])
-        if managed.get("mode") == "write" and identity.role_of(request) != "owner":
-            return web.json_response({"error": "Esta tarea de escritura requiere owner"}, status=403)
+        if managed.get("mode") == "write" and not identity.can_write_project(request, project):
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         if managed.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa la tarea desde sus controles"}, status=409)
         request_id = body.get("request_id") or str(uuid.uuid4())
@@ -458,8 +458,8 @@ async def experts_cancel(request: web.Request) -> web.Response:
     if event and event["state"] in {"pending", "processing", "uncertain"}:
         cid = event["conversation_id"]
         state = await db.get_conversation_task(cid)
-        if state.get("mode") == "write" and identity.role_of(request) != "owner":
-            return web.json_response({"error": "Esta tarea de escritura requiere owner"}, status=403)
+        if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, cid):
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         await db.update_conversation_task(cid, state="paused", tracking={"enabled": False})
         if event["state"] == "pending":
             await db.finish_conversation_event(event["id"], state="cancelled", error="Cancelado por el usuario")
@@ -535,8 +535,8 @@ async def experts_steer(request: web.Request) -> web.Response:
         state = await db.get_conversation_task(cid)
         if state.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa la tarea desde sus controles"}, status=409)
-        if state.get("mode") == "write" and identity.role_of(request) != "owner":
-            return web.json_response({"error": "Esta tarea de escritura requiere owner"}, status=403)
+        if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, cid):
+            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         key = body.get("request_id") or str(uuid.uuid4())
         if not isinstance(key, str) or not 1 <= len(key) <= 128:
             return web.json_response({"error": "request_id inválido"}, status=400)
@@ -558,6 +558,12 @@ async def experts_steer(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "prefijo ambiguo", "matches": matches}, status=409)
     rp = progress[matches[0]]
+    live_chat = await db.get_chat(matches[0])
+    owner = (live_chat or {}).get("requested_by")
+    if not owner or owner != identity.requester(request):
+        return web.json_response(
+            {"error": "Este run pertenece a otra persona o no tiene actor; inicia un nuevo turno."},
+            status=409)
     if rp.finished:
         return web.json_response(
             {"error": "el run ya terminó — mandalo como mensaje normal",

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 const source = readFileSync(new URL('../admin_static/static/workspace.js', import.meta.url), 'utf8')
   .replace(/^import .*$/gm, '');
-const { fitRect, tileRects, readLayout } = await import('data:text/javascript,' + encodeURIComponent(source));
+const { fitRect, tileRects, readLayout, recentlyClosed } = await import('data:text/javascript,' + encodeURIComponent(source));
 
 test('mover y redimensionar nunca deja los controles fuera del workspace', () => {
   for (const bounds of [{ width: 1440, height: 800 }, { width: 390, height: 500 }]) {
@@ -70,4 +70,22 @@ test('restaurar oculta IDs antiguos y conserva nombres editados sin cambiar la c
   assert.equal(renamed.customTitle, 'Entrega · 12345678');
   assert.equal(renamed.id, entry.id);
   assert.equal(renamed.restore.conversationId, entry.restore.conversationId);
+});
+
+test('Cerrados recientemente usa el último cierre, incluso si una ventana se reabrió', () => {
+  const sourceOrder = [
+    { id: 'abierta-primero', closed: true, closedAt: 1 },
+    { id: 'reabierta', closed: true, closedAt: 3 },
+    { id: 'cerrada-despues', closed: true, closedAt: 2 },
+  ];
+  const recent = recentlyClosed(sourceOrder);
+  assert.deepEqual(recent.map(w => w.id), ['reabierta', 'cerrada-despues', 'abierta-primero']);
+});
+
+test('readLayout conserva la secuencia de cierre para persistencia', () => {
+  const saved = readLayout(JSON.stringify({ version: 1, windows: [{ id: 'object:1',
+    restore: { conversationId: 'conv-1', messageIndex: 2, kind: 'table', itemIndex: 0 },
+    closed: true, closedAt: 9,
+  }] }), ['chat']);
+  assert.equal(saved[0].closedAt, 9);
 });

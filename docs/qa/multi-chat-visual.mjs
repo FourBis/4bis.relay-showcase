@@ -94,7 +94,9 @@ async function mockRelay(route) {
   if (path === "/stats") return json(route, { running: 0, chats: 0 });
   if (path === "/system/active") return json(route, { active: [] });
   if (path === "/admin/api/health") return json(route, { status: "ok" });
-  if (path === "/admin/api/me") return json(route, { role: "owner", email: "fixture" });
+  if (path === "/admin/api/me") return json(route, {
+    role: "owner", email: "fixture", allowed_tabs: null,
+  });
   return json(route, {});
 }
 

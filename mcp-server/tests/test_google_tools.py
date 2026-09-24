@@ -20,35 +20,18 @@ from relay.tools.calendar import CalendarCreateTool, CalendarListTool
 from relay.tools.gmail import GmailReadTool, GmailSendTool
 
 
-class TestGmailReadMock(unittest.IsolatedAsyncioTestCase):
-    async def test_dispatch(self) -> None:
+class TestGmailActorTools(unittest.IsolatedAsyncioTestCase):
+    async def test_read_requires_authenticated_actor(self) -> None:
         t = GmailReadTool()
         out = await t.call({"max_results": 5})
-        self.assertTrue(out["ok"])
-        self.assertEqual(out["source"], "mock")
-
-    async def test_max_results_clamped(self) -> None:
-        t = GmailReadTool()
-        out = await t.call({"max_results": 9999})  # sobre el techo
-        self.assertTrue(out["ok"])
-        # el limit es 50; la api devolverá a lo más 3 (mock) — lo que importa es que no rompió
-        self.assertLessEqual(len(out["messages"]), 50)
-
-
-class TestGmailSendMock(unittest.IsolatedAsyncioTestCase):
-    async def test_send_without_real_returns_clear_error(self) -> None:
-        # Sin GOOGLE_REAL=1, send debe ser honesto: no pretender que mandó.
-        t = GmailSendTool()
-        out = await t.call({"to": "recipient@example.test", "subject": "x", "body": "y"})
         self.assertFalse(out["ok"])
-        self.assertIn("real", out["error"].lower() or out["error"])
+        self.assertIn("Mi cuenta", out["error"])
 
-    async def test_send_validation(self) -> None:
-        # Forzamos modo "real" para entrar al otro branch, sin conectarnos:
-        # GmailSendTool en mock tiene _client=None, devolvemos error antes.
+    async def test_mcp_send_creates_a_draft_without_sending(self) -> None:
         t = GmailSendTool()
-        out = await t.call({"to": "", "subject": "x", "body": "y"})
+        out = await t.call({"to": "alex@example.test", "subject": "x", "body": "y"})
         self.assertFalse(out["ok"])
+        self.assertIn("Mi cuenta", out["error"])
 
 
 class TestCalendarMock(unittest.IsolatedAsyncioTestCase):

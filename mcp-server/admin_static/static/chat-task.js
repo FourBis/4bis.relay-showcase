@@ -9,6 +9,7 @@ const ACTIONS = {
   pause: "Pausar",
   cancel: "Cancelar",
   publish: "Publicar PR",
+  enable_write: "Habilitar escritura",
 };
 
 const requestIds = new Map();
@@ -53,24 +54,33 @@ function safeHttpUrl(value) {
   } catch (_) { return ""; }
 }
 
+function taskAllows(task, action) {
+  return Array.isArray(task?.allowed_actions)
+    ? task.allowed_actions.includes(action) : task?.can_control !== false;
+}
+
 export function panelHtml(task) {
   if (!task) return `<div class="chat-task-empty">Sin tarea persistente para este hilo.</div>`;
   const tracking = task.tracking || {};
   const terminal = ["cancelled", "finished", "cleaned"].includes(task.state);
   const writeTask = task.mode === "write";
-  const trackAllowed = task.can_control !== false && writeTask && !!task.pr_url && !!task.publish_allowed
+  const hasActionContract = Array.isArray(task.allowed_actions);
+  const granted = (action) => taskAllows(task, action);
+  const authorized = granted;
+  const trackAllowed = authorized("track") && writeTask && !!task.pr_url && !!task.publish_allowed
     && !terminal && !["paused", "provisioning"].includes(task.state);
   const busy = ["running", "validating", "publishing", "provisioning"].includes(task.state);
-  const actionAllowed = (action) => task.can_control !== false && !terminal
+  const actionAllowed = (action) => authorized(action) && !terminal
     && (action !== "publish" || (writeTask && !!task.publish_allowed
       && !["blocked", "paused", "provisioning"].includes(task.state)))
     && (action !== "continue" || !busy)
     && (action !== "pause" || task.state !== "paused");
+  const enableWrite = authorized("enable_write") && !writeTask && !busy && !terminal;
   const limits = tracking.enabled
     ? `<span class="badge warn">seguimiento activo · ${tracking.iterations || 0}/${tracking.max_iterations || 0} iteraciones</span>`
     : `<span class="badge dim">seguimiento apagado</span>`;
   const actions = ["continue", "pause", "cancel", "publish"]
-    .filter((a) => a !== "publish" || writeTask)
+    .filter((a) => (a !== "publish" || writeTask) && (!hasActionContract || granted(a)))
     .map((a) => `<button type="button" class="btn btn-xs${a === "cancel" ? " danger" : a === "publish" ? " btn-primary" : ""}"
       ${actionAllowed(a) ? "" : "disabled"}
       data-task-action="${a}">${taskActionLabel(a)}</button>`).join("");
@@ -83,7 +93,8 @@ export function panelHtml(task) {
       <span title="${attrEscape(task.workspace_path)}">${escape(task.branch || task.workspace_path || "sin workspace")}</span>
       ${pr ? `<a href="${attrEscape(pr)}" target="_blank" rel="noopener">PR</a>` : ""}</div>
     ${validation}${task.pending_events ? `<span class="chat-task-detail">${Number(task.pending_events)} mensaje(s) en cola</span>` : ""}<div class="chat-task-actions">${actions}
-      ${writeTask ? `<label class="chat-task-track"><input type="checkbox" data-task-track ${trackAllowed ? "" : "disabled"}
+      ${enableWrite ? `<button type="button" class="btn btn-xs btn-primary" data-task-action="enable_write">${taskActionLabel("enable_write")}</button>` : ""}
+      ${writeTask && (!hasActionContract || granted("track")) ? `<label class="chat-task-track"><input type="checkbox" data-task-track ${trackAllowed ? "" : "disabled"}
         ${tracking.enabled ? "checked" : ""} aria-label="Activar seguimiento automático">
         Seguimiento automático <span class="text-xs text-zinc-500">3 iteraciones · 50K tokens · 60 min</span></label>` : ""}</div>
     ${task.error ? `<p class="chat-task-error">${escape(task.error)}</p>` : ""}`;
@@ -134,7 +145,7 @@ export function mountTaskPanel({ convId, onContinue, onTaskUpdate } = {}) {
     } finally { loading = false; }
   };
   const runAction = async (action) => {
-    if (!current || current.can_control === false || !ACTIONS[action]) return;
+    if (!current || !taskAllows(current, action) || !ACTIONS[action]) return;
     let extra = {};
     if (action === "continue" && requiresUncertainAcknowledgement(current)) {
       const events = current.uncertain_events;
@@ -147,6 +158,11 @@ export function mountTaskPanel({ convId, onContinue, onTaskUpdate } = {}) {
       if (!approved) return;
       extra = { acknowledge_uncertain: true };
     }
+    if (action === "enable_write" && !await confirmModal({
+      title: "Habilitar escritura para esta tarea",
+      body: "Se creará una rama y un worktree de trabajo que conservan el historial de esta tarea. El plan no se ejecutará automáticamente; tendrás que pedir que continúe después.",
+      confirmText: "Habilitar escritura",
+    })) return;
     if (action === "cancel" && !await confirmModal({
       title: "Cancelar tarea", body: "Se detiene el seguimiento y se conservan los archivos del workspace.",
       confirmText: "Cancelar", danger: true,
@@ -163,7 +179,7 @@ export function mountTaskPanel({ convId, onContinue, onTaskUpdate } = {}) {
     } catch (e) { toast(`No se pudo ${taskActionLabel(action).toLowerCase()}: ${e.message}`, "err"); }
   };
   const runTracking = async (enabled) => {
-    if (!current || current.can_control === false) return;
+    if (!current || !taskAllows(current, "track")) return;
     try {
       const next = await apiRoot(`/conversations/${encodeURIComponent(convId)}/task`, {
         method: "POST", body: taskActionPayload(convId, "track", {
