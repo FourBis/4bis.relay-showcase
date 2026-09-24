@@ -13,7 +13,7 @@ const chatLabel = id => chats[id].name || (id === "docs" ? tr("Documentación", 
 const windows = $("#chat-windows");
 const dialog = $("#rename-dialog");
 document.querySelectorAll("[data-en]").forEach(el => { el.dataset.es = el.textContent; });
-const translatedAttributes = ["alt", "aria-label"];
+const translatedAttributes = ["alt", "aria-label", "href"];
 for (const attribute of translatedAttributes) {
   document.querySelectorAll(`[data-en-${attribute}]`).forEach(el => {
     el.setAttribute(`data-es-${attribute}`, el.getAttribute(attribute));
@@ -144,7 +144,7 @@ function translate() {
   }
   $("#language").textContent = english ? "ES" : "EN";
   $("#language").setAttribute("aria-label", english ? "Cambiar a español" : "Switch to English");
-  document.title = tr("FourBis Relay — Tareas largas que se adaptan", "FourBis Relay — Long tasks that adapt");
+  document.title = tr("FourBis Relay — Tu equipo, tus repositorios y la IA", "FourBis Relay — Your team, repositories, and AI");
   renderChats(); renderTask();
 }
 

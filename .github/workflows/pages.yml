@@ -25,7 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check demo JavaScript
-        run: node --check site/demo.js
+        run: |
+          node --check site/demo.js
+          node --check site/tour.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
