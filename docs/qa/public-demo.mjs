@@ -43,10 +43,127 @@ await context.route("**/*", route => {
 const chat = id => page.locator(`[data-chat="${id}"]`);
 const openChat = id => page.locator("#scene-chats").locator(`[data-open="${id}"]`);
 const noOverflow = async () => assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "Page overflows horizontally");
+const capabilities = ["models", "context", "execution", "workspace", "team", "commercial", "usage"];
+async function checkCapabilities() {
+  const tabs = page.locator("#capability-tabs [role=tab]");
+  assert.equal(await tabs.count(), capabilities.length, "The capability catalog must expose seven tabs");
+  assert.deepEqual(await tabs.evaluateAll(items => items.map(item => item.dataset.capability)), capabilities);
+
+  for (const name of ["models", "context"]) {
+    const tab = page.locator(`#capability-tabs [data-capability="${name}"]`);
+    const label = tab.locator("span[data-en]");
+    assert.match((await label.textContent()).toLowerCase(), name === "models" ? /modelo/ : /contexto/);
+    assert.match((await label.getAttribute("data-en") || "").toLowerCase(), name === "models" ? /model/ : /context/);
+  }
+
+  await page.locator("#capabilities").scrollIntoViewIfNeeded();
+  for (const name of capabilities) {
+    const tab = page.locator(`#capability-tabs [data-capability="${name}"]`);
+    await tab.click();
+    assert.equal(await tab.getAttribute("aria-selected"), "true");
+    const panel = page.locator(`#capability-${name}`);
+    assert.equal(await panel.isVisible(), true);
+    assert.equal(await page.locator("#capabilities [role=tabpanel]:visible").count(), 1, "Only the selected capability panel may be visible");
+    const bilingualCopy = await panel.locator("[data-en]").evaluateAll(items => items.some(item => item.dataset.en?.trim()));
+    assert(bilingualCopy, `${name} needs English copy alongside its Spanish copy`);
+
+    const triggers = panel.locator(".screenshot-open");
+    const triggerCount = await triggers.count();
+    assert.equal(triggerCount, name === "models" ? 2 : 1, `${name} screenshot controls changed`);
+    for (let index = 0; index < triggerCount; index++) {
+      const trigger = triggers.nth(index);
+      await trigger.scrollIntoViewIfNeeded();
+      await trigger.click();
+      const dialog = page.locator("#screenshot-dialog");
+      await dialog.waitFor({ state: "visible" });
+      const image = page.locator("#screenshot-image");
+      await image.evaluate(el => el.scrollIntoView({ block: "center" }));
+      await page.waitForFunction(() => {
+        const image = document.querySelector("#screenshot-image");
+        return image?.complete && image.naturalWidth > 0;
+      });
+      assert.match(await image.getAttribute("src"), /^assets\/[^/]+\.png$/i);
+      const caption = page.locator("#screenshot-caption");
+      assert((await caption.textContent()).trim().length > 0, `${name} screenshot needs a caption`);
+      assert((await caption.getAttribute("data-es") || "").trim().length > 0, `${name} screenshot caption needs Spanish text`);
+      assert((await caption.getAttribute("data-en") || "").trim().length > 0, `${name} screenshot caption needs English text`);
+      assert.equal(await page.evaluate(() => document.activeElement?.id), "screenshot-close", "Opening the screenshot should move focus into its dialog");
+
+      if (name === "models" && index === 0) {
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(await trigger.evaluate(el => el === document.activeElement), true, "Escape should return focus to the screenshot trigger");
+      } else {
+        await page.locator("#screenshot-close").click();
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(await trigger.evaluate(el => el === document.activeElement), true, "Closing should return focus to the screenshot trigger");
+      }
+    }
+  }
+
+  await page.locator("#capability-tabs [data-capability='models']").focus();
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await page.locator("#capability-tabs [data-capability='context']").evaluate(el => el === document.activeElement), true, "ArrowRight should move tab focus");
+  assert.equal(await page.locator("#capability-tabs [tabindex='0']").getAttribute("data-capability"), "context", "Roving tabindex should follow keyboard focus");
+  await page.keyboard.press("Home");
+  assert.equal(await page.locator("#capability-tabs [data-capability='models']").evaluate(el => el === document.activeElement), true, "Home should focus the first tab");
+  assert.equal(await page.locator("#capability-tabs [tabindex='0']").getAttribute("data-capability"), "models");
+  await page.keyboard.press("End");
+  assert.equal(await page.locator("#capability-tabs [data-capability='usage']").evaluate(el => el === document.activeElement), true, "End should focus the last tab");
+  assert.equal(await page.locator("#capability-tabs [tabindex='0']").getAttribute("data-capability"), "usage");
+
+  await page.locator("#language").click();
+  for (const name of ["models", "context"]) {
+    const tab = page.locator(`#capability-tabs [data-capability="${name}"]`);
+    assert.match((await tab.locator("span[data-en]").textContent()).toLowerCase(), name === "models" ? /model/ : /context/);
+  }
+  const modelReadme = page.locator("#capability-models a.text-link").first();
+  assert.equal(await modelReadme.getAttribute("href"), await modelReadme.getAttribute("data-en-href"), "English mode should switch documentation links");
+  await page.locator("#language").click();
+  assert.equal(await modelReadme.getAttribute("href"), await modelReadme.getAttribute("data-es-href"), "Spanish mode should restore documentation links");
+  const deliveryTargets = page.locator(".delivery-flow [data-capability-target]");
+  const expectedDeliveryTargets = ["commercial", "commercial", "team", "context", "execution", "workspace", "workspace"];
+  assert.equal(await deliveryTargets.count(), expectedDeliveryTargets.length);
+  assert.deepEqual(await deliveryTargets.evaluateAll(items => items.map(item => item.dataset.capabilityTarget)), expectedDeliveryTargets);
+  for (let index = 0; index < expectedDeliveryTargets.length; index++) {
+    const name = expectedDeliveryTargets[index];
+    await deliveryTargets.nth(index).click();
+    assert.equal(await page.locator(`#capability-tab-${name}`).getAttribute("aria-selected"), "true", `Workflow link should select ${name}`);
+    assert.equal(await page.locator(`#capability-${name}`).isVisible(), true, `Workflow link should show ${name}`);
+  }
+  const englishUrl = new URL(base);
+  englishUrl.searchParams.set("lang", "en");
+  await page.goto(englishUrl.href);
+  assert.equal(await page.locator("html").getAttribute("lang"), "en", "Direct ?lang=en should initialize the site in English");
+  assert((await page.locator("#headline").textContent()).includes("Your team and AI."));
+  assert.equal(await page.locator("#capability-tab-models").locator("span[data-en]").textContent(), "Models");
+  await page.goto(base);
+  assert.equal(await page.locator("html").getAttribute("lang"), "es", "The default URL should initialize Spanish");
+  for (const width of [768, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await noOverflow();
+  }
+}
+async function captureReviewScreenshots() {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator(".hero").screenshot({ path: join(out, "review-hero-desktop.png") });
+  for (const name of ["models", "context", "team"]) {
+    await page.locator(`#capability-tab-${name}`).click();
+    await page.locator(`#capability-${name}`).screenshot({ path: join(out, `review-capability-${name}-desktop.png`) });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator(".hero").screenshot({ path: join(out, "review-hero-mobile.png") });
+  await page.locator("#capabilities").screenshot({ path: join(out, "review-capabilities-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => scrollTo(0, 0));
+}
 try {
   assert.equal((await page.goto(base)).status(), 200);
   await page.locator('[data-chat="docs"] textarea').waitFor();
   await noOverflow();
+  await checkCapabilities();
+  await captureReviewScreenshots();
+  await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({ path: join(out, "desktop.png"), fullPage: true });
   await chat("docs").locator("textarea").fill("borrador A");
   await openChat("access").click();
@@ -139,9 +256,9 @@ try {
   assert((await page.locator("#review-copy").textContent()).includes("no se hizo merge"));
   await page.locator("#language").click();
   assert.equal(await page.locator("html").getAttribute("lang"), "en");
-  assert((await page.locator("#headline").textContent()).includes("Long tasks"));
+  assert((await page.locator("#headline").textContent()).includes("Your team and AI."));
   assert.equal(await page.locator("nav").getAttribute("aria-label"), "Main navigation");
-  assert((await page.locator(".hero-task").textContent()).includes("FICTIONAL TASK"));
+  assert.equal(await page.locator(".hero-evidence img[src*='workflow-graph']").count(), 1, "The hero should show the workflow screenshot");
   assert((await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content")).includes("connect-src 'none'"));
   await page.locator("#tab-workspace").click();
   assert((await page.locator("#split-result").textContent()).includes("Budget exhausted"));
@@ -169,12 +286,50 @@ try {
       await page.locator(`#tab-${scene}`).click();
       await noOverflow();
     }
+    for (const name of capabilities) {
+      const tab = page.locator(`#capability-tab-${name}`);
+      await tab.click();
+      assert.equal(await page.locator(`#capability-${name}`).isVisible(), true);
+      assert.equal(await page.locator("#capabilities [role=tabpanel]:visible").count(), 1);
+      await noOverflow();
+      if (name === "team") {
+        const trigger = page.locator("#capability-team .screenshot-open").first();
+        await trigger.scrollIntoViewIfNeeded();
+        await trigger.click();
+        const dialog = page.locator("#screenshot-dialog");
+        await dialog.waitFor({ state: "visible" });
+        await page.waitForFunction(() => {
+          const image = document.querySelector("#screenshot-image");
+          return image?.complete && image.naturalWidth > 0;
+        });
+        await noOverflow();
+        await page.locator("#screenshot-close").click();
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+      }
+    }
     await page.screenshot({ path: join(out, `mobile-${width}.png`), fullPage: true });
   }
-  assert(await page.locator("img").evaluateAll(images => images.every(image => image.complete && image.naturalWidth > 0)), "Broken image");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const visibleImages = [page.locator(".hero img")];
+  for (const image of visibleImages) {
+    await image.scrollIntoViewIfNeeded();
+    await image.evaluate(el => el.scrollIntoView({ block: "center" }));
+    await image.evaluate(el => el.decode());
+    assert(await image.evaluate(el => el.complete && el.naturalWidth > 0), "Broken lazy-loaded image");
+  }
+  for (const name of capabilities) {
+    await page.locator(`#capability-tab-${name}`).click();
+    const image = page.locator(`#capability-${name} img`);
+    await image.scrollIntoViewIfNeeded();
+    await image.evaluate(el => el.scrollIntoView({ block: "center" }));
+    await image.evaluate(el => el.decode());
+    assert(await image.evaluate(el => el.complete && el.naturalWidth > 0), `${name} has a broken lazy-loaded image`);
+  }
+  assert(await page.locator("img:not(#screenshot-image)").evaluateAll(items => items.every(image => image.complete && image.naturalWidth > 0)), "Broken image");
   assert(requests.every(request => request.method === "GET" && !["fetch", "xhr", "websocket"].includes(request.type)), "Demo used a backend request");
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ result: "PASS", requests: requests.length, errors, screenshots: out, checked: "dependency graph before/after one-level split, retained parent and waiting dependent, personal account and project assignment, explicit write/continue, separate PR publication without merge, task/diff continuity, keyboard, ES/EN, 320/390 mobile, same-origin GET only, no backend requests" }, null, 2));
+  console.log(JSON.stringify({ result: "PASS", requests: requests.length, errors, screenshots: out, reviewScreenshots: ["review-hero-desktop.png", "review-capability-models-desktop.png", "review-capability-context-desktop.png", "review-capability-team-desktop.png", "review-hero-mobile.png", "review-capabilities-mobile.png"], checked: "7 capability panels and 8 screenshot triggers with captions, image loading and focus restoration; Arrow/Home/End roving tabs; delivery-flow targets; direct ?lang=en; 768/1440 desktop and all panels plus lightbox at 320/390 mobile without overflow; existing chats, split, team, PR and task-continuity demo; same-origin GET only, no backend requests" }, null, 2));
 } finally {
   await browser.close();
   if (server.listening) await new Promise(done => server.close(done));
