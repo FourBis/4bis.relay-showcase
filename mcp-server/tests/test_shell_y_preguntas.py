@@ -1152,17 +1152,23 @@ def test_no_toca_backslashes_que_no_son_ruta():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="corre bash de verdad")
-async def test_el_comando_con_ruta_windows_corre():
+async def test_el_comando_con_ruta_windows_corre(tmp_path):
     """El check que falla si vuelve el escaping: se ejecuta de verdad.
 
     Reproducción exacta del caso medido el 2026-09-04: el directorio
     existe y el comando contestaba `No such file or directory`.
     """
-    raiz = str(Path(__file__).resolve().parent.parent).replace("/", "\\")
-    r = await shell.run(f"cd {raiz} && git ls-files | head -3", timeout=60)
+    # Un repo propio evita depender del propietario del checkout de la suite.
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "archivo.txt").write_text("demo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "archivo.txt"], cwd=tmp_path, check=True, capture_output=True)
+    raiz = str(tmp_path).replace("/", "\\")
+    r = await shell.run(f'cd "{raiz}" && git ls-files | head -3', timeout=60)
     assert r["shell"] == "sh"
     assert r["exit"] == 0, r["out"]
     assert "No such file" not in r["out"], r["out"]
+    assert "archivo.txt" in r["out"], r["out"]
 
 
 # ---------------------------------------------------------------------------

@@ -310,13 +310,23 @@ async def graphs_cancel(request: web.Request) -> web.Response:
     if g is None:
         return web.json_response({"error": "not found"}, status=404)
     task = request.app[GRAFOS_KEY].get(graph_id)
-    state = await db.get_conversation_task(g.get("conversation_id"))
-    if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, g.get("conversation_id")):
+    conv_id = g.get("conversation_id")
+    if conv_id:
+        state = await db.get_conversation_task(conv_id)
+        allowed = state.get("mode") != "write" or await identity.can_write_conversation(request, db, conv_id)
+    else:
+        # Los grafos históricos pueden no tener conversación ni proyecto.
+        # Admin debe poder detenerlos; otros actores necesitan el proyecto asignado.
+        project = await db.get_project(g.get("project_slug") or "")
+        allowed = identity.role_of(request) == identity.OWNER_ROLE or identity.can_write_project(request, project)
+    if not allowed:
         return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
     if task is not None:
-        task.cancel()
+        # Un reintento debe esperar la limpieza, no volver a interrumpirla.
+        if not task.cancelling():
+            task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+            await asyncio.shield(task)
     # Igual que en /experts/cancel: si el proceso se reinició y el grafo
     # quedó `activo` en la base sin nadie corriéndolo, marcarlo cancelado
     # lo mismo. El humano no quiere distinguir, quiere que pare.

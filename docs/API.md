@@ -32,6 +32,10 @@ La ruta `GET /projects` de versiones antiguas ya no está registrada.
 | POST | `/experts/run` | Iniciar una ejecución |
 | GET | `/experts/status/{chat_id}` | Consultar estado |
 | POST | `/experts/cancel/{chat_id}` | Solicitar cancelación |
+| POST | `/graphs` | Crear un plan de tareas; `arrancar: false` permite preparar sin ejecutar |
+| GET | `/graphs/{id}` | Consultar nodos, avance y estado del grafo |
+| POST | `/graphs/{id}/resume` | Solicitar reanudación explícita del grafo |
+| POST | `/graphs/{id}/cancel` | Detener el grafo; también admite grafos históricos sin conversación |
 | GET | `/chats/{id}` | Consultar el registro de ejecución |
 | GET | `/chats/{id}/md` | Consultar su exportación Markdown |
 | POST | `/attachments` | Subir un archivo multipart, campo `file` |
@@ -56,6 +60,18 @@ un modelo del catálogo.
 Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
 Las respuestas de error incluyen un campo `error`. Revisa el estado final y
 el resultado antes de dar una acción por completada.
+
+Cancelar un grafo existente responde 200 con `estado: cancelado`, incluso si
+nadie lo ejecuta tras un reinicio o se repite la petición. No borra sus nodos
+ni resultados. Un ID inexistente responde 404. En grafos históricos sin
+conversación, Admin puede detenerlos aunque el proyecto ya no exista; Dev y
+Subadmin requieren permiso de escritura en el proyecto. Las tareas vinculadas
+conservan sus controles de permisos. Cancelar el grafo y cancelar la tarea
+persistente de conversación son acciones distintas.
+
+Las cancelaciones simultáneas comparten la limpieza del worker: un reintento
+no vuelve a interrumpirlo, y la interrupción de la petición que lo espera
+no cancela otra vez esa limpieza.
 
 ## Acceso
 

@@ -71,13 +71,15 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
         browser = await browser_api.chromium.launch(channel="chrome", headless=True)
         try:
             page = await browser.new_page(viewport={"width": 1440, "height": 1000})
-            page_errors, console_errors = [], []
+            page_errors, console_errors, project_warnings = [], [], []
             page.on("pageerror", lambda error: page_errors.append(str(error)))
             page.on(
                 "console",
                 lambda msg: console_errors.append(msg.text)
                 if msg.type == "error" else None,
             )
+            page.on("console", lambda msg: project_warnings.append(msg.text)
+                    if msg.type == "warning" and "no existe #projects" in msg.text else None)
             base = str(http.make_url("/admin")) + "#/chat"
             await page.goto(base)
             await page.wait_for_load_state("networkidle")
@@ -129,6 +131,41 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             await mcp.locator('[data-window-action="close"]').click()
             await expect(mcp).to_be_hidden()
             module_windows["mcp"] = await open_tool("mcp")
+
+            # El cierre, la reapertura y F5 conservan el orden de cierre,
+            # aunque las herramientas se hayan abierto en otro orden.
+            projects = module_windows["projects"]
+            titles = {
+                "projects": await projects.locator(".workspace-window-title").text_content(),
+                "running": await running.locator(".workspace-window-title").text_content(),
+            }
+
+            async def check_recent(order):
+                await page.locator("#workspace-launcher").click()
+                await expect(page.locator("#workspace-recent button")).to_have_text(
+                    [titles[name] for name in order])
+                await page.locator("#workspace-launcher-close").click()
+
+            async def close_tool(name):
+                await page.locator(
+                    f'#workspace-items button[data-window-id="{name}"]').click()
+                await module_windows[name].locator('[data-window-action="close"]').click()
+
+            await close_tool("running")
+            await close_tool("projects")
+            await check_recent(["projects", "running"])
+            running = await open_tool("running")
+            await close_tool("running")
+            await check_recent(["running", "projects"])
+            await page.wait_for_timeout(250)  # debounce de persistencia del layout
+            await page.reload()
+            await page.wait_for_load_state("networkidle")
+            await check_recent(["running", "projects"])
+            projects = await open_tool("projects")
+            await close_tool("projects")
+            await check_recent(["projects", "running"])
+            for name in ("projects", "running"):
+                module_windows[name] = await open_tool(name)
 
             # Arrastre de cabecera y resize de esquina con mouse.
             await page.locator(
@@ -330,5 +367,6 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
 
             assert not page_errors, page_errors
             assert not console_errors, console_errors
+            assert not project_warnings, project_warnings
         finally:
             await browser.close()

@@ -188,6 +188,10 @@ class TestConversationsDb(unittest.IsolatedAsyncioTestCase):
         await self.db.set_user_role("Jefe@Example.Test", "owner")
         self.assertEqual(await rol_de("jefe@example.test"), "owner")
 
+        with self.assertRaisesRegex(ValueError, "last_admin"):
+            await self.db.set_user_role("jefe@example.test", "member")
+        self.assertEqual(await rol_de("jefe@example.test"), "owner")
+        await self.db.set_user_role("backup@example.test", "owner")
         await self.db.set_user_role("jefe@example.test", "member")
         self.assertEqual(await rol_de("jefe@example.test"), "member")
 
