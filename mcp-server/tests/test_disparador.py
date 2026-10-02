@@ -24,7 +24,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -425,6 +425,70 @@ class TestDisparadorDelChat(_Base):
 class TestRetomar(_Base):
     """F4: un grafo cortado se retoma, y contestar mueve el plan."""
 
+    async def test_resume_rechaza_tarea_detenida_sin_mutar_grafo(self) -> None:
+        from relay.server_common import GRAFOS_KEY
+
+        for i, state in enumerate(("paused", "cancelled", "finished", "blocked", "cleaned")):
+            conv_id = f"conv_{state}"
+            graph_id = f"g_{state}"
+            await self.db.create_conversation(
+                project_slug="demo", conversation_id=conv_id)
+            await self.db.update_conversation_task(
+                conv_id, mode="read_only", state=state,
+                source_repo=str(self._tmp.name),
+                workspace_path=str(self._tmp.name))
+            await self.db.create_task_graph(graph_id, "x", tareas=[
+                {"id": f"{i}_a", "titulo": "A"},
+                {"id": f"{i}_b", "titulo": "B", "deps": [f"{i}_a"]}],
+                project_slug="demo", conversation_id=conv_id)
+            await self.db.update_task(f"{i}_a", estado="fallado", error="budget_exceeded")
+            await self.db.set_task_graph_state(graph_id, "cancelado")
+            before = await self.db.get_task_graph(graph_id)
+
+            with patch("relay.server_graph_routes._largar_grafo") as launch:
+                response = await self.client.post(f"/graphs/{graph_id}/resume")
+
+            self.assertEqual(response.status, 409)
+            body = await response.json()
+            if state != "cleaned":
+                self.assertEqual(body.get("graph_id"), graph_id, body)
+            self.assertEqual(await self.db.get_task_graph(graph_id), before)
+            launch.assert_not_called()
+            self.assertNotIn(graph_id, self.app[GRAFOS_KEY])
+
+    async def test_resume_de_grafo_legacy_sin_permiso_es_403(self) -> None:
+        await self.db.create_task_graph("g_legacy", "x", tareas=[
+            {"id": "legacy_a", "titulo": "A"}], project_slug="demo")
+        await self.db.set_task_graph_state("g_legacy", "cancelado")
+        before = await self.db.get_task_graph("g_legacy")
+
+        with patch("relay.identity.can_write_project", return_value=False), \
+             patch("relay.server_graph_routes._largar_grafo") as launch:
+            response = await self.client.post("/graphs/g_legacy/resume")
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(await self.db.get_task_graph("g_legacy"), before)
+        launch.assert_not_called()
+
+    async def test_permiso_403_precede_tarea_write_detenida(self) -> None:
+        conv_id = await self.db.create_conversation(project_slug="demo")
+        await self.db.update_conversation_task(conv_id, mode="write", state="paused")
+        await self.db.create_task_graph("g_write_paused", "x", tareas=[
+            {"id": "write_paused_a", "titulo": "A"}], project_slug="demo",
+            conversation_id=conv_id)
+        await self.db.set_task_graph_state("g_write_paused", "cancelado")
+        before = await self.db.get_task_graph("g_write_paused")
+        project = await self.db.get_project("demo")
+
+        with patch("relay.coordination.resolved_project", new=AsyncMock(return_value=project)), \
+             patch("relay.identity.can_write_project", return_value=False), \
+             patch("relay.server_graph_routes._largar_grafo") as launch:
+            response = await self.client.post("/graphs/g_write_paused/resume")
+
+        self.assertEqual(response.status, 403)
+        self.assertEqual(await self.db.get_task_graph("g_write_paused"), before)
+        launch.assert_not_called()
+
     async def test_resume_relanza_un_grafo_cortado(self) -> None:
         await self.db.create_task_graph("g1", "x", tareas=[
             {"id": "a", "titulo": "A", "idempotente": True},
@@ -441,6 +505,21 @@ class TestRetomar(_Base):
             self.assertEqual(r.status, 202)
             await self._esperar(lambda: corridos)
         self.assertEqual(corridos, ["g1"])
+
+    async def test_resume_relanza_tarea_activa_vinculada(self) -> None:
+        conv_id = await self.db.create_conversation(project_slug="demo")
+        await self.db.update_conversation_task(
+            conv_id, mode="read_only", state="ready",
+            source_repo=str(self._tmp.name), workspace_path=str(self._tmp.name))
+        await self.db.create_task_graph("g_activo", "x", tareas=[
+            {"id": "activo_a", "titulo": "A"}], project_slug="demo",
+            conversation_id=conv_id)
+
+        with patch("relay.server_graph_routes._largar_grafo") as launch:
+            response = await self.client.post("/graphs/g_activo/resume")
+
+        self.assertEqual(response.status, 202)
+        launch.assert_called_once()
 
     async def test_resume_de_un_grafo_ya_corriendo_es_409(self) -> None:
         """Largar dos veces el mismo grafo duplicaría cada nodo."""

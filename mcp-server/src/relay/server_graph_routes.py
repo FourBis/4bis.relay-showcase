@@ -281,10 +281,16 @@ async def graphs_resume(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": f"el proyecto {g.get('project_slug')!r} ya no existe"},
             status=409)
-    if not identity.can_write_project(request, project):
-        state = await db.get_conversation_task(g.get("conversation_id"))
-        if state.get("mode") == "write":
-            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+    from . import task_service
+    conv_id = g.get("conversation_id")
+    state = await db.get_conversation_task(conv_id) if conv_id else {}
+    if not identity.can_write_project(request, project) and (
+            not conv_id or state.get("mode") == "write"):
+        return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+    if state.get("state") in task_service.STOPPED:
+        return web.json_response(
+            {"error": "La tarea está detenida; continúa desde sus controles",
+             "graph_id": graph_id}, status=409)
     # Un grafo cancelado o fallado vuelve a `activo`: retomarlo es
     # justamente decir "esto sigue". Si no, `estado_del_grafo` lo dejaría
     # como estaba y el panel mostraría un plan muerto avanzando.
