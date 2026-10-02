@@ -30,7 +30,7 @@ import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -56,7 +56,7 @@ PY = sys.executable
 def _git(repo: str, *args: str) -> str:
     out = subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, text=True, timeout=30)
-    return (out.stdout or "") + (out.stderr or "")
+    return out.stdout if out.returncode == 0 else (out.stdout or "") + (out.stderr or "")
 
 
 def _make_git_repo(base: Path) -> str:
@@ -667,6 +667,10 @@ class LiveSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        account = patch("relay.github_credentials._account", AsyncMock(return_value={
+            "access_token": "test-token", "subject": "123", "login": "test-user"}))
+        account.start()
+        self.addCleanup(account.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = _make_git_repo(Path(self._tmp.name))
         self.project = {"slug": "demo", "repo_path": self.repo,
@@ -689,6 +693,26 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         err = await w.ensure_branch()
         self.assertIsNone(err, f"ensure_branch: {err}")
         return w
+
+    async def test_cbm_context_sin_binario_no_llama_herramientas(self) -> None:
+        worker = self._worker(AsyncMock())
+        task = NightTask("T-CBM", "Contexto ficticio", ["src/main.py"])
+        with patch("relay.night_worker.cbm_call", AsyncMock()) as cbm:
+            self.assertEqual(await worker._cbm_context(task), "")
+            cbm.assert_not_awaited()
+
+    async def test_cbm_context_admite_fake_explicito_y_descarta_errores(self) -> None:
+        worker = self._worker(AsyncMock())
+        task = NightTask("T-CBM", "Contexto ficticio", ["src/main.py"])
+        for raw, expected in (("x" * 5000, "x" * 4000), ('{"error":"simulado"}', "")):
+            with patch("relay.night_worker.cbm_binary_path", return_value="cbm.exe"), \
+                 patch("relay.night_worker.cbm_call", AsyncMock(return_value=raw)) as cbm:
+                self.assertEqual(await worker._cbm_context(task), expected)
+                cbm.assert_awaited_once()
+                self.assertEqual(cbm.await_args.args[0], "search_graph")
+                self.assertEqual(cbm.await_args.args[1]["query"], task.title)
+                self.assertEqual(cbm.await_args.args[1]["limit"], 10)
+                self.assertEqual(cbm.await_args.kwargs["timeout"], 15.0)
 
     async def test_green_path_commits_on_branch(self) -> None:
         async def work(task, prompt):

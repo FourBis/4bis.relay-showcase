@@ -22,10 +22,14 @@ from __future__ import annotations
 from relay import git_actions, git_conversations, git_diff, git_process
 
 import os
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -34,6 +38,19 @@ from relay.db import Database
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR",
              "FOURBIS_COMPACTOR_MODEL", "FOURBIS_MODEL")
+
+
+@pytest.fixture(autouse=True)
+def connected_github_actor(monkeypatch):
+    # Git usa repos y remotos temporales; la cuenta también es simulada.
+    # El bloqueo sin cuenta se comprueba en test_github_actor.py.
+    async def account(provider):
+        assert provider == "github"
+        return {"access_token": "test-token", "subject": "123", "login": "test-user"}
+
+    from relay import github_credentials
+    monkeypatch.setattr(github_credentials.user_accounts, "require_account", account)
+    monkeypatch.setattr(git_process, "_exec", AsyncMock(return_value=(1, "no simulated PR")))
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -348,12 +365,27 @@ class TestAccionesGit(unittest.IsolatedAsyncioTestCase):
         self.assertIn("inválido", malo["error"])
         protegida = await git_actions.merge_pr(str(self.repo), "main")
         self.assertIn("protegida", protegida["error"])
+        git_process._exec.assert_not_awaited()
+
+    async def test_merge_rechaza_pr_a_trunk_antes_de_merge(self) -> None:
+        for base in ("main", "master"):
+            git_process._exec.reset_mock()
+            git_process._exec.return_value = (0, json.dumps({
+                "url": "https://example.test/pr/1", "baseRefName": base,
+                "state": "OPEN", "isDraft": False}))
+            out = await git_actions.merge_pr(str(self.repo), self.branch)
+            self.assertFalse(out["merged"])
+            self.assertEqual(out["base"], base)
+            self.assertIsNotNone(out["error"])
+            self.assertEqual(git_process._exec.await_count, 1)
+            self.assertEqual(git_process._exec.await_args.args[1:4], ("gh", "pr", "view"))
 
     async def test_pr_sin_commits_no_llama_a_gh(self) -> None:
         out = await git_actions.open_pr(str(self.repo), self.branch,
                                      title="vacío")
         self.assertIsNone(out["pr_url"])
         self.assertIn("commits propios", out["error"])
+        git_process._exec.assert_not_awaited()
 
 
 # =====================================================================

@@ -80,7 +80,7 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
     monkeypatch.setenv("GOOGLE_REAL", "0")  # Las pruebas optan por Google real explícitamente.
     # El warmup es independiente del watcher y antes iniciaba el CBM real
     # desde cada TestServer, aun con CBM_AUTO_WATCH=0.
-    from relay import config, server_lifecycle, user_accounts
+    from relay import config, server_lifecycle, user_accounts, night_worker
     from relay import shell
     from relay.db import Database
 
@@ -110,6 +110,8 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
         pass
 
     monkeypatch.setattr(server_lifecycle, "_warm_cbm_session", no_warmup)
+    # El contexto de Night Runs tampoco debe abrir un CBM real desde tests.
+    monkeypatch.setattr(night_worker, "cbm_binary_path", lambda: None)
     monkeypatch.setattr(shell, "BG_LOG_DIR", _fourbis_tmp / "bg-logs")
     monkeypatch.setattr(Database, "NOTES_ROOT_DEFAULT", str(_fourbis_tmp / "notes"))
     yield

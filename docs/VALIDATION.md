@@ -1,6 +1,6 @@
 # Validación de la versión de portafolio
 
-Revisiones locales del 16, 17, 22 y 24 de septiembre de 2026. Relay se presenta como proyecto
+Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 de octubre de 2026. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.
@@ -125,10 +125,11 @@ ventana estrecha, móvil a 390 px, cierre/reapertura con devolución de foco,
 ausencia de desbordamiento
 horizontal y de errores JavaScript o peticiones externas del navegador.
 
-Quedan dos detalles menores observados en la revisión inicial: “Cerrados
-recientemente” ordena las ventanas por apertura, no por cierre; aparece un
-aviso de consola al no existir el botón de proyectos ocultos. No forman parte
-de la corrección de distribución del grafo.
+Los dos detalles menores observados inicialmente ya están corregidos en la
+base `b98844b`: "Cerrados recientemente" usa la secuencia de cierre persistida,
+y no se inicializa el handler del botón de proyectos ocultos inexistente.
+La [revisión del 2 de octubre](qa/showcase-maintenance-2026-10-02.md) comprueba
+cierre, reapertura y recarga y actualiza el inventario de pendientes.
 
 Las capturas del README se generaron desde la aplicación con proyectos,
 conversaciones, estados y consumo sintéticos en una base temporal. La captura
@@ -265,3 +266,35 @@ Resultados locales de esta transferencia:
 
 La validación de código y navegador es local. Integración del PR y publicación
 de Pages se comprueban por separado; los borradores sociales no se enviaron.
+
+### Interrupciones y contratos históricos — 2 de octubre de 2026
+
+Se corrigió la cancelación de grafos sin conversación, con permisos comprobados
+antes de detener el worker y conservación de nodos y resultados al repetir la
+petición. Se amplió la cobertura del workspace para cierre, reapertura y F5,
+y se actualizaron las fixtures de cuentas GitHub, último Owner y escritura
+`read_only`. Night Runs queda aislado del CBM real durante las pruebas. La
+prueba de rutas Windows también usa un repositorio temporal propio.
+
+El workflow incorpora regresiones de grafos, contratos históricos y limpieza
+de procesos. El [registro de revisión](qa/showcase-maintenance-2026-10-02.md)
+incluye resultados, reproducción, inventario y límites del entorno. La demo
+pública ES/EN y el workspace pasaron en Chrome local.
+
+La suite general del primer cierre (`9ae91ad`) terminó con **2453 passed, 11 skipped y 18 subtests
+passed**, sin fallos ni errores de limpieza, en 767,18 segundos. Los comandos
+enfocados del workflow también pasaron; sus conjuntos se superponen con la
+suite general y no deben sumarse.
+
+La [segunda revisión del diff](qa/showcase-review-2026-10-02.md) encontró y
+corrigió la interrupción de limpieza al cancelar dos veces en paralelo o
+interrumpir la petición que espera al worker. Su registro detalla las once
+omisiones y la evidencia posterior, incluidos cuatro recorridos UI opt-in.
+La suite posterior terminó con **2473 passed, 11 skipped y 18 subtests passed**,
+sin fallos, en 737,58 segundos. Los checks exactos ampliados de CI pasaron con
+10, 64 y 140 pruebas en conjuntos que se superponen.
+
+El PR #9 de reanudación de grafos permanece separado. Se conservan la lista
+de proyectos tomada al arrancar por el watcher CBM y el contrato externo del
+digest CRM como decisiones pendientes. Los cambios se prepararon localmente;
+no se publicaron ramas ni PR, no se desplegó ni se cambió la protección de ramas.

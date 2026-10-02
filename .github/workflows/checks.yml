@@ -70,3 +70,24 @@ jobs:
           mcp-server/tests/test_orquestador.py
           -k "split or subdiv or fan_out or flag_apagado or subtarea"
           -q
+      - name: Check graph interruption and repeated requests
+        shell: pwsh
+        run: >-
+          python -m pytest
+          mcp-server/tests/test_disparador.py
+          mcp-server/tests/test_graph_cancel.py
+          mcp-server/tests/test_graphs_create_dup_guard.py
+          -q
+      - name: Check legacy contracts and process cleanup
+        shell: pwsh
+        run: >-
+          python -m pytest
+          mcp-server/tests/test_git_actions.py
+          mcp-server/tests/test_night.py::TestBranchWorker
+          mcp-server/tests/test_conversations.py::TestConversationsDb
+          mcp-server/tests/test_files.py
+          mcp-server/tests/test_shell_integrity.py
+          mcp-server/tests/test_shell_y_preguntas.py::test_cancelar_desde_afuera_tambien_mata_el_arbol
+          mcp-server/tests/test_shell_y_preguntas.py::test_background_vuelve_enseguida_y_el_proceso_queda_vivo
+          mcp-server/tests/test_shell_y_preguntas.py::test_el_comando_con_ruta_windows_corre
+          -q

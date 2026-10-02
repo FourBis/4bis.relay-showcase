@@ -113,7 +113,10 @@ def test_el_mensaje_de_read_only_dice_como_arreglarlo(repo):
     p = files.Permisos.para(str(repo), read_only=True)
     with pytest.raises(files.SinPermiso) as e:
         files.escribir(p, "x.txt", "y")
-    assert "Admin UI" in str(e.value)
+    assert "Equipo" in str(e.value)
+    assert "modo de esta tarea" in str(e.value)
+    assert "no habilita una tarea" in str(e.value)
+    assert not (repo / "x.txt").exists()
 
 
 # ---------- 3. leer ----------
