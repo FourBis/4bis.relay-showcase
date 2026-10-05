@@ -83,8 +83,9 @@ def load_oauth_config() -> None:
     local = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     if not isinstance(local, dict) or any(not isinstance(v, str) for v in local.values()):
         raise AccountError("La configuración OAuth local no es válida.")
+    # Una recarga conserva las claves que el primer load retiró del entorno.
     _oauth_config = {
-        name: local.get(name, os.environ.get(name, registry.get(name, "")))
+        name: local.get(name, os.environ.get(name, _oauth_config.get(name, registry.get(name, ""))))
         for name in OAUTH_CONFIG_NAMES
     }
     for name in _OAUTH_SECRET_NAMES | (OAUTH_CONFIG_NAMES & local.keys()):

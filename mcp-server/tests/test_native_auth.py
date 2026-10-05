@@ -197,6 +197,16 @@ async def test_existing_installation_is_not_reconfigured(auth):
     assert not await native_auth.enabled(db)
 
 
+async def test_setup_preserves_secrets_already_loaded_from_environment(auth, monkeypatch):
+    client, _ = auth
+    monkeypatch.setenv("RELAY_GOOGLE_CLIENT_ID", "google-client-test")
+    monkeypatch.setenv("RELAY_GOOGLE_CLIENT_SECRET", "google-secret-test")
+    user_accounts.load_oauth_config()
+    assert user_accounts._config_value("RELAY_GOOGLE_CLIENT_SECRET") == "google-secret-test"
+    await configure(client)
+    assert user_accounts.provider_config("google")["client_secret"] == "google-secret-test"
+
+
 async def test_demoted_admin_can_logout(auth, monkeypatch):
     client, db = auth
     await configure(client)
