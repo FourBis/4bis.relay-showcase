@@ -1040,7 +1040,8 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
     execute = orquestador.ejecutor_minimax(db, project, graph, modelo="fake")
     run = asyncio.create_task(orquestador.correr_grafo(db, "g-cancel", ejecutar=execute))
     try:
-        await asyncio.wait_for(started.wait(), 3)
+        # El arranque frío del SDK en CI no mide la cancelación del nodo.
+        await asyncio.wait_for(started.wait(), 15)
         before = (await db.get_task_graph("g-cancel"))["tasks"][0]
         chat_id = before["chat_id"]
         assert chat_id
