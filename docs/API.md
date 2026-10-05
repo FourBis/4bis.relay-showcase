@@ -108,6 +108,16 @@ La cancelación espera el cierre del worker y su persistencia. Un `409` no
 confirma cancelación: revisa el estado y el resultado antes de reintentar. Si el
 ID abreviado es ambiguo, usa el completo.
 
+Cuando `ask_human` guarda una pregunta, el experto termina con
+`phase_at_end: "question"`: no consulta otra vez al modelo ni ejecuta las
+herramientas posteriores de esa tanda. El historial conserva sus resultados
+y marca las llamadas que no se ejecutaron. Una tarea gestionada queda
+`blocked`, sin marcarse implementada ni publicarse. Para continuar una tarea
+sin grafo, responde la pregunta, usa el control `continue` de la tarea y
+envía el `resume_prompt` recibido como siguiente turno; responder por sí solo
+no reactiva una tarea bloqueada. Las preguntas vinculadas a nodos mantienen
+su flujo de respuesta y reanudación del grafo.
+
 Reanudar un grafo sin nodos listos o interrumpidos responde 409 y conserva
 su estado y resultados. El error distingue un plan terminado, una decisión
 humana pendiente y un fallo que necesita corrección; no inicia un worker vacío.

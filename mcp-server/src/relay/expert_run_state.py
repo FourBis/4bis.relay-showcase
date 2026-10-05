@@ -24,6 +24,7 @@ class ExpertRunState:
     output_text: str = ""
     progress_events: list[dict[str, Any]] = field(default_factory=list)
     provider_error: BaseException | None = None
+    question_state: dict = field(default_factory=dict)
     recent_tool_calls: deque[str] = field(default_factory=lambda: deque(maxlen=8))
     request_limit: int = 0
     task_token_limit: int | None = None

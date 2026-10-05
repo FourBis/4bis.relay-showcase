@@ -6,7 +6,7 @@ import time
 from collections import deque
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessagesTypeAdapter
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
 from typing import Any, Iterable, Optional
 from . import (
     config,
@@ -229,6 +229,7 @@ async def run_expert(
         project=project, db=db, chat_id=chat_id, conversation_id=conversation_id,
         _is_notes=_is_notes, bitacora=bitacora, _emit_progress=_emit_progress)
     tools.extend(context_tools)
+    state.question_state = _q_state
 
     def _build_agent(extra_tools: list[Any]) -> Agent:
         all_tools = tools + extra_tools
@@ -242,7 +243,8 @@ async def run_expert(
         return Agent(
             model,
             instructions=[instructions, bitacora.render],
-            toolsets=native + toolsets,
+            toolsets=[expert_toolsets.QuestionGateToolset(
+                wrapped=CombinedToolset(native + toolsets), question_state=_q_state)],
             tool_timeout=tool_timeout,
             retries=3,
         )
@@ -364,6 +366,8 @@ async def run_expert(
                 "tool_calls=%d, historial rescatado=%s)",
                 timeout, state.last_tool_name, state.tool_calls_count,
                 bool(state.messages_json))
+            break
+        if _q_state.get("asked"):
             break
         if state.last_phase == "steered" and state.steer_text:
             if not state.messages_json:

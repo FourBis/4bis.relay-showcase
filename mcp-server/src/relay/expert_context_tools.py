@@ -77,6 +77,7 @@ def build_context_tools(*, project, db, chat_id, conversation_id, _is_notes, bit
                 return ("No pude registrar la pregunta. Explicá en tu "
                         "respuesta final qué necesitás del humano.")
             _q_state["asked"] = q_id
+            _q_state["title"] = q["title"]
             logger.info("pregunta al humano %s (chat=%s): %s",
                         q_id, chat_id[:8], q["title"][:80])
             try:
@@ -90,7 +91,7 @@ def build_context_tools(*, project, db, chat_id, conversation_id, _is_notes, bit
                 "lo que hiciste y de qué estás esperando. No sigas "
                 "trabajando ni asumas una respuesta.")
 
-        tools.append(Tool(ask_human, takes_ctx=False))
+        tools.append(Tool(ask_human, takes_ctx=False, sequential=True))
 
     # Iter 9.8: cbm_query no se adjunta en el workspace de notas.
     if (cbm_runtime.cbm_binary_path() is not None and not _is_notes
