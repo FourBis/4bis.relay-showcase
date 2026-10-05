@@ -12,6 +12,7 @@ from .server_common import DB_KEY, GRAFOS_KEY, _require_auth, logger
 from . import coordination
 from . import orquestador
 from . import planificador
+from .server_questions import _question_graph
 from .server_graph_helpers import (
     _PLANIFICANDO, _cancelar_grafo, _grafo_en_curso, _grafo_publico, _grafo_sintetico, _largar_grafo,
     _graph_control_lock, _stages_de,
@@ -256,8 +257,19 @@ async def graphs_list(request: web.Request) -> web.Response:
 
 
 @_require_auth
-@coordination.guard_workspace(DB_KEY, source="graph")
 async def graphs_resume(request: web.Request) -> web.Response:
+    db = request.app[DB_KEY]
+    graph = await db.get_task_graph(request.match_info["id"])
+    if graph is None:
+        return web.json_response({"error": "not found"}, status=404)
+    # El guard de workspace puede reparar estado; autorizar antes de entrar.
+    if not await identity.can_control_graph(request, db, graph):
+        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
+    return await _resume_with_workspace(request)
+
+
+@coordination.guard_workspace(DB_KEY, source="graph")
+async def _resume_with_workspace(request: web.Request) -> web.Response:
     graph_id = request.match_info["id"]
     lock = _graph_control_lock(request.app, graph_id)
     if lock.locked():
@@ -291,9 +303,8 @@ async def _resume_graph(request: web.Request) -> web.Response:
     from . import task_service
     conv_id = g.get("conversation_id")
     state = await db.get_conversation_task(conv_id) if conv_id else {}
-    if not identity.can_write_project(request, project) and (
-            not conv_id or state.get("mode") == "write"):
-        return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+    if not await identity.can_control_graph(request, db, g):
+        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
     if state.get("state") in task_service.STOPPED:
         return web.json_response(
             {"error": "La tarea está detenida; continúa desde sus controles",
@@ -334,15 +345,14 @@ async def graphs_cancel(request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
     conv_id = g.get("conversation_id")
     if conv_id:
-        state = await db.get_conversation_task(conv_id)
-        allowed = state.get("mode") != "write" or await identity.can_write_conversation(request, db, conv_id)
+        allowed = await identity.can_control_graph(request, db, g)
     else:
         # Los grafos históricos pueden no tener conversación ni proyecto.
         # Admin debe poder detenerlos; otros actores necesitan el proyecto asignado.
         project = await db.get_project(g.get("project_slug") or "")
         allowed = identity.role_of(request) == identity.OWNER_ROLE or identity.can_write_project(request, project)
     if not allowed:
-        return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
     await _cancelar_grafo(request.app, graph_id)
     return web.json_response(
         _grafo_publico(await db.get_task_graph(graph_id)))
@@ -388,6 +398,9 @@ async def expert_question_answer(request: web.Request) -> web.Response:
     q = await db.get_expert_question(q_id)
     if q is None:
         return web.json_response({"error": "not found"}, status=404)
+    graph = await _question_graph(db, q)
+    if not await identity.can_control_graph(request, db, graph):
+        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -415,10 +428,7 @@ async def expert_question_answer(request: web.Request) -> web.Response:
                 {"error": f"opción {choice!r} no está en la pregunta"},
                 status=400)
 
-    active_gid = pregunta.get("graph_id") or ""
-    if not active_gid and q.get("conversation_id"):
-        active = await db.active_task_graph(q["conversation_id"])
-        active_gid = (active or {}).get("id") or ""
+    active_gid = (graph or {}).get("id") or ""
     active_task = _grafo_en_curso(request.app, active_gid)
     active_actor = getattr(active_task, "relay_actor", None) if active_task else None
     if active_task and active_actor != identity.requester(request):

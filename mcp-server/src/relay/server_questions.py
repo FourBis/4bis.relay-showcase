@@ -11,13 +11,46 @@ from .server_common import DB_KEY, NIGHT_KEY, _require_auth
 from . import identity
 from . import attachments as attachments_mod
 from .db import Database
+
+
+async def _question_graph(db, question):
+    """Resuelve el grafo o conserva la conversación para autorizar huérfanos."""
+    if question.get("kind") == "grafo":
+        try:
+            payload = json.loads(question.get("question_json") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("graph_id"):
+            graph = await db.get_task_graph(payload["graph_id"])
+            if graph:
+                return graph
+    if chat_id := question.get("chat_id"):
+        nodes = await db.run(
+            "SELECT graph_id FROM tasks WHERE chat_id=? "
+            "ORDER BY (estado='esperando_humano') DESC LIMIT 1", (chat_id,))
+        if nodes:
+            graph = await db.get_task_graph(nodes[0]["graph_id"])
+            if graph:
+                return graph
+    cid = question.get("conversation_id")
+    if cid:
+        graph = await db.active_task_graph(cid)
+        if graph:
+            return graph
+    return {"conversation_id": cid, "project_slug": question.get("project_slug")}
+
+
 @_require_auth
 async def expert_question_skip(request: web.Request) -> web.Response:
     """POST /questions/{q_id}/skip — el humano decide no contestar."""
     db = request.app[DB_KEY]
     q_id = request.match_info["q_id"]
-    if await db.get_expert_question(q_id) is None:
+    question = await db.get_expert_question(q_id)
+    if question is None:
         return web.json_response({"error": "not found"}, status=404)
+    graph = await _question_graph(db, question)
+    if not await identity.can_control_graph(request, db, graph):
+        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
     await db.skip_expert_question(q_id)
     return web.json_response({"ok": True, "id": q_id, "status": "skipped"})
 
