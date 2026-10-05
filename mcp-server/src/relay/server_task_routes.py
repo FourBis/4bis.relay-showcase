@@ -150,10 +150,7 @@ async def _cancel_conversation(app, cid):
 @_require_auth
 async def task_action(request):
     db, cid = request.app[DB_KEY], request.match_info["id"]
-    if not hasattr(db, "_task_control_locks"):
-        # ponytail: un proceso Relay; el executor protege sus fases en SQLite.
-        db._task_control_locks = {}
-    async with db._task_control_locks.setdefault(cid, asyncio.Lock()):
+    async with task_service.control_lock(db, cid):
         return await _apply_task_action(request)
 
 

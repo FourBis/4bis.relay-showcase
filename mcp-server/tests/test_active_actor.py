@@ -50,11 +50,12 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
     if graph_id_in_question:
         question["graph_id"] = "g1"
     db = SimpleNamespace(
-        get_expert_question=AsyncMock(return_value={"kind": "grafo" if graph_id_in_question else "experto",
+        get_expert_question=AsyncMock(return_value={"id": "q1", "kind": "grafo" if graph_id_in_question else "experto",
             "question_json": json.dumps(question), "conversation_id": "c1", "chat_id": "chat1"}),
         active_task_graph=AsyncMock(return_value={"id": "g1"}),
         answer_expert_question=AsyncMock(return_value=True),
         run=AsyncMock(return_value=[]),
+        get_conversation_task=AsyncMock(return_value={}),
         get_task_graph=AsyncMock(return_value={"id": "g1", "project_slug": "demo"}),
         get_project=AsyncMock(return_value={"slug": "demo"}))
     transition = AsyncMock(return_value="retry")
@@ -74,6 +75,7 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
         assert json.loads(response.text)["grafo"]["corriendo"] is True
     else:
         assert response.status == 409
+        request.json.assert_not_awaited()
         db.answer_expert_question.assert_not_awaited()
         transition.assert_not_awaited()
         resume.assert_not_awaited()

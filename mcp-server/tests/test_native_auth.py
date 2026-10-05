@@ -14,6 +14,7 @@ from relay import account_oauth, admin_observability, admin_users, identity, nat
 from relay.app_state import DB_KEY
 from relay.db import Database
 from relay.server_common import browser_guard, localhost_guard
+from relay.server_conversation_routes import conversations_create
 
 
 @pytest.fixture
@@ -33,6 +34,7 @@ async def auth(tmp_path, monkeypatch):
     app.router.add_get("/admin/", admin_observability.admin_index)
     app.router.add_get("/admin/api/me", admin_users.api_me)
     app.router.add_get("/admin/api/users", admin_users.api_users_list)
+    app.router.add_post("/conversations", conversations_create)
     async with TestClient(TestServer(app), cookie_jar=CookieJar(unsafe=True)) as client:
         yield client, db
 
@@ -117,6 +119,23 @@ async def test_first_admin_session_restart_and_logout(auth, monkeypatch):
     assert (await client.get("/admin/api/users")).status == 403
     assert "login-setup-form" in await (await client.get("/admin/")).text()
     assert (await client.get("/admin/api/users", headers={"Cookie": f"{native_auth.SESSION_COOKIE}={cookie.value}"})).status == 403
+
+
+async def test_personal_session_sets_conversation_requester_not_author(auth, monkeypatch, tmp_path):
+    client, db = auth
+    await configure(client)
+    await login(client, monkeypatch, email="personal@example.test")
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path),
+                             "defaults_json": {}})
+    monkeypatch.setattr("relay.server_conversation_routes.git_flow.is_git_repo",
+                        AsyncMock(return_value=False))
+
+    response = await client.post("/conversations", json={
+        "project": "demo", "author": "spoof@example.test"})
+    assert response.status == 201, await response.text()
+    conversation = await db.get_conversation((await response.json())["id"])
+    assert conversation["requested_by"] == "personal@example.test"
+    assert conversation["author"] == "spoof@example.test"
 
 
 @pytest.mark.parametrize("headers", [{"Origin": "https://evil.test"},

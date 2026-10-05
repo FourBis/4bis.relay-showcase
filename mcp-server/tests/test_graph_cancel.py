@@ -7,7 +7,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from relay import coordination, identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle, server_questions
+from relay import coordination, identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle, server_questions, server_task_routes, task_service
 from relay.db import Database
 
 
@@ -464,3 +464,254 @@ async def test_unlinked_question_requires_project_access(graph_client, action, a
         assert (await db.get_expert_question("unlinked"))["status"] == (
             "answered" if action == "answer" else "skipped")
     launch.assert_not_called()
+
+
+async def _waiting_question(db, state, kind="grafo"):
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state=state)
+    if kind != "chat":
+        await db.create_task_graph("stopped", "Espera", tareas=[
+            {"id": "waiting", "titulo": "Pendiente de respuesta"}],
+            project_slug="demo", conversation_id=cid)
+        await db.update_task("waiting", estado="esperando_humano", chat_id="chat-q",
+                             intentos=2, max_intentos=2)
+    payload = {"title": "¿Reintentar?", "options": [
+        {"key": "reintentar", "label": "Reintentar"}, {"key": "parar", "label": "Parar"}]}
+    if kind == "grafo":
+        payload.update(graph_id="stopped", task_id="waiting")
+    await db.create_expert_question("q-stopped", "chat-q", json.dumps(payload),
+                                   conversation_id=cid, project_slug="demo", kind=kind)
+    return cid
+
+
+@pytest.mark.parametrize("state", sorted(task_service.STOPPED))
+@pytest.mark.parametrize("kind", ["grafo", "choice"])
+async def test_answer_preserves_stopped_task_and_question(graph_client, state, kind):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, state, kind)
+    before = (await db.get_expert_question("q-stopped"),
+              await db.get_task_graph("stopped"), await db.get_conversation_task(cid))
+    for actor, expected in [("other@example.test", 403), (identity.OWNER, 409)]:
+        response = await client.post("/questions/q-stopped/answer",
+            json={"choice": "reintentar"}, headers={"X-Test-Actor": actor})
+        assert response.status == expected
+        assert (await db.get_expert_question("q-stopped"),
+                await db.get_task_graph("stopped"), await db.get_conversation_task(cid)) == before
+    launch.assert_not_called()
+    assert not app[server_common.GRAFOS_KEY]
+
+
+@pytest.mark.parametrize("worker_state", ["running", "done", "cancelling"])
+async def test_paused_worker_can_receive_answer_without_relaunch(graph_client, worker_state):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, "paused")
+    cleaning, release = asyncio.Event(), asyncio.Event()
+
+    async def work():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    worker = asyncio.create_task(work())
+    worker.relay_actor = identity.OWNER
+    app[server_common.GRAFOS_KEY]["stopped"] = worker
+    await asyncio.sleep(0)
+    if worker_state != "running":
+        worker.cancel()
+        await asyncio.wait_for(cleaning.wait(), 2)
+        if worker_state == "done":
+            release.set()
+            await asyncio.gather(worker, return_exceptions=True)
+    try:
+        response = await client.post("/questions/q-stopped/answer", json={"choice": "reintentar"})
+        assert response.status == (200 if worker_state == "running" else 409)
+        if worker_state == "running":
+            assert (await response.json())["grafo"]["corriendo"] is True
+        assert (await db.get_conversation_task(cid))["state"] == "paused"
+        assert (await db.get_task_graph("stopped"))["tasks"][0]["estado"] == (
+            "pendiente" if worker_state == "running" else "esperando_humano")
+        launch.assert_not_called()
+    finally:
+        release.set()
+        if not worker.cancelling():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+async def test_stopped_chat_answer_and_explicit_graph_stop_still_work(graph_client):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, "cancelled", "chat")
+    response = await client.post("/questions/q-stopped/answer", json={"text": "Nota conservada"})
+    assert response.status == 200
+    assert (await response.json())["resume_prompt"]
+    await db.update_conversation_task(cid, state="paused")
+    await db.create_task_graph("stopped", "Espera", tareas=[
+        {"id": "waiting", "titulo": "Espera"}], project_slug="demo", conversation_id=cid)
+    await db.update_task("waiting", estado="esperando_humano")
+    await db.create_expert_question("stop", "", json.dumps({
+        "graph_id": "stopped", "task_id": "waiting",
+        "options": [{"key": "parar", "label": "Parar"}]}),
+        project_slug="demo", conversation_id=cid, kind="grafo")
+    response = await client.post("/questions/stop/answer", json={"choice": "parar"})
+    assert response.status == 200
+    assert (await db.get_task_graph("stopped"))["estado"] == "cancelado"
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("busy", ["task_lock", "graph_lock", "task_cancel", "graph_cancel"])
+async def test_busy_question_control_preserves_pending_answer(graph_client, busy):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, "ready")
+    before = (await db.get_expert_question("q-stopped"), await db.get_task_graph("stopped"))
+    lock = None
+    if busy.endswith("lock"):
+        lock = (task_service.control_lock(db, cid) if busy == "task_lock"
+                else server_graph_helpers._graph_control_lock(app, "stopped"))
+        await lock.acquire()
+    elif busy == "task_cancel":
+        db._task_cancellations = {cid: asyncio.get_running_loop().create_future()}
+    else:
+        db._graph_cancellations = {"stopped": asyncio.get_running_loop().create_future()}
+    try:
+        for actor, expected in [("other@example.test", 403), (identity.OWNER, 409)]:
+            response = await client.post("/questions/q-stopped/answer",
+                json={"choice": "reintentar"}, headers={"X-Test-Actor": actor})
+            assert response.status == expected
+        assert (await db.get_expert_question("q-stopped"), await db.get_task_graph("stopped")) == before
+        launch.assert_not_called()
+    finally:
+        if lock:
+            lock.release()
+
+
+async def test_cancel_serializes_after_question_transition(graph_client, monkeypatch):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, "ready")
+    answering, release, cancel_waiting = (asyncio.Event() for _ in range(3))
+    answer, control_lock = db.answer_expert_question, task_service.control_lock
+    calls = []
+
+    async def delayed_answer(*args):
+        answering.set()
+        await release.wait()
+        return await answer(*args)
+
+    def observed_lock(database, conversation_id):
+        lock = control_lock(database, conversation_id)
+        if lock.locked():
+            cancel_waiting.set()
+        return lock
+
+    monkeypatch.setattr(db, "answer_expert_question", delayed_answer)
+    monkeypatch.setattr(task_service, "control_lock", observed_lock)
+    try:
+        respond = asyncio.create_task(client.post("/questions/q-stopped/answer",
+                                                   json={"choice": "reintentar"}))
+        calls.append(respond)
+        await asyncio.wait_for(answering.wait(), 2)
+        request = make_mocked_request("POST", f"/conversations/{cid}/task",
+                                      app=app, match_info={"id": cid})
+        monkeypatch.setattr(request, "json", AsyncMock(return_value={"action": "cancel"}))
+        cancel = asyncio.create_task(server_task_routes.task_action(request))
+        calls.append(cancel)
+        await asyncio.wait_for(cancel_waiting.wait(), 2)
+        assert not cancel.done()
+        release.set()
+        assert (await asyncio.wait_for(respond, 2)).status == 200
+        assert (await asyncio.wait_for(cancel, 2)).status == 200
+        assert (await db.get_conversation_task(cid))["state"] == "cancelled"
+        assert (await db.get_task_graph("stopped"))["estado"] == "cancelado"
+        assert (await db.get_expert_question("q-stopped"))["status"] == "answered"
+        launch.assert_called_once()
+    finally:
+        release.set()
+        await asyncio.gather(*calls, return_exceptions=True)
+
+
+@pytest.mark.parametrize("body", [None, [], "text", {"choice": 1}, {"text": []}])
+async def test_question_answer_rejects_invalid_body_without_mutation(graph_client, body):
+    client, db, app, launch = graph_client
+    await _waiting_question(db, "ready")
+    before = await db.get_expert_question("q-stopped")
+    response = await client.post("/questions/q-stopped/answer", data=json.dumps(body),
+                                 headers={"Content-Type": "application/json"})
+    assert response.status == 400
+    assert await db.get_expert_question("q-stopped") == before
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("interruption", ["cancel", "revoke"])
+async def test_slow_question_input_does_not_reserve_controls_or_old_permissions(
+        graph_client, monkeypatch, interruption):
+    client, db, app, launch = graph_client
+    cid = await _waiting_question(db, "ready")
+    before = await db.get_expert_question("q-stopped")
+    parsing, release = asyncio.Event(), asyncio.Event()
+
+    async def body():
+        parsing.set()
+        await release.wait()
+        return {"choice": "reintentar"}
+
+    request = make_mocked_request("POST", "/questions/q-stopped/answer",
+                                  app=app, match_info={"q_id": "q-stopped"})
+    request[identity.IDENTITY_KEY] = "dev@example.test"
+    monkeypatch.setattr(request, "json", body)
+    answering = asyncio.create_task(server_graph_routes.expert_question_answer(request))
+    try:
+        await asyncio.wait_for(parsing.wait(), 2)
+        if interruption == "cancel":
+            cancel = make_mocked_request("POST", f"/conversations/{cid}/task",
+                                         app=app, match_info={"id": cid})
+            monkeypatch.setattr(cancel, "json", AsyncMock(return_value={"action": "cancel"}))
+            assert (await asyncio.wait_for(server_task_routes.task_action(cancel), 2)).status == 200
+            assert (await db.get_conversation_task(cid))["state"] == "cancelled"
+        else:
+            identity._project_grants["dev@example.test"] = []
+        release.set()
+        response = await asyncio.wait_for(answering, 2)
+        assert response.status == (409 if interruption == "cancel" else 403)
+        assert await db.get_expert_question("q-stopped") == before
+        launch.assert_not_called()
+    finally:
+        release.set()
+        await asyncio.gather(answering, return_exceptions=True)
+
+
+async def test_question_disconnect_after_persist_finishes_graph_transition(
+        graph_client, monkeypatch):
+    _, db, app, launch = graph_client
+    await _waiting_question(db, "ready")
+    persisted, release, launched = (asyncio.Event() for _ in range(3))
+    answer = db.answer_expert_question
+
+    async def persist_then_wait(*args, **kwargs):
+        result = await answer(*args, **kwargs)
+        persisted.set()
+        await release.wait()
+        return result
+
+    launch.side_effect = lambda *args, **kwargs: launched.set()
+    monkeypatch.setattr(db, "answer_expert_question", persist_then_wait)
+    request = make_mocked_request("POST", "/questions/q-stopped/answer",
+                                  app=app, match_info={"q_id": "q-stopped"})
+    request[identity.IDENTITY_KEY] = identity.OWNER
+    monkeypatch.setattr(request, "json", AsyncMock(return_value={"choice": "reintentar"}))
+    answering = asyncio.create_task(server_graph_routes.expert_question_answer(request))
+    try:
+        await asyncio.wait_for(persisted.wait(), 2)
+        answering.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await answering
+        release.set()
+        await asyncio.wait_for(launched.wait(), 2)
+        assert (await db.get_expert_question("q-stopped"))["status"] == "answered"
+        assert (await db.get_task_graph("stopped"))["tasks"][0]["estado"] == "pendiente"
+        launch.assert_called_once()
+    finally:
+        release.set()
+        if not answering.done():
+            answering.cancel()
+        await asyncio.gather(answering, return_exceptions=True)

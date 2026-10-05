@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextlib import AsyncExitStack
 from typing import Optional
 
 from aiohttp import web
 from . import identity
 
-from .server_common import DB_KEY, GRAFOS_KEY, _require_auth, logger
+from .server_common import DB_KEY, GRAFOS_KEY, _require_auth, _spawn_bg, logger
 from . import coordination
 from . import orquestador
 from . import planificador
@@ -395,6 +396,14 @@ async def expert_questions_list(request: web.Request) -> web.Response:
     return web.json_response({"questions": out})
 
 
+def _question_actor_error(request, graph_id):
+    active = _grafo_en_curso(request.app, graph_id)
+    if active and getattr(active, "relay_actor", None) != identity.requester(request):
+        return web.json_response(
+            {"error": "El grafo pertenece a otra persona; inicia un nuevo turno cuando termine.",
+             "graph_id": graph_id}, status=409)
+
+
 @_require_auth
 async def expert_question_answer(request: web.Request) -> web.Response:
     """POST /questions/{q_id}/answer  {choice?, text?}
@@ -413,11 +422,44 @@ async def expert_question_answer(request: web.Request) -> web.Response:
     graph = await _question_graph(db, q)
     if not await identity.can_control_graph(request, db, graph):
         return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
+    denial = _question_actor_error(request, graph.get("id") or "")
+    if denial is not None:
+        return denial
+    # Leer al cliente antes de reservar los controles de ejecución.
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "json inválido"}, status=400)
+    if not isinstance(body, dict) or any(
+            body.get(key) is not None and not isinstance(body[key], str)
+            for key in ("choice", "text")):
+        return web.json_response({"error": "choice y text deben ser texto."}, status=400)
+    from . import task_service
+    locks = []
+    if graph.get("id"):
+        cid = graph.get("conversation_id") or q.get("conversation_id")
+        if cid:
+            locks.append(task_service.control_lock(db, cid))
+        locks.append(_graph_control_lock(request.app, graph["id"]))
+    async def finish_answer():
+        # Mismo orden que cancelar una tarea: conversación antes del grafo.
+        async with AsyncExitStack() as controls:
+            for lock in locks:
+                if lock.locked():
+                    return web.json_response(
+                        {"error": "La tarea está completando otra acción; espera y reintenta."}, status=409)
+                await controls.enter_async_context(lock)
+            if not await identity.can_control_graph(request, db, graph):
+                return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
+            return await _answer_question(request, q, graph, body)
 
+    # Una desconexión no deja la respuesta guardada sin aplicar al nodo.
+    return await asyncio.shield(_spawn_bg(finish_answer(), hold_workspace=False))
+
+
+async def _answer_question(request, q, graph, body):
+    from . import task_service
+    db, q_id = request.app[DB_KEY], q["id"]
     choice = (body.get("choice") or "").strip()
     texto = (body.get("text") or "").strip()
     if not choice and not texto:
@@ -441,12 +483,22 @@ async def expert_question_answer(request: web.Request) -> web.Response:
                 status=400)
 
     active_gid = (graph or {}).get("id") or ""
-    active_task = _grafo_en_curso(request.app, active_gid)
-    active_actor = getattr(active_task, "relay_actor", None) if active_task else None
-    if active_task and active_actor != identity.requester(request):
-        return web.json_response(
-            {"error": "El grafo pertenece a otra persona; inicia un nuevo turno cuando termine.",
-             "graph_id": active_gid}, status=409)
+    cid = graph.get("conversation_id") or q.get("conversation_id")
+    if active_gid:
+        if (active_gid in getattr(db, "_graph_cancellations", {})
+                or cid in getattr(db, "_task_cancellations", {})):
+            return web.json_response({"error": "La cancelación todavía está en curso."}, status=409)
+        state = await db.get_conversation_task(cid) if cid else {}
+        worker = request.app[GRAFOS_KEY].get(active_gid)
+        paused_live = (state.get("state") == "paused" and worker is not None
+                       and not worker.done() and not worker.cancelling())
+        stopping = q.get("kind") == "grafo" and choice == "parar"
+        if state.get("state") in task_service.STOPPED and not paused_live and not stopping:
+            return web.json_response(
+                {"error": "La tarea está detenida; revisa sus controles antes de responder."}, status=409)
+    denial = _question_actor_error(request, active_gid)
+    if denial is not None:
+        return denial
 
     ok = await db.answer_expert_question(
         q_id, json.dumps({"choice": choice, "label": etiqueta,
