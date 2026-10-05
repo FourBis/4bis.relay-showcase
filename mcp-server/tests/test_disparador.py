@@ -425,6 +425,23 @@ class TestDisparadorDelChat(_Base):
 class TestRetomar(_Base):
     """F4: un grafo cortado se retoma, y contestar mueve el plan."""
 
+    async def test_resume_sin_trabajo_lanzable_no_anuncia_ejecucion(self) -> None:
+        for state in ("hecho", "fallado", "esperando_humano"):
+            with self.subTest(state=state):
+                graph_id = f"no_work_{state}"
+                await self.db.create_task_graph(graph_id, "Sin trabajo lanzable", tareas=[
+                    {"id": graph_id + "_node", "titulo": "Nodo"}], project_slug="demo")
+                await self.db.update_task(graph_id + "_node", estado=state)
+                await self.db.set_task_graph_state(graph_id, "cancelado")
+                before = await self.db.get_task_graph(graph_id)
+
+                with patch("relay.server_graph_routes._largar_grafo") as launch:
+                    response = await self.client.post(f"/graphs/{graph_id}/resume")
+
+                self.assertEqual(response.status, 409)
+                self.assertEqual(await self.db.get_task_graph(graph_id), before)
+                launch.assert_not_called()
+
     async def test_resume_rechaza_tarea_detenida_sin_mutar_grafo(self) -> None:
         from relay.server_common import GRAFOS_KEY
 

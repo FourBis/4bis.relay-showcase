@@ -262,10 +262,8 @@ async def graphs_list(request: web.Request) -> web.Response:
 async def graphs_resume(request: web.Request) -> web.Response:
     """POST /graphs/{id}/resume — retoma un grafo cortado.
 
-    `correr_grafo` sana al arrancar (nodos que quedaron `corriendo`,
-    reservas huérfanas), así que acá no hay nada especial que hacer más
-    que volver a largarlo. Lo que sí hace falta es no largar dos: un
-    grafo ya corriendo devuelve 409 en vez de duplicar los nodos.
+    El orquestador recupera nodos interrumpidos al arrancar. Un grafo
+    ya corriendo o sin trabajo ejecutable devuelve 409 sin relanzarlo.
     """
     db = request.app[DB_KEY]
     graph_id = request.match_info["id"]
@@ -291,6 +289,16 @@ async def graphs_resume(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "La tarea está detenida; continúa desde sus controles",
              "graph_id": graph_id}, status=409)
+    from . import grafo as G
+    nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in g["tasks"]]
+    if not G.listas(nodes) and not any(n.estado == G.CORRIENDO for n in nodes):
+        reason = ("Responde la pregunta pendiente antes de retomar."
+                  if any(n.estado == G.ESPERANDO for n in nodes)
+                  else "Continúa la conversación indicando cómo resolver el fallo."
+                  if G.estado_del_grafo(nodes) != "hecho"
+                  else "El plan ya terminó.")
+        return web.json_response({"error": "No hay tareas que se puedan retomar. " + reason,
+                                  "graph_id": graph_id}, status=409)
     # Un grafo cancelado o fallado vuelve a `activo`: retomarlo es
     # justamente decir "esto sigue". Si no, `estado_del_grafo` lo dejaría
     # como estaba y el panel mostraría un plan muerto avanzando.
