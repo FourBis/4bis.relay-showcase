@@ -97,6 +97,25 @@ assert.doesNotMatch(readOnlyCreator, /enable_write|Publicar PR|data-task-track/)
 const readOnlyOtherActor = panelHtml({mode:"read_only",state:"ready",can_control:false,
   allowed_actions:[]});
 assert.doesNotMatch(readOnlyOtherActor, /data-task-action=|data-task-track/);
+const cancellingOwner = panelHtml({mode:"write",state:"cancelling",can_control:true,
+  allowed_actions:["continue","pause","cancel","publish","track"],
+  publish_allowed:true,pr_url:"https://example.invalid/pr/3",tracking:{enabled:true}});
+assert.match(cancellingOwner, /Cancelando…/);
+assert.equal((cancellingOwner.match(/disabled\s+data-task-action/g) || []).length, 4);
+assert.match(cancellingOwner, /data-task-track disabled/);
+const cancellingReadOnlyOwner = panelHtml({mode:"read_only",state:"cancelling",
+  can_control:true,allowed_actions:["continue","pause","cancel","enable_write"]});
+assert.equal((cancellingReadOnlyOwner.match(/disabled\s+data-task-action/g) || []).length, 3);
+assert.doesNotMatch(cancellingReadOnlyOwner, /data-task-action="enable_write"/);
+const cancellationRetry = panelHtml({mode:"write",state:"cancelled",cancellation_error:"queue failed",
+  publish_allowed:true,allowed_actions:["continue","pause","cancel","publish"]});
+assert.equal((cancellationRetry.match(/disabled\s+data-task-action/g) || []).length, 3);
+assert.match(cancellationRetry, /data-task-action="cancel"/);
+assert.doesNotMatch(cancellationRetry, /disabled\s+data-task-action="cancel"/);
+assert.doesNotMatch(panelHtml({mode:"write",state:"cancelled",cancellation_error:"queue failed",
+  allowed_actions:["continue","pause","publish"]}), /data-task-action="cancel"/);
+assert.match(panelHtml({mode:"write",state:"cancelled",cancellation_error:"queue failed",
+  can_control:false}), /disabled\s+data-task-action="cancel"/);
 assert.doesNotMatch(panelHtml({mode:"read_only",state:"running",
   allowed_actions:["enable_write"]}), /data-task-action="enable_write"/);
 assert.doesNotMatch(panelHtml({mode:"read_only",state:"finished",

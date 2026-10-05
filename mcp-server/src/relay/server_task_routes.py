@@ -11,7 +11,8 @@ from aiohttp import web
 
 from . import identity, task_pr, task_service, task_workspace
 from .app_state import DB_KEY, GRAFOS_KEY
-from .server_common import _require_auth
+from .server_common import _require_auth, _spawn_bg
+from .server_graph_helpers import _PLANIFICANDO, _cancelar_grafo
 from .user_accounts import AccountError
 
 
@@ -19,6 +20,9 @@ async def _task_snapshot(request, db, cid):
     state = await task_service.snapshot(db, cid)
     if not state:
         return state
+    cancelling = getattr(db, "_task_cancellations", {}).get(cid)
+    if cancelling is not None and not cancelling.done():
+        state["state"] = "cancelling"
     conv = await db.get_conversation(cid)
     project = await db.get_project(conv["project_slug"]) if conv else None
     actions = []
@@ -99,6 +103,50 @@ async def _continue(db, project, cid, body):
             "Hay feedback pendiente; reactiva el seguimiento para procesarlo" if waiting_feedback else ""))
 
 
+async def _cancel_conversation(app, cid):
+    db = app[DB_KEY]
+    if not hasattr(db, "_task_cancellations"):
+        # ponytail: un proceso; usar reserva persistente al distribuir Relay.
+        db._task_cancellations = {}
+    pending = db._task_cancellations
+    finalizer = pending.get(cid)
+    if finalizer is None:
+        async def finish_cancel():
+            graph = await db.active_task_graph(cid)
+            # Detener la cola durable antes de esperar a los workers.
+            await db.update_conversation_task(cid, state="cancelled", tracking={"enabled": False},
+                                              cancellation_error="")
+            try:
+                try:
+                    await db.cancel_pending_conversation_events(cid)
+                finally:
+                    runner = app.get(task_service.TASK_RUNNERS_KEY, {}).get(cid)
+                    workers = {task for task in (runner, _PLANIFICANDO.get(cid)) if task is not None}
+                    for worker in workers:
+                        if not worker.cancelling():
+                            worker.cancel()
+                    waiting = list(workers)
+                    if graph:
+                        waiting.append(_cancelar_grafo(app, graph["id"]))
+                    results = await asyncio.gather(*waiting, return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, Exception):
+                            raise result
+                    # También alcanza un grafo registrado durante el cierre del runner.
+                    late_graph = await db.active_task_graph(cid)
+                    if late_graph:
+                        await _cancelar_grafo(app, late_graph["id"])
+            except Exception:
+                await db.update_conversation_task(cid, cancellation_error=
+                    "No se pudo completar la cancelación. Vuelve a cancelar o pide una revisión.")
+                raise
+
+        finalizer = _spawn_bg(finish_cancel(), hold_workspace=False)
+        pending[cid] = finalizer
+        finalizer.add_done_callback(lambda _: pending.pop(cid, None))
+    await asyncio.shield(finalizer)
+
+
 @_require_auth
 async def task_action(request):
     db, cid = request.app[DB_KEY], request.match_info["id"]
@@ -148,14 +196,7 @@ async def _apply_task_action(request):
         elif action == "cancel":
             if state.get("state") in {"finished", "cleaned"}:
                 raise ValueError("La tarea ya terminó")
-            await db.update_conversation_task(cid, state="cancelled", tracking={"enabled": False})
-            await db.cancel_pending_conversation_events(cid)
-            runner = request.app.get(task_service.TASK_RUNNERS_KEY, {}).get(cid)
-            if runner:
-                runner.cancel()
-            graph = await db.active_task_graph(cid)
-            if graph and (running := request.app.get(GRAFOS_KEY, {}).get(graph["id"])):
-                running.cancel()
+            await _cancel_conversation(request.app, cid)
         elif action == "continue":
             if terminal:
                 raise ValueError("La tarea ya terminó; el workspace se conserva para revisión")

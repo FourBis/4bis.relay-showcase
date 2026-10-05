@@ -264,6 +264,20 @@ def _modelo_que_falla(*resultados):
     return _Agente, vistos
 
 
+async def test_cancelled_planner_closes_chat(db, monkeypatch):
+    import asyncio
+
+    agente, vistos = _modelo_que_falla(asyncio.CancelledError())
+    monkeypatch.setattr(experts, "Agent", agente)
+    monkeypatch.setattr(experts, "build_model", lambda spec: object())
+    with pytest.raises(asyncio.CancelledError):
+        await planificador.armar_grafo({"slug": "demo"}, "Cancelar plan", db=db)
+    chats = await db.list_chats(project_slug="demo")
+    assert len(vistos) == len(chats) == 1
+    assert chats[0]["status"] == "cancelled"
+    assert await db.active_task_graph_by_project("demo") is None
+
+
 async def test_un_500_del_proveedor_se_reintenta_igual(db, monkeypatch):
     """El endpoint gratis de NVIDIA tira 500 cada tanto. Repetir la MISMA
     request alcanza — antes el primer 500 mataba la planificación entera

@@ -42,8 +42,10 @@ class DatabaseGraphMixin:
         # `active_task_graph` lo devuelve y no deja armar otro.
         sentencias: list = [(
             "INSERT INTO task_graphs (id, conversation_id, project_slug, "
-            "objetivo, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (graph_id, conversation_id, project_slug, objetivo, ahora, ahora))]
+            "objetivo, created_at, updated_at, estado) VALUES (?,?,?,?,?,?,"
+            "CASE WHEN (SELECT json_extract(task_json, '$.state') FROM conversations WHERE id=?) "
+            "= 'cancelled' THEN 'cancelado' ELSE 'activo' END)",
+            (graph_id, conversation_id, project_slug, objetivo, ahora, ahora, conversation_id))]
         for n in nodos:
             sentencias.append((
                 "INSERT INTO tasks (id, graph_id, titulo, detalle, "

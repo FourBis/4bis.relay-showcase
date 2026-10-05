@@ -1,6 +1,7 @@
 """Server domain handlers extracted from the composition entrypoint."""
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Optional
@@ -100,17 +101,25 @@ async def graphs_create(request: web.Request) -> web.Response:
             status=409)
 
     planning_key = conv_id or slug
+    if conv_id:
+        task = await db.get_conversation_task(conv_id)
+        if (task.get("state") in task_service.STOPPED
+                or conv_id in getattr(db, "_task_cancellations", {})):
+            return web.json_response({"error": "La tarea está detenida; revisa sus controles."}, status=409)
+    # No ceder el loop entre comprobar la reserva y registrar al planificador.
     if planning_key in _PLANIFICANDO:
         return web.json_response(
             {"error": "este proyecto ya está armando un grafo",
              "message": "Esperá a que el planificador termine y mirá "
                         "el grafo que salga de ahí."},
             status=409)
-    _PLANIFICANDO.add(planning_key)
+    _PLANIFICANDO[planning_key] = asyncio.current_task()
     try:
         g = await planificador.armar_grafo(
             project, objetivo, db=db, conversation_id=conv_id,
             contexto=(body.get("contexto") or "").strip())
+    except asyncio.CancelledError:
+        return web.json_response({"error": "La planificación fue cancelada."}, status=409)
     except RuntimeError as e:
         # El planificador no pudo. Es un 502 y no un 500: el relay
         # funciona, el que no contestó algo usable fue el modelo.
@@ -118,8 +127,11 @@ async def graphs_create(request: web.Request) -> web.Response:
     finally:
         # Sale sí o sí: si el planificador rompe y no soltamos el slug,
         # el proyecto queda trabado hasta reiniciar el relay.
-        _PLANIFICANDO.discard(planning_key)
+        _PLANIFICANDO.pop(planning_key, None)
 
+    if conv_id and (await db.get_conversation_task(conv_id)).get("state") in task_service.STOPPED:
+        return web.json_response({"error": "La tarea está detenida; revisa sus controles.",
+                                  "graph_id": g["id"]}, status=409)
     if body.get("arrancar", True):
         from . import identity
         _largar_grafo(request.app, project, g["id"], identity.requester(request))

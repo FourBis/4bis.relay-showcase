@@ -41,7 +41,9 @@ def visible_task(task, *, owner=False):
         value = task.get(key)
         if isinstance(value, dict):
             result[key] = {name: value[name] for name in allowed if name in value}
-    if any(task.get(key) for key in ("error", "workspace_error", "tracking_error", "tracking_stop")):
+    if task.get("cancellation_error"):
+        result["cancellation_error"] = "No se pudo completar la cancelación."
+    if any(task.get(key) for key in ("error", "workspace_error", "tracking_error", "tracking_stop", "cancellation_error")):
         result["error"] = "La tarea requiere revisión del propietario."
     return {**result, "can_control": False}
 
@@ -66,7 +68,7 @@ async def snapshot(db, conv_id):
     latest = await db.run("SELECT id, state, chat_id FROM conversation_events WHERE conversation_id=? ORDER BY id DESC LIMIT 1", (conv_id,))
     return {**task, "id": conv_id, "pr_url": (conv or {}).get("pr_url"),
             "last_event": latest[0] if latest else None,
-            "error": task.get("workspace_error") or task.get("error") or task.get("tracking_error") or task.get("tracking_stop") or "",
+            "error": task.get("cancellation_error") or task.get("workspace_error") or task.get("error") or task.get("tracking_error") or task.get("tracking_stop") or "",
             "branch": (conv or {}).get("branch"),
             "pending_events": sum(e["state"] == "pending" for e in events),
             "uncertain_events": [e["id"] for e in events if e["state"] == "uncertain"]}
