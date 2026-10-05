@@ -457,9 +457,8 @@ async def experts_cancel(request: web.Request) -> web.Response:
     event = await db.conversation_event_for_chat(chat_id)
     if event and event["state"] in {"pending", "processing", "uncertain"}:
         cid = event["conversation_id"]
-        state = await db.get_conversation_task(cid)
-        if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, cid):
-            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+        if not await identity.can_control_graph(request, db, {"conversation_id": cid}):
+            return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
         await db.update_conversation_task(cid, state="paused", tracking={"enabled": False})
         if event["state"] == "pending":
             await db.finish_conversation_event(event["id"], state="cancelled", error="Cancelado por el usuario")
@@ -472,9 +471,16 @@ async def experts_cancel(request: web.Request) -> web.Response:
     cancelled: list[str] = []
     zombies: list[str] = []
     if matches:
+        # Autorizar el conjunto antes de cancelar: un prefijo no concede permisos.
+        for cid in matches:
+            if not await identity.can_control_chat(request, db, await db.get_chat(cid)):
+                return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
         # Caso normal: el proceso está vivo, mandamos cancel().
         for cid in matches:
-            running[cid].cancel()
+            worker = running.get(cid)
+            if worker is None or worker.done():
+                continue  # Pudo terminar mientras se comprobaban los permisos.
+            worker.cancel()
             rp = progress.get(cid)
             if rp is not None:
                 rp.finished = True
@@ -489,6 +495,8 @@ async def experts_cancel(request: web.Request) -> web.Response:
         # del usuario es "sácalo de En curso", lo sacamos.
         chat = await db.get_chat(chat_id)
         if chat and chat.get("status") == "running":
+            if not await identity.can_control_chat(request, db, chat):
+                return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
             await db.finish_chat(
                 chat_id, status="cancelled",
                 error="zombie: cancelado sin proceso vivo (relay "
@@ -532,11 +540,11 @@ async def experts_steer(request: web.Request) -> web.Response:
     event = await db.conversation_event_for_chat(chat_id)
     if event:
         cid = event["conversation_id"]
+        if not await identity.can_control_graph(request, db, {"conversation_id": cid}):
+            return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
         state = await db.get_conversation_task(cid)
         if state.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa la tarea desde sus controles"}, status=409)
-        if state.get("mode") == "write" and not await identity.can_write_conversation(request, db, cid):
-            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
         key = body.get("request_id") or str(uuid.uuid4())
         if not isinstance(key, str) or not 1 <= len(key) <= 128:
             return web.json_response({"error": "request_id inválido"}, status=400)

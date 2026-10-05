@@ -224,6 +224,19 @@ async def can_control_graph(request: web.Request, db, graph: dict) -> bool:
     return can_control_task(request, project, state, conversation)
 
 
+async def can_control_chat(request: web.Request, db, chat: dict | None) -> bool:
+    if role_of(request) == OWNER_ROLE:
+        return True
+    if not chat:
+        return False
+    if chat.get("conversation_id"):
+        return await can_control_graph(request, db, chat)
+    project = await db.get_project(chat.get("project_slug") or "")
+    return can_write_project(request, project) or (
+        role_of(request) in {"member", "subadmin"}
+        and bool(chat.get("requested_by")) and chat["requested_by"] == requester(request))
+
+
 # Lo que puede tocar un member. Es allowlist y no blocklist a propósito:
 # hay 245 rutas y con una blocklist alcanza con olvidarse de UNA para
 # regalarla. Así, lo que se agregue mañana nace owner-only hasta que
