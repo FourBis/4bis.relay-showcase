@@ -19,6 +19,13 @@ TASK_LOOP_KEY = web.AppKey("task_loop", asyncio.Task)
 STOPPED = {"paused", "cancelled", "finished", "blocked", "cleaned"}
 
 
+def control_lock(db, cid):
+    if not hasattr(db, "_task_control_locks"):
+        # ponytail: un proceso Relay; usar reserva durable al distribuirlo.
+        db._task_control_locks = {}
+    return db._task_control_locks.setdefault(cid, asyncio.Lock())
+
+
 def visible_task(task, *, owner=False):
     """Members see task progress, never repository configuration or diagnostics."""
     if isinstance(task, str):

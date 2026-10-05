@@ -19,6 +19,10 @@ acceso de instalaciones existentes. Consulta [Cuentas personales](USER_ACCOUNTS.
 | POST | `/admin/api/auth/logout` | JSON vacío; revoca la sesión y borra su cookie |
 
 Después del alta, las APIs locales requieren la sesión y el rol correspondiente.
+Un cliente HTTP que deba conservar la cuenta personal envía la cookie `relay-session`
+recibida al iniciar sesión. El body `author` no establece la identidad. Si
+`RELAY_API_KEY` está configurada, `X-Relay-Key` también debe coincidir; esa clave
+solo habilita el acceso y no identifica a una persona.
 El login no guarda tokens de herramientas; estas se conectan desde **Mi cuenta**.
 Las solicitudes JSON verifican origen y el alta rechaza proxies. Un host público
 sigue requiriendo Cloudflare Access; la sesión nativa no abre el servidor a Internet.
