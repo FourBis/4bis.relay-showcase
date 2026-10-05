@@ -141,7 +141,7 @@ async def test_owner_policy_stays_unrestricted_and_project_read_only_stays_stric
 
 @pytest.mark.asyncio
 async def test_member_task_actions_are_project_scoped_and_never_publish(monkeypatch):
-    db = AsyncMock()
+    db = AsyncMock(_task_cancellations={})
     db.get_conversation.return_value = {"project_slug": "aurora-demo"}
     db.get_project.return_value = PROJECT_A
     monkeypatch.setattr(server_task_routes.task_service, "snapshot",

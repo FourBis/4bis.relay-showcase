@@ -202,6 +202,14 @@ async def test_member_cannot_read_effective_system_prompt_owner_can(
         await client.close()
 
 
+def test_cancel_failure_keeps_retry_signal_without_private_diagnostics():
+    from relay.task_service import visible_task
+
+    visible = visible_task({"state": "cancelled", "cancellation_error": "PRIVATE_DIAGNOSTIC"})
+    assert visible["cancellation_error"] == "No se pudo completar la cancelación."
+    assert "PRIVATE_DIAGNOSTIC" not in str(visible)
+
+
 def _task_payload(value):
     if isinstance(value, str):
         return json.loads(value)

@@ -35,7 +35,7 @@ export function taskActionLabel(action) { return ACTIONS[action] || action; }
 function stateText(task) {
   if (!task) return "sin tarea persistente";
   const labels = { ready: "lista", running: "en curso", queued: "en cola",
-    paused: "pausada", error: "con error", cancelled: "cancelada",
+    paused: "pausada", error: "con error", cancelling: "Cancelando…", cancelled: "cancelada",
     provisioning: "preparando workspace", implemented: "implementada",
     validating: "validando", publishing: "publicando", review: "pendiente de revisión",
     finished: "finalizada", cleaned: "workspace limpiado", blocked: "bloqueada" };
@@ -62,20 +62,23 @@ function taskAllows(task, action) {
 export function panelHtml(task) {
   if (!task) return `<div class="chat-task-empty">Sin tarea persistente para este hilo.</div>`;
   const tracking = task.tracking || {};
-  const terminal = ["cancelled", "finished", "cleaned"].includes(task.state);
+  const controlsLocked = ["cancelled", "cancelling", "finished", "cleaned"]
+    .includes(task.state);
   const writeTask = task.mode === "write";
   const hasActionContract = Array.isArray(task.allowed_actions);
   const granted = (action) => taskAllows(task, action);
   const authorized = granted;
   const trackAllowed = authorized("track") && writeTask && !!task.pr_url && !!task.publish_allowed
-    && !terminal && !["paused", "provisioning"].includes(task.state);
-  const busy = ["running", "validating", "publishing", "provisioning"].includes(task.state);
-  const actionAllowed = (action) => authorized(action) && !terminal
+    && !controlsLocked && !["paused", "provisioning"].includes(task.state);
+  const busy = ["running", "validating", "publishing", "provisioning", "cancelling"]
+    .includes(task.state);
+  const actionAllowed = (action) => authorized(action)
+    && (!controlsLocked || (task.state === "cancelled" && !!task.cancellation_error && action === "cancel"))
     && (action !== "publish" || (writeTask && !!task.publish_allowed
       && !["blocked", "paused", "provisioning"].includes(task.state)))
     && (action !== "continue" || !busy)
     && (action !== "pause" || task.state !== "paused");
-  const enableWrite = authorized("enable_write") && !writeTask && !busy && !terminal;
+  const enableWrite = authorized("enable_write") && !writeTask && !busy && !controlsLocked;
   const limits = tracking.enabled
     ? `<span class="badge warn">seguimiento activo · ${tracking.iterations || 0}/${tracking.max_iterations || 0} iteraciones</span>`
     : `<span class="badge dim">seguimiento apagado</span>`;

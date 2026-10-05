@@ -23,6 +23,7 @@ hay que poder probar cien casos feos sin gastar un token.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -527,6 +528,10 @@ async def armar_grafo(
             return g
         raise RuntimeError(
             f"el planificador no pudo armar un grafo válido: {ultimo}")
+    except asyncio.CancelledError:
+        if chat_id and hasattr(db, "finish_chat"):
+            await db.finish_chat(chat_id, status="cancelled", error="Planificación cancelada")
+        raise
     except Exception as e:
         if chat_id and hasattr(db, "finish_chat"):
             await db.finish_chat(chat_id, status="error", error=str(e))

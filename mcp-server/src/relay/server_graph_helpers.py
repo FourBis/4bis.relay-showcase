@@ -616,6 +616,6 @@ def _largar_grafo(app: web.Application, project: dict, graph_id: str,
 # timeout y reintentó. En memoria alcanza porque el relay es UN proceso;
 # si algún día son varios, esto tiene que ser una fila con TTL como las
 # reservas de archivo.
-# ponytail: set en memoria, no reserva persistida. Upgrade cuando el
+# ponytail: tareas en memoria, no reserva persistida. Upgrade cuando el
 # relay corra en más de un proceso.
-_PLANIFICANDO: set[str] = set()
+_PLANIFICANDO: dict[str, asyncio.Task] = {}
