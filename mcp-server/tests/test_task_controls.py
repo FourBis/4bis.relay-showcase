@@ -60,7 +60,8 @@ async def test_cancel_waits_for_cleanup_and_survives_request_cancellation(
         monkeypatch.setattr(request, "json", AsyncMock(return_value={"action": "cancel"}))
         first = asyncio.create_task(server_task_routes.task_action(request))
         calls.append(first)
-        await asyncio.wait_for(cleaning.wait(), 2)
+        # Incluye las lecturas/escrituras previas de SQLite en el runner de CI.
+        await asyncio.wait_for(cleaning.wait(), 15)
         status = await client.get(f"/conversations/{cid}/task")
         assert (await status.json())["state"] == "cancelling"
         assert not first.done(), "no confirmar cancelación mientras se limpian recursos"
@@ -119,7 +120,7 @@ async def test_cancel_queue_failure_still_waits_for_worker_and_can_retry(tmp_pat
         worker = asyncio.create_task(work())
         app[task_service.TASK_RUNNERS_KEY] = {cid: worker}
         request = asyncio.create_task(client.post(f"/conversations/{cid}/task", json={"action": "cancel"}))
-        await asyncio.wait_for(cleaning.wait(), 2)
+        await asyncio.wait_for(cleaning.wait(), 15)
         assert not request.done()
         status = await client.get(f"/conversations/{cid}/task")
         assert (await status.json())["state"] == "cancelling"
@@ -172,7 +173,7 @@ async def test_cancel_stops_planner_and_late_graph_cannot_become_active(tmp_path
         await asyncio.wait_for(planning.wait(), 2)
         cancel = asyncio.create_task(client.post(f"/conversations/{cid}/task", json={"action": "cancel"}))
         calls.append(cancel)
-        await asyncio.wait_for(cleaning.wait(), 2)
+        await asyncio.wait_for(cleaning.wait(), 15)
         assert not cancel.done()
         status = await client.get(f"/conversations/{cid}/task")
         assert (await status.json())["state"] == "cancelling"
