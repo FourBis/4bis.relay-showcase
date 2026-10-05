@@ -18,11 +18,12 @@ acceso de instalaciones existentes. Consulta [Cuentas personales](USER_ACCOUNTS.
 | GET | `/admin/api/account/github/callback` | Verifica state, PKCE e identidad; crea sesión y redirige al workspace |
 | POST | `/admin/api/auth/logout` | JSON vacío; revoca la sesión y borra su cookie |
 
-Después del alta, las APIs locales requieren la sesión y el rol correspondiente.
-Un cliente HTTP que deba conservar la cuenta personal envía la cookie `relay-session`
-recibida al iniciar sesión. El body `author` no establece la identidad. Si
-`RELAY_API_KEY` está configurada, `X-Relay-Key` también debe coincidir; esa clave
-solo habilita el acceso y no identifica a una persona.
+Después del alta, las solicitudes usan la identidad autenticada y los permisos
+de esa cuenta. Un cliente HTTP conserva la cookie `relay-session` recibida al
+iniciar sesión y la envía como `Cookie: relay-session=<sesión>` en cada llamada.
+`author` solo atribuye el run; no establece identidad. Si `RELAY_API_KEY` está
+configurada, también se exige `X-Relay-Key`; esa clave compartida habilita
+acceso, pero no identifica a una persona.
 El login no guarda tokens de herramientas; estas se conectan desde **Mi cuenta**.
 Las solicitudes JSON verifican origen y el alta rechaza proxies. Un host público
 sigue requiriendo Cloudflare Access; la sesión nativa no abre el servidor a Internet.
@@ -52,9 +53,9 @@ La ruta `GET /projects` de versiones antiguas ya no está registrada.
 | GET | `/conversations` | Listar conversaciones |
 | GET | `/conversations/{id}/messages` | Leer mensajes |
 | POST | `/conversations/{id}/close` | Cerrar una conversación |
-| POST | `/experts/run` | Iniciar una ejecución |
-| GET | `/experts/status/{chat_id}` | Consultar estado |
-| POST | `/experts/cancel/{chat_id}` | Solicitar cancelación |
+| POST | `/experts/run` | Iniciar o encolar una ejecución; 202 confirma aceptación, no resultado final |
+| GET | `/experts/status/{chat_id}` | Consultar progreso vivo o estado de evento gestionado |
+| POST | `/experts/cancel/{chat_id}` | Solicitar cancelación y esperar el cierre durable del worker |
 | POST | `/graphs` | Crear un plan de tareas; `arrancar: false` permite preparar sin ejecutar |
 | GET | `/graphs/{id}` | Consultar nodos, avance y estado del grafo |
 | POST | `/graphs/{id}/resume` | Solicitar reanudación explícita del grafo |
@@ -69,20 +70,43 @@ Con el proyecto `demo` ya registrado y un modelo configurado:
 {
   "target": "demo",
   "user": "Explica la estructura del repositorio",
-  "source": "ui",
-  "author": "local"
+  "source": "api",
+  "author": "agente-demo",
+  "conversation": "ID_DE_CONVERSACION",
+  "request_id": "agent-issue-123"
 }
 ```
 
 Envía ese cuerpo a `POST /experts/run`. Una ejecución aceptada responde con
-HTTP 202 y un `id`; consulta su estado hasta que termine. Para continuar una
-conversación existente, añade `"conversation": "<id>"`. Los adjuntos se envían
-como `"attachments": ["<id>"]` después de subirlos. `model` permite indicar
-un modelo del catálogo.
+HTTP 202 y un `id`. `conversation` es opcional; si se envía, debe ser el ID de
+una conversación existente del mismo proyecto. `conversation_id` se acepta como
+alias; si ambos llegan con valores distintos, el servidor responde `400` sin
+iniciar trabajo. En tareas gestionadas, el servidor comprueba el permiso de
+control antes de modificar la conversación: quien creó una consulta de solo
+lectura puede continuarla y quien tiene permiso de escritura puede continuar
+tareas del proyecto. Una tarea detenida responde `409`. Para atribuir la
+solicitud a una persona, usa la cookie de sesión; `author` no la sustituye.
+Los adjuntos se envían como `"attachments": ["<id>"]` después de subirlos.
+`model` permite indicar un modelo del catálogo.
+
+Usa un `request_id` estable de 1 a 128 caracteres para reconocer reintentos.
+La deduplicación solo aplica a ejecuciones gestionadas con conversación y a la
+creación Git implícita; no vuelve idempotente cualquier POST. Reutiliza el mismo
+ID y payload para reintentar; cambiar el payload con el mismo ID devuelve `409`.
+Usa un ID nuevo, como un UUID, para cada pedido nuevo.
 
 Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
-Las respuestas de error incluyen un campo `error`. Revisa el estado final y
-el resultado antes de dar una acción por completada.
+Consulta `/experts/status/{chat_id}` mientras el relay conserva el progreso en
+memoria. Tras un reinicio puede devolver `404`; consulta entonces `/chats/{id}`
+para el registro y `/chats/{id}/md` para la exportación Markdown. Los eventos
+gestionados conservan su estado en la base de datos. El Markdown puede seguir
+pendiente de exportación; no repitas el pedido solo por eso. Las respuestas de
+error incluyen un campo `error`; revisa el estado y el resultado antes de dar
+una acción por completada.
+
+La cancelación espera el cierre del worker y su persistencia. Un `409` no
+confirma cancelación: revisa el estado y el resultado antes de reintentar. Si el
+ID abreviado es ambiguo, usa el completo.
 
 Reanudar un grafo sin nodos listos o interrumpidos responde 409 y conserva
 su estado y resultados. El error distingue un plan terminado, una decisión
@@ -102,9 +126,11 @@ no cancela otra vez esa limpieza.
 
 ## Acceso
 
-El modo predeterminado es local. Las peticiones locales sin cabeceras de
-Cloudflare Access se consideran del propietario. Si se usan cabeceras de
-Access, el JWT debe ser verificable con el dominio y audiencia configurados;
-el correo sin JWT no basta. Los permisos se comprueban en el servidor.
+En instalaciones anteriores sin login nativo habilitado, las peticiones locales
+sin cabeceras de Cloudflare Access se consideran del propietario. Con el login
+nativo habilitado, la solicitud necesita una sesión válida y no usa ese fallback
+de propietario. En hosts públicos, el JWT de Cloudflare Access debe verificarse
+con el dominio y la audiencia configurados; el correo sin JWT no basta. Los
+permisos se comprueban en el servidor.
 
 Consulta [SECURITY.md](../SECURITY.md) antes de configurar acceso remoto.

@@ -202,7 +202,7 @@ async def experts_run(request: web.Request) -> web.Response:
 
     # ADR-025: conversación (opcional). Validar ANTES de crear el chat.
     conversation: Optional[dict] = None
-    conv_id = body.get("conversation") or ""
+    conv_id = body.get("conversation") or body.get("conversation_id") or ""
     if conv_id:
         if not isinstance(conv_id, str):
             return web.json_response(
@@ -223,8 +223,8 @@ async def experts_run(request: web.Request) -> web.Response:
                           f"{conversation['project_slug']!r}, no a "
                           f"{project['slug']!r}"},
                 status=400)
-        if managed.get("mode") == "write" and not identity.can_write_project(request, project):
-            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+        if managed and not identity.can_control_task(request, project, managed, conversation):
+            return web.json_response({"error": "No tienes permiso para continuar esta tarea."}, status=403)
         if managed.get("state") in task_service.STOPPED:
             return web.json_response({"error": managed.get("error") or "Continúa la tarea desde sus controles",
                                       "conversation_id": conv_id}, status=409)
@@ -267,6 +267,9 @@ async def experts_run(request: web.Request) -> web.Response:
                     return web.json_response({"error": str(exc), "conversation_id": new_id}, status=422)
             conversation = await db.get_conversation(new_id)
         else:
+            managed = await db.get_conversation_task(conversation["id"])
+            if managed and not identity.can_control_task(request, project, managed, conversation):
+                return web.json_response({"error": "No tienes permiso para continuar esta tarea."}, status=403)
             await db.touch_conversation(conversation["id"])
             # Si la conversación ya existía pero le llegan estos campos
             # por primera vez (caso: thread viejo sin discord_user_id),
@@ -303,6 +306,9 @@ async def experts_run(request: web.Request) -> web.Response:
                     return web.json_response({"error": str(exc), "conversation_id": cid}, status=422)
                 conversation = await db.get_conversation(cid)
 
+    managed = await db.get_conversation_task(conversation["id"]) if conversation else {}
+    if managed and not identity.can_control_task(request, project, managed, conversation):
+        return web.json_response({"error": "No tienes permiso para continuar esta tarea."}, status=403)
     # Seguimiento por GitHub (fase 4): si la conversación nació de un
     # issue, el experto arranca sabiendo qué tiene que resolver. Se lee
     # de GitHub en cada run (caché de 60s) en vez de copiarse a la DB:
@@ -379,10 +385,10 @@ async def experts_run(request: web.Request) -> web.Response:
         logger.warning("skills: get_block rompio: %r (sigo sin skills)", e)
         skills_block = ""
 
-    if conversation and await db.get_conversation_task(conversation["id"]):
+    if conversation and managed:
         managed = await db.get_conversation_task(conversation["id"])
-        if managed.get("mode") == "write" and not identity.can_write_project(request, project):
-            return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
+        if not identity.can_control_task(request, project, managed, conversation):
+            return web.json_response({"error": "No tienes permiso para continuar esta tarea."}, status=403)
         if managed.get("state") in task_service.STOPPED:
             return web.json_response({"error": "Continúa la tarea desde sus controles"}, status=409)
         request_id = body.get("request_id") or str(uuid.uuid4())
