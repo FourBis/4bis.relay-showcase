@@ -65,12 +65,12 @@ jobs:
           mcp-server/tests/test_db.py
           mcp-server/tests/test_ui_contrato_experts_run.py
           -q
-      - name: Check focused orchestrator autosplit behavior
+      - name: Check focused orchestrator autosplit and cancellation
         shell: pwsh
         run: >-
           python -m pytest
           mcp-server/tests/test_orquestador.py
-          -k "split or subdiv or fan_out or flag_apagado or subtarea"
+          -k "split or subdiv or fan_out or flag_apagado or subtarea or cancel or claim or salir_por_la_mala"
           -q
       - name: Check graph interruption and repeated requests
         shell: pwsh

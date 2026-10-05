@@ -965,6 +965,43 @@ async def test_salir_por_la_mala_no_deja_nodos_corriendo_sueltos(db):
     assert fila["estado"] == grafo.PENDIENTE
 
 
+async def test_doble_cancelacion_espera_limpieza_y_conserva_claims(db):
+    await db.create_task_graph("g-doble-cancel", "x", tareas=[{
+        "id": "t1", "titulo": "larga", "archivos": ["src/a.py"],
+        "idempotente": True}])
+    arranco = asyncio.Event()
+    limpieza_iniciada = asyncio.Event()
+    permitir_limpieza = asyncio.Event()
+
+    async def ejecutar(tarea):
+        arranco.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            limpieza_iniciada.set()
+            await permitir_limpieza.wait()
+
+    corrida = asyncio.create_task(orquestador.correr_grafo(
+        db, "g-doble-cancel", ejecutar=ejecutar))
+    try:
+        await asyncio.wait_for(arranco.wait(), timeout=5)
+        corrida.cancel()
+        await asyncio.wait_for(limpieza_iniciada.wait(), timeout=5)
+        assert await db.files_claimed_by_others("nadie") == {"src/a.py"}
+
+        corrida.cancel()
+        await asyncio.sleep(0)
+        assert not corrida.done(), "la segunda cancelación abandonó la limpieza"
+        assert await db.files_claimed_by_others("nadie") == {"src/a.py"}, \
+            "se liberó el archivo mientras el nodo seguía cerrándose"
+    finally:
+        permitir_limpieza.set()
+        await asyncio.wait_for(asyncio.gather(corrida, return_exceptions=True),
+                                timeout=5)
+
+    assert await db.files_claimed_by_others("nadie") == set()
+
+
 @pytest.mark.parametrize("idempotente", [True, False])
 async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, monkeypatch,
                                                              idempotente):

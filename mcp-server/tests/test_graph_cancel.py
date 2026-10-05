@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from relay import identity, server_common, server_graph_routes
+from relay import identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle
 from relay.db import Database
 
 
@@ -30,7 +30,10 @@ async def graph_client(tmp_path, monkeypatch):
     app = web.Application(middlewares=[actor, identity.require_role])
     app[server_common.DB_KEY] = db
     app[server_common.GRAFOS_KEY] = {}
+    app[server_common.BG_TASKS_KEY] = set()
     app.router.add_post("/graphs/{id}/cancel", server_graph_routes.graphs_cancel)
+    app.router.add_post("/graphs/{id}/resume", server_graph_routes.graphs_resume)
+    app.router.add_get("/graphs/{id}", server_graph_routes.graphs_get)
     launch = Mock()
     monkeypatch.setattr(server_graph_routes, "_largar_grafo", launch)
     async with TestClient(TestServer(app)) as client:
@@ -208,13 +211,22 @@ async def test_repeated_cancel_does_not_interrupt_worker_cleanup(graph_client, m
     launch.assert_not_called()
 
 
-async def test_interrupted_cancel_request_preserves_worker_cleanup(graph_client):
+async def test_interrupted_cancel_request_preserves_worker_cleanup(graph_client, monkeypatch):
     client, db, app, launch = graph_client
     await db.create_task_graph("interrupted", "demo", tareas=[
         {"id": "saved", "titulo": "Hecho"}], project_slug="demo")
     await db.update_task("saved", estado="hecho", resultado="conservar")
     before = (await db.get_task_graph("interrupted"))["tasks"]
     started, cleaning, release, interrupted = (asyncio.Event() for _ in range(4))
+    persisted = asyncio.Event()
+    set_state = db.set_task_graph_state
+
+    async def observe_state(graph_id, state):
+        await set_state(graph_id, state)
+        if graph_id == "interrupted" and state == "cancelado":
+            persisted.set()
+
+    monkeypatch.setattr(db, "set_task_graph_state", observe_state)
 
     async def worker():
         started.set()
@@ -238,14 +250,111 @@ async def test_interrupted_cancel_request_preserves_worker_cleanup(graph_client)
     handler = asyncio.create_task(server_graph_routes.graphs_cancel(request))
     await asyncio.wait_for(cleaning.wait(), 2)
     handler.cancel()
+    drain = asyncio.create_task(server_lifecycle._drain_running_experts(app))
     try:
-        response = await asyncio.wait_for(handler, 2)
-        assert response.status == 200
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(handler, 2)
         assert not interrupted.is_set(), "la interrupción de la petición cortó la limpieza"
         assert not task.done()
+        assert not persisted.is_set()
+        assert not drain.done(), "el apagado debe esperar el cierre pendiente"
+        assert (await db.get_task_graph("interrupted"))["estado"] == "activo"
     finally:
         release.set()
-        await asyncio.gather(handler, task, return_exceptions=True)
+        await asyncio.gather(handler, task, drain, return_exceptions=True)
+    await asyncio.wait_for(persisted.wait(), 2)
+    assert (await db.get_task_graph("interrupted"))["estado"] == "cancelado"
     assert (await db.get_task_graph("interrupted"))["tasks"] == before
     assert not app[server_common.GRAFOS_KEY]
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("running", [False, True])
+async def test_resume_waits_for_cancel_persistence(graph_client, monkeypatch, running):
+    client, db, app, launch = graph_client
+    await db.create_task_graph("persisting", "demo", tareas=[
+        {"id": "pending", "titulo": "Pendiente"}], project_slug="demo")
+    started = asyncio.Event()
+    executions = 0
+
+    async def execute(*args, **kwargs):
+        nonlocal executions
+        executions += 1
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(orquestador, "lanzar", execute)
+    project = await db.get_project("demo")
+    if running:
+        app[server_common.PROGRESS_KEY] = {}
+        app[server_common.NOTIFY_KEY] = None
+        server_graph_helpers._largar_grafo(app, project, "persisting")
+        await asyncio.wait_for(started.wait(), 2)
+    saving, release = asyncio.Event(), asyncio.Event()
+    set_state = db.set_task_graph_state
+
+    async def delayed_state(graph_id, state):
+        if graph_id == "persisting" and state == "cancelado":
+            saving.set()
+            await release.wait()
+        await set_state(graph_id, state)
+
+    monkeypatch.setattr(db, "set_task_graph_state", delayed_state)
+    cancel = asyncio.create_task(client.post("/graphs/persisting/cancel"))
+    try:
+        await asyncio.wait_for(saving.wait(), 2)
+        assert not app[server_common.GRAFOS_KEY]
+        status = await client.get("/graphs/persisting")
+        assert (await status.json())["corriendo"] is True
+        response = await client.post("/graphs/persisting/resume")
+        assert response.status == 409
+        launch.assert_not_called()
+        assert executions == int(running)
+    finally:
+        release.set()
+        response = await asyncio.wait_for(cancel, 2)
+    assert response.status == 200
+    assert (await db.get_task_graph("persisting"))["estado"] == "cancelado"
+    assert not app[server_common.GRAFOS_KEY]
+    status = await client.get("/graphs/persisting")
+    assert (await status.json())["corriendo"] is False
+
+
+async def test_cancel_cannot_overtake_resume_state_check(graph_client, monkeypatch):
+    client, db, app, launch = graph_client
+    await db.create_task_graph("overlap", "demo", tareas=[
+        {"id": "pending", "titulo": "Pendiente"}], project_slug="demo")
+    reading, release = asyncio.Event(), asyncio.Event()
+    get_task_graph = db.get_task_graph
+    reads = 0
+
+    async def delayed_read(graph_id):
+        nonlocal reads
+        graph = await get_task_graph(graph_id)
+        reads += 1
+        # guard_workspace lee primero; el handler toma el segundo snapshot.
+        if graph_id == "overlap" and reads == 2:
+            reading.set()
+            await release.wait()
+        return graph
+
+    monkeypatch.setattr(db, "get_task_graph", delayed_read)
+    request = make_mocked_request("POST", "/graphs/overlap/resume", app=app,
+                                  match_info={"id": "overlap"})
+    resume = asyncio.create_task(server_graph_routes.graphs_resume(request))
+    await asyncio.wait_for(reading.wait(), 2)
+    cancel = asyncio.create_task(server_graph_helpers._cancelar_grafo(app, "overlap"))
+    try:
+        # Espera a que la cancelación se registre, sin soltar la lectura.
+        async with asyncio.timeout(2):
+            while not getattr(db, "_graph_cancellations", {}):
+                await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert (await get_task_graph("overlap"))["estado"] == "activo"
+        assert not cancel.done()
+    finally:
+        release.set()
+        await asyncio.gather(resume, cancel)
+    assert resume.result().status == 409
+    launch.assert_not_called()
+    assert (await get_task_graph("overlap"))["estado"] == "cancelado"
