@@ -61,6 +61,10 @@ Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
 Las respuestas de error incluyen un campo `error`. Revisa el estado final y
 el resultado antes de dar una acción por completada.
 
+Reanudar un grafo sin nodos listos o interrumpidos responde 409 y conserva
+su estado y resultados. El error distingue un plan terminado, una decisión
+humana pendiente y un fallo que necesita corrección; no inicia un worker vacío.
+
 Cancelar un grafo existente responde 200 con `estado: cancelado`, incluso si
 nadie lo ejecuta tras un reinicio o se repite la petición. No borra sus nodos
 ni resultados. Un ID inexistente responde 404. En grafos históricos sin

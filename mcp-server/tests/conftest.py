@@ -35,6 +35,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import pydantic_ai.models
+
+pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
 
 os.environ.setdefault("CBM_AUTO_WATCH", "0")
 os.environ.setdefault("FOURBIS_MCP_HEALTH_PROBE", "0")
