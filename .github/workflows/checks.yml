@@ -59,6 +59,10 @@ jobs:
           mcp-server/tests/test_progress.py
           mcp-server/tests/test_module_boundaries.py
           mcp-server/tests/test_model_request_guard.py
+          mcp-server/tests/test_notify_progress.py
+          mcp-server/tests/test_notify_descartes.py
+          mcp-server/tests/test_skills.py
+          mcp-server/tests/test_ask_human_evidencia.py
           mcp-server/tests/test_tracing.py
           mcp-server/tests/test_browser_boundary.py
           mcp-server/tests/test_system_config.py
