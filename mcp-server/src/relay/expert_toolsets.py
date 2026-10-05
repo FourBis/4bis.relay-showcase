@@ -115,6 +115,18 @@ def tool_en_vuelo(inflight: dict) -> tuple[Optional[str], Optional[float]]:
 
 
 @dataclasses.dataclass
+class QuestionGateToolset(WrapperToolset):
+    """Impide efectos posteriores a una pregunta persistida, incluidas tools MCP."""
+
+    question_state: dict = dataclasses.field(default_factory=dict)
+
+    async def call_tool(self, name, tool_args, ctx, tool):
+        if self.question_state.get("asked"):
+            return "Herramienta no ejecutada: hay una pregunta pendiente de respuesta humana."
+        return await super().call_tool(name, tool_args, ctx, tool)
+
+
+@dataclasses.dataclass
 class CappedToolset(WrapperToolset):
     """Envuelve cualquier toolset con las capas 1 y 2 + un corte por
     tool-call.

@@ -290,8 +290,8 @@ async def _run_event(app, project, conv_id, event):
         raise RuntimeError(chat.get("error") or "La ejecución requiere revisión")
     stages = json.loads(chat.get("stages_json") or "{}")
     if stages.get("resultado") in {"pendiente", "bloqueado", "intervencion", "desviado"} or chat.get("phase_at_end") in {
-        "planned", "needs_human", "budget_exceeded", "hard_timeout", "idle_timeout", "provider_error", "cancelled"}:
-        await db.update_conversation_task(conv_id, state="blocked", error="La ejecución quedó pendiente; revisa el chat y continúa")
+        "planned", "question", "needs_human", "budget_exceeded", "hard_timeout", "idle_timeout", "provider_error", "cancelled"}:
+        await task_pr.set_phase(db, conv_id, "blocked", error="La ejecución quedó pendiente; revisa el chat y continúa")
         return
     if state.get("mode") == "write":
         await task_workspace.inspect_workspace(db, project, conv_id)

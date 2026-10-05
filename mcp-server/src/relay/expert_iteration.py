@@ -132,6 +132,21 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
         try:
             async for node in agent_run:
                 last_node_at = time.monotonic()
+                if state.question_state.get("asked"):
+                    # El SDK aún no agregó el request con los resultados de tools.
+                    messages = list(agent_run.all_messages())
+                    if Agent.is_model_request_node(node):
+                        messages.append(node.request)
+                    expert_history._close_orphan_tool_calls(
+                        messages, reason="esperando respuesta humana")
+                    state.messages_json = expert_history._dump_messages(messages)
+                    usage = agent_run.usage
+                    state.usage = usage() if callable(usage) else usage
+                    state.last_phase = "question"
+                    state.output_text = (
+                        f"En espera de tu respuesta: {state.question_state['title']}\n\n"
+                        "La pregunta y lo avanzado están guardados. La ejecución está detenida.")
+                    return
                 # Steer del humano (2026-07-25): cortamos ACÁ, en el
                 # borde de nodo, no a mitad de una tool. El historial
                 # rescatado + su corrección se re-inyectan en el round

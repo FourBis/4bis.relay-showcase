@@ -28,6 +28,65 @@ async def _managed_db(tmp_path: Path) -> tuple[Database, str]:
     return db, cid
 
 
+@pytest.mark.parametrize("mode", ["read_only", "write"])
+@pytest.mark.parametrize("stop", [None, "paused", "cancelled"])
+async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypatch, mode, stop):
+    from unittest.mock import AsyncMock
+    from relay import server_expert_jobs, task_pr, task_workspace
+    from relay.app_state import NOTIFY_KEY, SKILLS_KEY
+
+    db, cid = await _managed_db(tmp_path)
+    await db.update_conversation_task(cid, mode=mode, publish_allowed=True)
+    event = await db.enqueue_conversation_event(cid, "question", "run", {"user": "trabaja"})
+    async def asking(**kwargs):
+        await db.create_expert_question("q", event["chat_id"], '{"title":"¿Continúo?"}',
+                                        conversation_id=cid, project_slug="demo")
+        await db.finish_chat(event["chat_id"], status="ok", phase_at_end="question")
+        if stop:
+            get_task = db.get_conversation_task
+            async def stop_after_read(conv_id):
+                state = await get_task(conv_id)
+                monkeypatch.setattr(db, "get_conversation_task", get_task)
+                await db.update_conversation_task(conv_id, state=stop)
+                return state
+            monkeypatch.setattr(db, "get_conversation_task", stop_after_read)
+    monkeypatch.setattr(server_expert_jobs, "_run_expert_bg", asking)
+    inspect = AsyncMock()
+    publish = AsyncMock()
+    monkeypatch.setattr(task_workspace, "inspect_workspace", inspect)
+    monkeypatch.setattr(task_pr, "publish", publish)
+    app = {DB_KEY: db, RUNNING_KEY: {}, PROGRESS_KEY: {}, GRAFOS_KEY: {},
+           NOTIFY_KEY: None, SKILLS_KEY: SimpleNamespace(get_block=AsyncMock(return_value=""))}
+    await task_service._run_event(app, await db.get_project("demo"), cid, event)
+    assert (await db.get_conversation_task(cid))["state"] == (stop or "blocked")
+    assert (await db.get_expert_question("q"))["status"] == "open"
+    inspect.assert_not_awaited()
+    publish.assert_not_awaited()
+    if stop:
+        return
+
+    # Responder conserva la pausa; el control explícito permite el siguiente turno.
+    from relay.server_graph_routes import _answer_question
+    from relay.server_task_routes import _continue
+    import json
+    web_app = web.Application()
+    web_app.update(app)
+    request = make_mocked_request("POST", "/questions/q/answer", app=web_app)
+    request[identity.IDENTITY_KEY] = identity.OWNER
+    response = await _answer_question(
+        request, await db.get_expert_question("q"),
+        {"conversation_id": cid, "project_slug": "demo"}, {"text": "Puedes continuar"})
+    assert response.status == 200
+    assert "Puedes continuar" in json.loads(response.text)["resume_prompt"]
+    assert (await db.get_conversation_task(cid))["state"] == "blocked"
+    await db.finish_conversation_event(event["id"])
+    project = await db.get_project("demo")
+    monkeypatch.setattr(task_workspace, "resolved_project", AsyncMock(return_value=project))
+    await _continue(db, project, cid, {})
+    assert (await db.get_conversation_task(cid))["state"] == "ready"
+    publish.assert_not_awaited()
+
+
 async def _event_client(db: Database, monkeypatch) -> TestClient:
     @web.middleware
     async def actor(request, handler):
