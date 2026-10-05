@@ -33,7 +33,9 @@ import os
 import logging
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import pydantic_ai.models
 
@@ -44,6 +46,21 @@ os.environ.setdefault("FOURBIS_MCP_HEALTH_PROBE", "0")
 os.environ.setdefault("RELAY_URL", "http://127.0.0.1:9")
 os.environ.setdefault(
     "FOURBIS_LOG_DIR", os.path.join(tempfile.gettempdir(), "relay-test-logs"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_notifications(monkeypatch):
+    """Simula el POST al bot; los tests de transporte pueden reemplazarlo."""
+    from relay.notify import NotifyClient
+
+    original_init = NotifyClient.__init__
+
+    def init(client, *args, **kwargs):
+        original_init(client, *args, **kwargs)
+        client._client.post = AsyncMock(return_value=httpx.Response(
+            200, json={"ok": True}, request=httpx.Request("POST", client.url)))
+
+    monkeypatch.setattr(NotifyClient, "__init__", init)
 
 
 @pytest.fixture(scope="session")
@@ -78,6 +95,7 @@ def _isolated_fourbis_env(_fourbis_tmp, monkeypatch):
     os.environ["FOURBIS_CHATS_DIR"] = str(_fourbis_tmp / "chats")
     os.environ["FOURBIS_JSONL_DIR"] = str(_fourbis_tmp / "jsonl")
     monkeypatch.setenv("FOURBIS_ATTACHMENTS_DIR", str(_fourbis_tmp / "attachments"))
+    monkeypatch.setenv("FOURBIS_SKILLS_DIR", str(_fourbis_tmp / "skills"))
     monkeypatch.setenv("STATE_DIR", str(_fourbis_tmp / "state"))
     os.environ["FOURBIS_MODEL"] = "test"  # TestModel: sin red, sin tokens
     monkeypatch.setenv("GOOGLE_REAL", "0")  # Las pruebas optan por Google real explícitamente.

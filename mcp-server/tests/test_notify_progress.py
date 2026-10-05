@@ -20,6 +20,18 @@ async def _client(handler):
     return client
 
 
+async def test_default_notification_fixture_never_uses_network(monkeypatch):
+    async def reject_network(*args, **kwargs):
+        raise AssertionError("Una prueba intentó contactar al bot real")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_network)
+    client = notify.NotifyClient("http://bot.invalid/notify")
+    try:
+        assert await client.send("chat:test", "done", "resultado simulado")
+    finally:
+        await client.aclose()
+
+
 async def test_batch_of_25_tools_runs_while_bot_is_stalled(tmp_path, monkeypatch):
     from pydantic_ai import Tool
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart

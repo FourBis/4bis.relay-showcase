@@ -26,7 +26,7 @@ import tempfile
 from unittest.mock import patch
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import FunctionModel
 
 from relay import experts
@@ -143,6 +143,9 @@ async def test_ask_human_con_evidencia_valida_la_persiste(db):
     evidencia queda adentro para que quien responda no tenga que
     reabrir el repo."""
     def act(messages, info):
+        if any(isinstance(part, ToolReturnPart)
+               for message in messages for part in message.parts):
+            return ModelResponse(parts=[TextPart("Espero la decisión del usuario.")])
         return ModelResponse(parts=[ToolCallPart("ask_human", {
             "pregunta": "¿el inventario BUG-S-15..21 sigue vigente?",
             "evidencia": CASO_REAL})])

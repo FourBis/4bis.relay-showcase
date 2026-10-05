@@ -33,6 +33,12 @@ from relay.skills import (  # noqa: E402
 # ---------- _parse_skill_md ----------
 
 
+def test_default_skills_path_stays_inside_test_storage(_fourbis_tmp):
+    from relay.skills_index import resolve_skills_dir
+
+    assert resolve_skills_dir().is_relative_to(_fourbis_tmp)
+
+
 def test_parse_skill_md_ok(tmp_path: Path) -> None:
     skill_dir = tmp_path / "tdd"
     skill_dir.mkdir()
