@@ -29,7 +29,8 @@ async def _managed_db(tmp_path: Path) -> tuple[Database, str]:
 
 
 @pytest.mark.parametrize("mode", ["read_only", "write"])
-async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("stop", [None, "paused", "cancelled"])
+async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypatch, mode, stop):
     from unittest.mock import AsyncMock
     from relay import server_expert_jobs, task_pr, task_workspace
     from relay.app_state import NOTIFY_KEY, SKILLS_KEY
@@ -41,6 +42,14 @@ async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypa
         await db.create_expert_question("q", event["chat_id"], '{"title":"¿Continúo?"}',
                                         conversation_id=cid, project_slug="demo")
         await db.finish_chat(event["chat_id"], status="ok", phase_at_end="question")
+        if stop:
+            get_task = db.get_conversation_task
+            async def stop_after_read(conv_id):
+                state = await get_task(conv_id)
+                monkeypatch.setattr(db, "get_conversation_task", get_task)
+                await db.update_conversation_task(conv_id, state=stop)
+                return state
+            monkeypatch.setattr(db, "get_conversation_task", stop_after_read)
     monkeypatch.setattr(server_expert_jobs, "_run_expert_bg", asking)
     inspect = AsyncMock()
     publish = AsyncMock()
@@ -49,10 +58,12 @@ async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypa
     app = {DB_KEY: db, RUNNING_KEY: {}, PROGRESS_KEY: {}, GRAFOS_KEY: {},
            NOTIFY_KEY: None, SKILLS_KEY: SimpleNamespace(get_block=AsyncMock(return_value=""))}
     await task_service._run_event(app, await db.get_project("demo"), cid, event)
-    assert (await db.get_conversation_task(cid))["state"] == "blocked"
+    assert (await db.get_conversation_task(cid))["state"] == (stop or "blocked")
     assert (await db.get_expert_question("q"))["status"] == "open"
     inspect.assert_not_awaited()
     publish.assert_not_awaited()
+    if stop:
+        return
 
     # Responder conserva la pausa; el control explícito permite el siguiente turno.
     from relay.server_graph_routes import _answer_question
