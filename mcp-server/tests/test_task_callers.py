@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from pydantic_ai.usage import RunUsage
 
-from relay import expert_iteration, file_tools, github_credentials, identity, planificador, server, task_service
+from relay import expert_iteration, file_tools, github_credentials, identity, planificador, server, server_expert_routes, task_service
 from relay.app_state import DB_KEY, GRAFOS_KEY, PROGRESS_KEY, RUNNING_KEY
 from relay.db import Database
 from relay.execution_policy import ExecutionPolicy
@@ -211,7 +211,10 @@ async def test_standalone_chat_cancel_allows_creator_or_project_writer(
     client = await _event_client(db, monkeypatch)
 
     async def wait_for_cancel():
-        await asyncio.Future()
+        try:
+            await asyncio.Future()
+        finally:
+            await db.finish_chat(chat_id, status="cancelled")
 
     worker = asyncio.create_task(wait_for_cancel())
     client.server.app[RUNNING_KEY][chat_id] = worker
@@ -224,6 +227,172 @@ async def test_standalone_chat_cancel_allows_creator_or_project_writer(
     finally:
         if not worker.done():
             worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await client.close()
+
+
+@pytest.mark.parametrize("disconnect", [False, True], ids=["connected", "disconnected"])
+async def test_standalone_cancel_waits_for_worker_finalization(tmp_path, monkeypatch, disconnect):
+    db = Database(path=tmp_path / "relay.db")
+    await db.init_schema()
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    actor = "creator@example.test"
+    chat_id = await db.create_chat(
+        project_slug="demo", source="test", author="member", target="demo",
+        requested_by=actor)
+    monkeypatch.setattr(identity, "_roles", {actor: "member"})
+    monkeypatch.setattr(identity, "_project_grants", {})
+    client = await _event_client(db, monkeypatch)
+    app = client.server.app
+    cleanup, release = asyncio.Event(), asyncio.Event()
+
+    async def worker_body():
+        try:
+            await asyncio.Future()
+        finally:
+            cleanup.set()
+            await release.wait()
+            await db.finish_chat(chat_id, status="cancelled")
+
+    worker = asyncio.create_task(worker_body())
+    app[RUNNING_KEY][chat_id] = worker
+    background = []
+    spawn_bg = server_expert_routes._spawn_bg
+
+    def track_background(coro, **kwargs):
+        task = spawn_bg(coro, **kwargs)
+        background.append(task)
+        return task
+
+    monkeypatch.setattr(server_expert_routes, "_spawn_bg", track_background)
+    try:
+        if disconnect:
+            request = make_mocked_request(
+                "POST", f"/experts/cancel/{chat_id}", app=app,
+                match_info={"chat_id": chat_id})
+            request[identity.IDENTITY_KEY] = actor
+            request_task = asyncio.create_task(server_expert_routes.experts_cancel(request))
+            await asyncio.wait_for(cleanup.wait(), 2)
+            request_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+            assert not worker.done()
+            assert (await db.get_chat(chat_id))["status"] == "running"
+            release.set()
+            await asyncio.gather(worker, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(*background), 2)
+        else:
+            request_task = asyncio.create_task(client.post(
+                f"/experts/cancel/{chat_id}", headers={"X-Test-Actor": actor}))
+            await asyncio.wait_for(cleanup.wait(), 2)
+            assert not request_task.done()
+            assert (await db.get_chat(chat_id))["status"] == "running"
+            release.set()
+            response = await asyncio.wait_for(request_task, 2)
+            assert response.status == 200
+            await asyncio.gather(worker, return_exceptions=True)
+        assert worker.done()
+        assert (await db.get_chat(chat_id))["status"] == "cancelled"
+    finally:
+        release.set()
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, *background, return_exceptions=True)
+        await client.close()
+
+
+async def test_second_standalone_cancel_does_not_recancel_closing_worker(
+        tmp_path, monkeypatch):
+    db = Database(path=tmp_path / "relay.db")
+    await db.init_schema()
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    actor = "creator@example.test"
+    chat_id = await db.create_chat(
+        project_slug="demo", source="test", author="member", target="demo",
+        requested_by=actor)
+    monkeypatch.setattr(identity, "_roles", {actor: "member"})
+    monkeypatch.setattr(identity, "_project_grants", {})
+    client = await _event_client(db, monkeypatch)
+    cleanup, release = asyncio.Event(), asyncio.Event()
+
+    async def worker_body():
+        try:
+            await asyncio.Future()
+        finally:
+            cleanup.set()
+            await release.wait()
+            await db.finish_chat(chat_id, status="cancelled")
+
+    worker = asyncio.create_task(worker_body())
+    client.server.app[RUNNING_KEY][chat_id] = worker
+    original_get_chat = db.get_chat
+    get_chat_calls = 0
+    second_finalizer_started = asyncio.Event()
+
+    async def observed_get_chat(requested_id):
+        nonlocal get_chat_calls
+        get_chat_calls += 1
+        if get_chat_calls >= 4:
+            second_finalizer_started.set()
+        return await original_get_chat(requested_id)
+
+    monkeypatch.setattr(db, "get_chat", observed_get_chat)
+    try:
+        first = asyncio.create_task(client.post(
+            f"/experts/cancel/{chat_id}", headers={"X-Test-Actor": actor}))
+        await asyncio.wait_for(cleanup.wait(), 2)
+        assert worker.cancelling() == 1
+        second = asyncio.create_task(client.post(
+            f"/experts/cancel/{chat_id}", headers={"X-Test-Actor": actor}))
+        await asyncio.wait_for(second_finalizer_started.wait(), 2)
+        await asyncio.sleep(0)
+        assert worker.cancelling() == 1
+        release.set()
+        first_response, second_response = await asyncio.wait_for(
+            asyncio.gather(first, second), 2)
+        assert first_response.status == 200
+        assert second_response.status in {200, 409}
+        assert worker.done() and worker.cancelling() == 1
+        assert (await original_get_chat(chat_id))["status"] == "cancelled"
+    finally:
+        release.set()
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await client.close()
+
+
+async def test_closing_standalone_run_returns_409_without_mutation(tmp_path, monkeypatch):
+    db = Database(path=tmp_path / "relay.db")
+    await db.init_schema()
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    actor = "creator@example.test"
+    chat_id = await db.create_chat(
+        project_slug="demo", source="test", author="member", target="demo",
+        requested_by=actor)
+    monkeypatch.setattr(identity, "_roles", {actor: "member"})
+    monkeypatch.setattr(identity, "_project_grants", {})
+    client = await _event_client(db, monkeypatch)
+
+    async def wait_for_cancel():
+        await asyncio.Future()
+
+    worker = asyncio.create_task(wait_for_cancel())
+    app = client.server.app
+    app[RUNNING_KEY][chat_id] = worker
+    progress = SimpleNamespace(closing=True, finished=False)
+    app[PROGRESS_KEY][chat_id] = progress
+    try:
+        before = await db.get_chat(chat_id)
+        response = await client.post(
+            f"/experts/cancel/{chat_id}", headers={"X-Test-Actor": actor})
+        assert response.status == 409
+        assert await db.get_chat(chat_id) == before
+        assert not worker.done() and not worker.cancelling()
+        assert app[RUNNING_KEY][chat_id] is worker
+        assert progress.closing and not progress.finished
+    finally:
+        worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
         await client.close()
 
@@ -249,12 +418,18 @@ async def test_unrelated_member_cannot_cancel_standalone_zombie(tmp_path, monkey
         await client.close()
 
 
-async def test_ambiguous_cancel_prefix_authorizes_all_runs_before_mutation(
-        tmp_path, monkeypatch):
+@pytest.mark.parametrize(("actor", "roles", "grants", "expected"), [
+    pytest.param("member@example.test", {"member@example.test": "member"}, {}, 403,
+                 id="mixed-prefix-unauthorized"),
+    pytest.param(identity.OWNER, {}, {}, 409, id="owner"),
+    pytest.param("writer@example.test", {"writer@example.test": "member"},
+                 {"writer@example.test": ["demo"]}, 409, id="project-writer"),
+])
+async def test_ambiguous_cancel_prefix_never_mutates(
+        tmp_path, monkeypatch, actor, roles, grants, expected):
     db = Database(path=tmp_path / "relay.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
-    actor = "member@example.test"
     original_ids = [
         await db.create_chat(project_slug="demo", source="test", author="member",
                              target="demo", requested_by=actor),
@@ -267,8 +442,8 @@ async def test_ambiguous_cancel_prefix_authorizes_all_runs_before_mutation(
     ]
     for original_id, chat_id in zip(original_ids, chat_ids):
         await db.run("UPDATE chats SET id=? WHERE id=?", (chat_id, original_id))
-    monkeypatch.setattr(identity, "_roles", {actor: "member"})
-    monkeypatch.setattr(identity, "_project_grants", {})
+    monkeypatch.setattr(identity, "_roles", roles)
+    monkeypatch.setattr(identity, "_project_grants", grants)
     client = await _event_client(db, monkeypatch)
 
     async def wait_for_cancel():
@@ -281,7 +456,7 @@ async def test_ambiguous_cancel_prefix_authorizes_all_runs_before_mutation(
         response = await client.post(
             "/experts/cancel/10000000-0000-0000-0000-00000000000",
             headers={"X-Test-Actor": actor})
-        assert response.status == 403
+        assert response.status == expected
         assert [await db.get_chat(chat_id) for chat_id in chat_ids] == before
         assert all(not worker.done() and not worker.cancelling() for worker in workers)
     finally:

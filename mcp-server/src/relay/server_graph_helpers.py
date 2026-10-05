@@ -562,13 +562,7 @@ async def _cancelar_grafo(app: web.Application, graph_id: str) -> None:
     if finalizer is None:
         async def finish_cancel():
             async with _graph_control_lock(app, graph_id):
-                task = app[GRAFOS_KEY].get(graph_id)
-                if task is not None:
-                    asyncio.current_task().relay_actor = getattr(task, "relay_actor", None)
-                    if not task.cancelling():
-                        task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                await db.set_task_graph_state(graph_id, "cancelado")
+                await _finish_graph_cancel(app, graph_id)
 
         # Conserva el worker original para los controles de tarea; la
         # reserva adicional bloquea reanudaciones hasta persistir el cierre.
@@ -577,6 +571,17 @@ async def _cancelar_grafo(app: web.Application, graph_id: str) -> None:
         pending[graph_id] = finalizer
         finalizer.add_done_callback(lambda _: pending.pop(graph_id, None))
     await asyncio.shield(finalizer)
+
+
+async def _finish_graph_cancel(app: web.Application, graph_id: str) -> None:
+    """El caller conserva el lock del grafo y protege el cierre de desconexiones."""
+    task = app[GRAFOS_KEY].get(graph_id)
+    if task is not None:
+        asyncio.current_task().relay_actor = getattr(task, "relay_actor", None)
+        if not task.cancelling():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await app[DB_KEY].set_task_graph_state(graph_id, "cancelado")
 
 
 def _largar_grafo(app: web.Application, project: dict, graph_id: str,

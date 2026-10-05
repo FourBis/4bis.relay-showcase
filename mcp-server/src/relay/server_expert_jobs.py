@@ -321,12 +321,12 @@ async def _run_expert_bg(
         logger.exception("experto %s falló", target)
         error, status = f"{type(e).__name__}: {e}", "error"
     finally:
-        running.pop(chat_id, None)
         # Estado post-mortem para que /status siga respondiendo hasta que el
         # sweeper lo limpie. OJO: `finished` NO se prende acá — se prende
         # abajo, DESPUÉS de persistir el historial (ver el comentario).
         rp = progress.get(chat_id)
         if rp is not None:
+            rp.closing = True
             if status == "ok":
                 rp.phase = result.get("phase_at_end", "done")
             else:

@@ -316,8 +316,8 @@ async def aplicar_respuesta(db, graph_id: str, task_id: str,
         return ""
 
     if decision == "parar":
-        await db.set_task_graph_state(graph_id, "cancelado")
-        logger.info("grafo %s: el humano lo paró desde %s", graph_id, task_id)
+        # El caller detiene y espera al worker antes de persistir cancelado.
+        logger.info("grafo %s: el humano pidió detenerlo desde %s", graph_id, task_id)
         return "parar"
 
     if decision == "fallar":

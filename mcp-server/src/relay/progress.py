@@ -65,6 +65,7 @@ class RunProgress:
     graph_id: str = ""           # nodo de grafo, para no contar también al padre
     finished: bool = False       # True cuando el run terminó (para que
                                  # /status siga respondiendo post-mortem)
+    closing: bool = False        # Guardando el resultado; no interrumpirlo.
     # Pasos ricos del run (Fase 3b): mismos datos que van al embed de
     # Discord (línea legible + diff de edit_file). El web los renderea
     # en vivo como las MISMAS tarjetas que quedan al persistir.
@@ -98,6 +99,7 @@ class RunProgress:
             "model": self.model,
             "error": self.error,
             "finished": self.finished,
+            "closing": self.closing,
             **({"graph_id": self.graph_id} if self.graph_id else {}),
             # Fase 3b: el web appendea los steps con n > lastStepN.
             "steps": self.steps,

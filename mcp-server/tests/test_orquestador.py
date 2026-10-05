@@ -1040,7 +1040,8 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
     execute = orquestador.ejecutor_minimax(db, project, graph, modelo="fake")
     run = asyncio.create_task(orquestador.correr_grafo(db, "g-cancel", ejecutar=execute))
     try:
-        await asyncio.wait_for(started.wait(), 3)
+        # El arranque frío del SDK en CI no mide la cancelación del nodo.
+        await asyncio.wait_for(started.wait(), 15)
         before = (await db.get_task_graph("g-cancel"))["tasks"][0]
         chat_id = before["chat_id"]
         assert chat_id
@@ -1390,10 +1391,11 @@ async def test_darla_por_fallada_bloquea_a_las_que_dependian(db):
     assert por_id["t2"]["estado"] == grafo.BLOQUEADO
 
 
-async def test_parar_el_plan_lo_cancela(db):
+async def test_parar_el_plan_delega_el_cierre_al_controlador(db):
     await _grafo_esperando(db)
+    before = await db.get_task_graph("g")
     assert await orquestador.aplicar_respuesta(db, "g", "t1", "parar") == "parar"
-    assert (await db.get_task_graph("g"))["estado"] == "cancelado"
+    assert await db.get_task_graph("g") == before
 
 
 async def test_contestar_dos_veces_no_aplica_dos_veces(db):
@@ -1504,11 +1506,12 @@ async def test_decision_y_texto_juntos_manda_la_decision_fallar(db):
 
 
 async def test_decision_y_texto_juntos_manda_la_decision_parar(db):
-    """Y `parar` para de verdad, aunque venga con una explicación."""
+    """El texto no cambia la decisión; el controlador espera el cierre."""
     await _grafo_esperando(db)
+    before = await db.get_task_graph("g")
     assert await orquestador.aplicar_respuesta(
         db, "g", "t1", "parar", "esto lo vemos mañana") == "parar"
-    assert (await db.get_task_graph("g"))["estado"] == "cancelado"
+    assert await db.get_task_graph("g") == before
     fila = next(t for t in (await db.get_task_graph("g"))["tasks"]
                 if t["id"] == "t1")
     assert fila["estado"] == grafo.ESPERANDO, "no la revivió"

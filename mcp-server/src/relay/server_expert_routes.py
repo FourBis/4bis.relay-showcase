@@ -11,7 +11,7 @@ from aiohttp import web
 
 from .server_common import (
     BG_TASKS_KEY, COMMANDS_KEY, DB_KEY, MCP_POOL_KEY, NOTIFY_KEY, PROGRESS_KEY,
-    RUNNING_KEY, SESSIONS_KEY, SKILLS_KEY, _require_auth, logger,
+    RUNNING_KEY, SESSIONS_KEY, SKILLS_KEY, _require_auth, _spawn_bg, logger,
 )
 from . import attachments as attachments_mod
 from . import coordination
@@ -442,72 +442,92 @@ async def experts_run(request: web.Request) -> web.Response:
 
 @_require_auth
 async def experts_cancel(request: web.Request) -> web.Response:
-    """POST /experts/cancel/{chat_id} — cancela un run en curso.
-
-    Iter 5.3: si el chat figura `running` en DB pero NO está en el
-    RUNNING_KEY (memoria) — el proceso se reinició, el experto crasheó
-    sin actualizar DB, o cualquier otro zombie — marcarlo `cancelled`
-    directamente igual (no devolver 404). El usuario no quiere
-    distinguir: quiere que desaparezca de "En curso".
-    """
-    db: Database = request.app[DB_KEY]
-    running: dict = request.app[RUNNING_KEY]
-    progress: dict = request.app[PROGRESS_KEY]
+    """Cancela una ejecución identificada y espera su cierre durable."""
+    db, running = request.app[DB_KEY], request.app[RUNNING_KEY]
     chat_id = request.match_info["chat_id"]
+    matches = [cid for cid in running if cid.startswith(chat_id)]
+    for cid in matches or [chat_id]:
+        if not await identity.can_control_chat(request, db, await db.get_chat(cid)):
+            return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
+    if len(matches) > 1:
+        return web.json_response({"error": "Prefijo ambiguo; indica el ID completo."}, status=409)
+    chat_id = matches[0] if matches else chat_id
     event = await db.conversation_event_for_chat(chat_id)
-    if event and event["state"] in {"pending", "processing", "uncertain"}:
+
+    async def finish_cancel():
+        if event:
+            async with task_service.control_lock(db, event["conversation_id"]):
+                return await _cancel_expert(request, chat_id)
+        return await _cancel_expert(request, chat_id)
+
+    return await asyncio.shield(_spawn_bg(finish_cancel(), hold_workspace=False))
+
+
+async def _cancel_expert(request, chat_id):
+    db, running = request.app[DB_KEY], request.app[RUNNING_KEY]
+    progress = request.app[PROGRESS_KEY]
+    chat = await db.get_chat(chat_id)
+    if not await identity.can_control_chat(request, db, chat):
+        return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
+    event = await db.conversation_event_for_chat(chat_id)
+    rp = progress.get(chat_id)
+    if getattr(rp, "closing", False):
+        return web.json_response({"error": "La ejecución está guardando su resultado; espera."}, status=409)
+    if event:
         cid = event["conversation_id"]
         if not await identity.can_control_graph(request, db, {"conversation_id": cid}):
             return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
-        await db.update_conversation_task(cid, state="paused", tracking={"enabled": False})
+        # No pausar otro turno si el solicitado terminó durante la autorización.
+        paused = await db.run(
+            "UPDATE conversations SET task_json=json_patch(COALESCE(task_json,'{}'),?) "
+            "WHERE id=(SELECT conversation_id FROM conversation_events WHERE id=? "
+            "AND state IN ('pending','processing','uncertain')) RETURNING id",
+            (json.dumps({"state": "paused", "tracking": {"enabled": False}}), event["id"]))
+        if not paused:
+            return web.json_response({"cancelled": [], "finished": [chat_id]})
+        event = await db.conversation_event_for_chat(chat_id)
+        if getattr(progress.get(chat_id), "closing", False):
+            return web.json_response({"error": "La ejecución está guardando su resultado; espera.",
+                                      "conversation_id": cid, "paused": True}, status=409)
+        if event["state"] == "uncertain":
+            return web.json_response({"error": "El evento tiene efectos inciertos; revisa el resultado antes de continuar.",
+                                      "conversation_id": cid, "paused": True}, status=409)
+        if event["state"] not in {"pending", "processing"}:
+            return web.json_response({"cancelled": [], "finished": [chat_id], "conversation_id": cid})
         if event["state"] == "pending":
             await db.finish_conversation_event(event["id"], state="cancelled", error="Cancelado por el usuario")
-        else:
+        elif event["state"] == "processing":
             runner = request.app.get(task_service.TASK_RUNNERS_KEY, {}).get(cid)
-            if runner:
+            if runner is None or runner.done():
+                return web.json_response({"error": "No hay un proceso vivo; revisa el evento antes de continuar.",
+                                          "conversation_id": cid, "paused": True}, status=409)
+            if getattr(progress.get(chat_id), "finished", False):
+                # El experto terminó; pueden quedar un grafo y el cierre del evento.
+                from .server_graph_helpers import _cancelar_grafo
+                if graph := await db.active_task_graph(cid):
+                    await _cancelar_grafo(request.app, graph["id"])
+                await asyncio.gather(runner, return_exceptions=True)
+                return web.json_response({"cancelled": [], "finished": [chat_id], "conversation_id": cid})
+            if not runner.cancelling():
                 runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
         return web.json_response({"cancelled": [chat_id], "conversation_id": cid})
-    matches = [cid for cid in running if cid.startswith(chat_id)]
-    cancelled: list[str] = []
-    zombies: list[str] = []
-    if matches:
-        # Autorizar el conjunto antes de cancelar: un prefijo no concede permisos.
-        for cid in matches:
-            if not await identity.can_control_chat(request, db, await db.get_chat(cid)):
-                return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
-        # Caso normal: el proceso está vivo, mandamos cancel().
-        for cid in matches:
-            worker = running.get(cid)
-            if worker is None or worker.done():
-                continue  # Pudo terminar mientras se comprobaban los permisos.
+    worker = running.get(chat_id)
+    if worker is not None:
+        if not worker.done() and not worker.cancelling():
             worker.cancel()
-            rp = progress.get(cid)
-            if rp is not None:
-                rp.finished = True
-                rp.error = "cancelled"
-                rp.phase = "cancelled"
-            await db.finish_chat(cid, status="cancelled")
-            cancelled.append(cid)
-    else:
-        # Caso zombie: el chat figura running en DB pero no hay proceso
-        # vivo. Lo cerramos igual (el sweep después lo limpia, pero el
-        # cliente quiere respuesta inmediata). NO 404: si la intención
-        # del usuario es "sácalo de En curso", lo sacamos.
+        await asyncio.gather(worker, return_exceptions=True)
         chat = await db.get_chat(chat_id)
-        if chat and chat.get("status") == "running":
-            if not await identity.can_control_chat(request, db, chat):
-                return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
-            await db.finish_chat(
-                chat_id, status="cancelled",
-                error="zombie: cancelado sin proceso vivo (relay "
-                "reinició o experto crasheó)")
-            zombies.append(chat_id)
-        else:
-            # Sin match en memoria NI chat running en DB: 404 honesto.
-            return web.json_response(
-                {"error": "no hay run en curso con ese id"}, status=404)
-    return web.json_response(
-        {"cancelled": cancelled, "zombies_cleaned": zombies})
+        if chat and chat.get("status") in {"queued", "running"}:
+            return web.json_response({"error": "La ejecución terminó sin guardar su cierre; revisa el registro."}, status=409)
+        return web.json_response({"cancelled": [chat_id] if (chat or {}).get("status") == "cancelled" else [],
+                                  "finished": [chat_id]})
+    if chat and chat.get("status") == "running":
+        await db.finish_chat(chat_id, status="cancelled", error="zombie: cancelado sin proceso vivo")
+        return web.json_response({"cancelled": [], "zombies_cleaned": [chat_id]})
+    if chat:
+        return web.json_response({"cancelled": [], "finished": [chat_id]})
+    return web.json_response({"error": "no hay run en curso con ese id"}, status=404)
 
 
 @_require_auth
