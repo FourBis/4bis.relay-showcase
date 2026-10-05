@@ -88,12 +88,16 @@ async def correr_grafo(
         # dejar nodos corriendo sueltos. Ver `_cerrar_las_que_quedaron`.
         limpieza = asyncio.ensure_future(
             _cerrar_las_que_quedaron(db, graph_id, en_curso, coordinar))
-        # `shield`: si a nosotros nos cancelaron, la limpieza igual
-        # termina —corre como tarea propia—; lo único que se pierde es la
-        # espera. Sin esto, cancelar el grafo dejaría los archivos
-        # tomados por tareas que ya no existen.
-        with contextlib.suppress(asyncio.CancelledError):
+        # Una segunda cancelación tampoco puede soltar el grafo antes
+        # de que terminen los nodos y se liberen sus archivos.
+        try:
             await asyncio.shield(limpieza)
+        except asyncio.CancelledError:
+            while not limpieza.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(limpieza)
+            limpieza.result()
+            raise
 
     if vueltas >= MAX_VUELTAS:
         logger.error("grafo %s: corté por MAX_VUELTAS", graph_id)

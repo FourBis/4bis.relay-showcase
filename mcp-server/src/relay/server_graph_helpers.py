@@ -9,7 +9,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .server_common import BG_TASKS_KEY, DB_KEY, GRAFOS_KEY, NOTIFY_KEY, PROGRESS_KEY, logger
+from .server_common import BG_TASKS_KEY, DB_KEY, GRAFOS_KEY, NOTIFY_KEY, PROGRESS_KEY, _spawn_bg, logger
 from . import coordination
 from . import experts
 from . import grafo as grafo_mod
@@ -538,6 +538,45 @@ async def _correr_grafo_bg(app: web.Application, project: dict,
             await db.set_task_graph_state(graph_id, "fallado")
     finally:
         graph_progress.finished = True
+
+
+def _graph_control_lock(app: web.Application, graph_id: str):
+    db = app[DB_KEY]
+    if not hasattr(db, "_graph_control_locks"):
+        db._graph_control_locks = {}
+    return db._graph_control_locks.setdefault(graph_id, asyncio.Lock())
+
+
+def _grafo_en_curso(app: web.Application, graph_id: str):
+    return (app[GRAFOS_KEY].get(graph_id)
+            or getattr(app[DB_KEY], "_graph_cancellations", {}).get(graph_id))
+
+
+async def _cancelar_grafo(app: web.Application, graph_id: str) -> None:
+    db = app[DB_KEY]
+    if not hasattr(db, "_graph_cancellations"):
+        # ponytail: un proceso; usar reserva persistente al distribuir Relay.
+        db._graph_cancellations = {}
+    pending = db._graph_cancellations
+    finalizer = pending.get(graph_id)
+    if finalizer is None:
+        async def finish_cancel():
+            async with _graph_control_lock(app, graph_id):
+                task = app[GRAFOS_KEY].get(graph_id)
+                if task is not None:
+                    asyncio.current_task().relay_actor = getattr(task, "relay_actor", None)
+                    if not task.cancelling():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                await db.set_task_graph_state(graph_id, "cancelado")
+
+        # Conserva el worker original para los controles de tarea; la
+        # reserva adicional bloquea reanudaciones hasta persistir el cierre.
+        finalizer = _spawn_bg(finish_cancel(), hold_workspace=False)
+        finalizer.relay_actor = getattr(app[GRAFOS_KEY].get(graph_id), "relay_actor", None)
+        pending[graph_id] = finalizer
+        finalizer.add_done_callback(lambda _: pending.pop(graph_id, None))
+    await asyncio.shield(finalizer)
 
 
 def _largar_grafo(app: web.Application, project: dict, graph_id: str,

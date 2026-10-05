@@ -1,8 +1,6 @@
 """Server domain handlers extracted from the composition entrypoint."""
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import uuid
 from typing import Optional
@@ -15,8 +13,8 @@ from . import coordination
 from . import orquestador
 from . import planificador
 from .server_graph_helpers import (
-    _PLANIFICANDO, _grafo_publico, _grafo_sintetico, _largar_grafo,
-    _stages_de,
+    _PLANIFICANDO, _cancelar_grafo, _grafo_en_curso, _grafo_publico, _grafo_sintetico, _largar_grafo,
+    _graph_control_lock, _stages_de,
 )
 @_require_auth
 @coordination.guard_workspace(DB_KEY)
@@ -188,7 +186,7 @@ async def conversation_plan(request: web.Request) -> web.Response:
     g = (await db.active_task_graph(conv_id)
          or await db.last_task_graph(conv_id))
     if g is not None:
-        vivo = g["id"] in request.app[GRAFOS_KEY]
+        vivo = bool(_grafo_en_curso(request.app, g["id"]))
         if vivo or not await db.hay_turnos_humanos_despues(
                 conv_id, g.get("updated_at") or g.get("created_at") or ""):
             return _grafo(g, vivo)
@@ -240,7 +238,7 @@ async def graphs_get(request: web.Request) -> web.Response:
     if g is None:
         return web.json_response({"error": "not found"}, status=404)
     salida = _grafo_publico(g)
-    salida["corriendo"] = request.match_info["id"] in request.app[GRAFOS_KEY]
+    salida["corriendo"] = bool(_grafo_en_curso(request.app, request.match_info["id"]))
     return web.json_response(salida)
 
 
@@ -260,6 +258,17 @@ async def graphs_list(request: web.Request) -> web.Response:
 @_require_auth
 @coordination.guard_workspace(DB_KEY, source="graph")
 async def graphs_resume(request: web.Request) -> web.Response:
+    graph_id = request.match_info["id"]
+    lock = _graph_control_lock(request.app, graph_id)
+    if lock.locked():
+        return web.json_response(
+            {"error": "El grafo está completando otra acción; espera y reintenta.",
+             "graph_id": graph_id}, status=409)
+    async with lock:
+        return await _resume_graph(request)
+
+
+async def _resume_graph(request: web.Request) -> web.Response:
     """POST /graphs/{id}/resume — retoma un grafo cortado.
 
     El orquestador recupera nodos interrumpidos al arrancar. Un grafo
@@ -270,7 +279,7 @@ async def graphs_resume(request: web.Request) -> web.Response:
     g = await db.get_task_graph(graph_id)
     if g is None:
         return web.json_response({"error": "not found"}, status=404)
-    if graph_id in request.app[GRAFOS_KEY]:
+    if _grafo_en_curso(request.app, graph_id):
         return web.json_response(
             {"error": "ese grafo ya está corriendo", "graph_id": graph_id},
             status=409)
@@ -323,7 +332,6 @@ async def graphs_cancel(request: web.Request) -> web.Response:
     g = await db.get_task_graph(graph_id)
     if g is None:
         return web.json_response({"error": "not found"}, status=404)
-    task = request.app[GRAFOS_KEY].get(graph_id)
     conv_id = g.get("conversation_id")
     if conv_id:
         state = await db.get_conversation_task(conv_id)
@@ -335,16 +343,7 @@ async def graphs_cancel(request: web.Request) -> web.Response:
         allowed = identity.role_of(request) == identity.OWNER_ROLE or identity.can_write_project(request, project)
     if not allowed:
         return web.json_response({"error": "No tienes permiso de escritura en este proyecto. Revisa Equipo."}, status=403)
-    if task is not None:
-        # Un reintento debe esperar la limpieza, no volver a interrumpirla.
-        if not task.cancelling():
-            task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await asyncio.shield(task)
-    # Igual que en /experts/cancel: si el proceso se reinició y el grafo
-    # quedó `activo` en la base sin nadie corriéndolo, marcarlo cancelado
-    # lo mismo. El humano no quiere distinguir, quiere que pare.
-    await db.set_task_graph_state(graph_id, "cancelado")
+    await _cancelar_grafo(request.app, graph_id)
     return web.json_response(
         _grafo_publico(await db.get_task_graph(graph_id)))
 
@@ -420,7 +419,7 @@ async def expert_question_answer(request: web.Request) -> web.Response:
     if not active_gid and q.get("conversation_id"):
         active = await db.active_task_graph(q["conversation_id"])
         active_gid = (active or {}).get("id") or ""
-    active_task = request.app[GRAFOS_KEY].get(active_gid)
+    active_task = _grafo_en_curso(request.app, active_gid)
     active_actor = getattr(active_task, "relay_actor", None) if active_task else None
     if active_task and active_actor != identity.requester(request):
         return web.json_response(
@@ -526,9 +525,9 @@ async def _retomar_grafo_tras_respuesta(
 
         g = await db.get_task_graph(gid)
         project = await db.get_project((g or {}).get("project_slug") or "")
-        if not g or not project or gid in request.app[GRAFOS_KEY]:
+        if not g or not project or _grafo_en_curso(request.app, gid):
             return {"graph_id": gid, "decision": decision,
-                    "corriendo": gid in request.app[GRAFOS_KEY]}
+                    "corriendo": bool(_grafo_en_curso(request.app, gid))}
         from . import identity
         _largar_grafo(request.app, project, gid, identity.requester(request))
         return {"graph_id": gid, "decision": decision, "corriendo": True}
