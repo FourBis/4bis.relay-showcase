@@ -107,10 +107,16 @@ class DatabaseConversationTasksMixin:
         return await asyncio.to_thread(work)
 
     async def claim_conversation_event(self, conv_id: str) -> dict[str, Any] | None:
+        from .task_service import STOPPED
         def work() -> dict[str, Any] | None:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT task_json FROM conversations WHERE id=?", (conv_id,)).fetchone()
+                state = json.loads(row[0] or "{}") if row else {}
+                if isinstance(state, dict) and state.get("state") in STOPPED:
+                    conn.rollback()
+                    return None
                 if conn.execute("SELECT 1 FROM conversation_events WHERE conversation_id=? AND state IN ('processing','uncertain') LIMIT 1", (conv_id,)).fetchone():
                     conn.rollback()
                     return None

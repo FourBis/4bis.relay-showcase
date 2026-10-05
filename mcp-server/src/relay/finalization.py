@@ -119,6 +119,7 @@ def supervise(handler):
             progress = kwargs["progress"].get(chat_id)
             if progress is not None:
                 progress.finished = True
+                progress.closing = False
     return guarded
 
 

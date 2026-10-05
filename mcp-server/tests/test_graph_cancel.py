@@ -715,3 +715,80 @@ async def test_question_disconnect_after_persist_finishes_graph_transition(
         if not answering.done():
             answering.cancel()
         await asyncio.gather(answering, return_exceptions=True)
+
+
+@pytest.mark.parametrize("disconnect", [False, True], ids=["connected", "disconnected"])
+async def test_explicit_graph_stop_waits_for_worker_cleanup(graph_client, monkeypatch, disconnect):
+    _, db, app, _launch = graph_client
+    await _waiting_question(db, "ready")
+    cleanup, release_worker = asyncio.Event(), asyncio.Event()
+
+    async def worker_body():
+        try:
+            await asyncio.Future()
+        finally:
+            cleanup.set()
+            await release_worker.wait()
+
+    worker = asyncio.create_task(worker_body())
+    worker.relay_actor = identity.OWNER
+    app[server_common.GRAFOS_KEY]["stopped"] = worker
+    background = []
+    spawn_bg = server_graph_routes._spawn_bg
+
+    def track_background(coro, **kwargs):
+        task = spawn_bg(coro, **kwargs)
+        background.append(task)
+        return task
+
+    monkeypatch.setattr(server_graph_routes, "_spawn_bg", track_background)
+    persisted, release_answer = asyncio.Event(), asyncio.Event()
+    answer = db.answer_expert_question
+
+    async def persist_then_wait(*args, **kwargs):
+        result = await answer(*args, **kwargs)
+        persisted.set()
+        await release_answer.wait()
+        return result
+
+    if disconnect:
+        monkeypatch.setattr(db, "answer_expert_question", persist_then_wait)
+    request = make_mocked_request("POST", "/questions/q-stopped/answer",
+                                  app=app, match_info={"q_id": "q-stopped"})
+    request[identity.IDENTITY_KEY] = identity.OWNER
+    monkeypatch.setattr(request, "json", AsyncMock(return_value={"choice": "parar"}))
+    answering = asyncio.create_task(server_graph_routes.expert_question_answer(request))
+    try:
+        if disconnect:
+            await asyncio.wait_for(persisted.wait(), 2)
+            answering.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await answering
+            release_answer.set()
+        await asyncio.wait_for(cleanup.wait(), 2)
+        await asyncio.sleep(0)
+        if disconnect:
+            assert len(background) == 1 and not background[0].done()
+        else:
+            assert not answering.done()
+        assert not worker.done()
+        assert (await db.get_task_graph("stopped"))["estado"] != "cancelado"
+
+        release_worker.set()
+        await asyncio.gather(worker, return_exceptions=True)
+        if disconnect:
+            result = await asyncio.wait_for(asyncio.gather(*background), 2)
+            assert result[0].status == 200
+        else:
+            assert (await asyncio.wait_for(answering, 2)).status == 200
+        assert worker.done()
+        assert (await db.get_expert_question("q-stopped"))["status"] == "answered"
+        assert (await db.get_task_graph("stopped"))["estado"] == "cancelado"
+    finally:
+        release_answer.set()
+        release_worker.set()
+        if not worker.done():
+            worker.cancel()
+        if not answering.done():
+            answering.cancel()
+        await asyncio.gather(answering, worker, *background, return_exceptions=True)

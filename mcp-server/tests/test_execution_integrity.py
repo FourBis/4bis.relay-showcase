@@ -17,6 +17,199 @@ from relay import config, coordination, dbtool, finalization, persist, server
 from relay.db import Database
 
 
+@pytest.mark.parametrize("disconnect", [False, True])
+@pytest.mark.parametrize("claim_during_pause", [False, True])
+async def test_managed_cancel_waits_cleanup_and_preserves_next_event(
+        db, monkeypatch, disconnect, claim_during_pause):
+    from relay import task_service
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state="ready")
+    event = await db.enqueue_conversation_event(cid, "first", "run", {"user": "first"})
+    next_event = await db.enqueue_conversation_event(cid, "next", "run", {"user": "next"})
+    if not claim_during_pause:
+        await db.claim_conversation_event(cid)
+    app = web.Application()
+    app[server.DB_KEY], app[server.RUNNING_KEY], app[server.PROGRESS_KEY] = db, {}, {}
+    cleanup, release = asyncio.Event(), asyncio.Event()
+
+    async def worker():
+        try:
+            await asyncio.Future()
+        finally:
+            cleanup.set()
+            await release.wait()
+            await db.finish_chat(event["chat_id"], status="cancelled")
+            await db.finish_conversation_event(event["id"], state="uncertain")
+
+    runner = asyncio.create_task(worker())
+    app[task_service.TASK_RUNNERS_KEY] = {cid: runner}
+    app[server.RUNNING_KEY][event["chat_id"]] = runner
+    if claim_during_pause:
+        run = db.run
+        async def claim_then_pause(sql, params=()):
+            if sql.startswith("UPDATE conversations SET task_json=json_patch"):
+                assert (await db.claim_conversation_event(cid))["id"] == event["id"]
+            return await run(sql, params)
+        monkeypatch.setattr(db, "run", claim_then_pause)
+    spawned = []
+    spawn = server_expert_routes._spawn_bg
+    def capture(coro, **kwargs):
+        task = spawn(coro, **kwargs)
+        spawned.append(task)
+        return task
+    monkeypatch.setattr(server_expert_routes, "_spawn_bg", capture)
+    req = make_mocked_request("POST", "/experts/cancel/" + event["chat_id"],
+                              app=app, match_info={"chat_id": event["chat_id"]})
+    handler = asyncio.create_task(server_expert_routes.experts_cancel(req))
+    try:
+        await asyncio.wait_for(cleanup.wait(), 2)
+        assert not handler.done() and not runner.done()
+        assert (await db.get_chat(event["chat_id"]))["status"] == "running"
+        assert await db.claim_conversation_event(cid) is None
+        if disconnect:
+            handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await handler
+        assert not spawned[0].done()
+        release.set()
+        response = await asyncio.wait_for(spawned[0], 2)
+        assert response.status == 200 and runner.done()
+        assert (await db.get_chat(event["chat_id"]))["status"] == "cancelled"
+        assert (await db.conversation_event_for_chat(next_event["chat_id"]))["state"] == "pending"
+        assert (await db.get_conversation_task(cid))["state"] == "paused"
+    finally:
+        release.set()
+        if not runner.done():
+            runner.cancel()
+        await asyncio.gather(handler, runner, *spawned, return_exceptions=True)
+
+
+async def test_cancel_completed_event_does_not_pause_or_cancel_the_next_run(db):
+    from relay import task_service
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state="ready")
+    old = await db.enqueue_conversation_event(cid, "old", "run", {"user": "old"})
+    await db.claim_conversation_event(cid)
+    await db.finish_conversation_event(old["id"])
+    new = await db.enqueue_conversation_event(cid, "new", "run", {"user": "new"})
+    await db.claim_conversation_event(cid)
+    runner = asyncio.create_task(asyncio.sleep(60))
+    app = web.Application()
+    app[server.DB_KEY], app[server.PROGRESS_KEY] = db, {}
+    app[server.RUNNING_KEY] = {new["chat_id"]: runner}
+    app[task_service.TASK_RUNNERS_KEY] = {cid: runner}
+    before = await db.get_conversation_task(cid)
+    req = make_mocked_request("POST", "/experts/cancel/" + old["chat_id"],
+                              app=app, match_info={"chat_id": old["chat_id"]})
+    try:
+        response = await server_expert_routes.experts_cancel(req)
+        assert response.status == 200 and json.loads(response.text)["cancelled"] == []
+        assert not runner.cancelling()
+        assert await db.get_conversation_task(cid) == before
+        assert (await db.conversation_event_for_chat(new["chat_id"]))["state"] == "processing"
+    finally:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+
+async def test_cancel_finished_expert_waits_for_graph_and_event_bookkeeping(db, monkeypatch):
+    from types import SimpleNamespace
+    from relay import task_service
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
+
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state="processing")
+    event = await db.enqueue_conversation_event(cid, "finished", "run", {"user": "done"})
+    await db.claim_conversation_event(cid)
+    await db.finish_chat(event["chat_id"], status="ok")
+    await db.create_task_graph(
+        cid, "graph", conversation_id=cid, project_slug="demo",
+        tareas=[{"id": "node-1", "titulo": "node"}])
+    graph_cleanup, release_graph = asyncio.Event(), asyncio.Event()
+    release_runner = asyncio.Event()
+
+    async def graph_task():
+        try:
+            await asyncio.Future()
+        finally:
+            graph_cleanup.set()
+            await release_graph.wait()
+
+    async def runner():
+        await release_runner.wait()
+        await db.finish_conversation_event(event["id"], state="applied")
+
+    graph_worker = asyncio.create_task(graph_task())
+    bookkeeping_runner = asyncio.create_task(runner())
+    rp = SimpleNamespace(finished=True, closing=False, graph_id=cid)
+    app = web.Application()
+    app[server.DB_KEY] = db
+    app[server.RUNNING_KEY] = {event["chat_id"]: asyncio.create_task(asyncio.sleep(60))}
+    app[server.PROGRESS_KEY] = {event["chat_id"]: rp}
+    app[server.GRAFOS_KEY] = {cid: graph_worker}
+    app[task_service.TASK_RUNNERS_KEY] = {cid: bookkeeping_runner}
+    request_obj = make_mocked_request(
+        "POST", "/experts/cancel/" + event["chat_id"], app=app,
+        match_info={"chat_id": event["chat_id"]})
+    try:
+        handler = asyncio.create_task(server_expert_routes.experts_cancel(request_obj))
+        await asyncio.wait_for(graph_cleanup.wait(), timeout=2)
+        await asyncio.sleep(0)
+        assert not handler.done()
+        assert not bookkeeping_runner.cancelling()
+        assert not app[server.RUNNING_KEY][event["chat_id"]].cancelling()
+        release_graph.set()
+        await asyncio.sleep(0)
+        assert not handler.done()
+        release_runner.set()
+        response = await asyncio.wait_for(handler, timeout=2)
+        body = json.loads(response.text)
+        assert response.status == 200
+        assert body["cancelled"] == [] and body["finished"] == [event["chat_id"]]
+        assert (await db.conversation_event_for_chat(event["chat_id"]))["state"] == "applied"
+        assert (await db.get_chat(event["chat_id"]))["status"] == "ok"
+        assert (await db.get_conversation_task(cid))["state"] == "paused"
+        assert (await db.get_task_graph(cid))["estado"] == "cancelado"
+    finally:
+        release_graph.set()
+        release_runner.set()
+        worker = app[server.RUNNING_KEY][event["chat_id"]]
+        worker.cancel()
+        if not graph_worker.done() and not graph_worker.cancelling():
+            graph_worker.cancel()
+        await asyncio.gather(handler, graph_worker, bookkeeping_runner, worker, return_exceptions=True)
+
+
+@pytest.mark.parametrize("event_state", ["processing", "uncertain"])
+async def test_cancel_event_without_runner_preserves_event_for_recovery(db, monkeypatch, event_state):
+    from types import SimpleNamespace
+    from relay import task_service
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
+
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state="processing")
+    event = await db.enqueue_conversation_event(cid, "orphan", "run", {"user": "pending"})
+    await db.claim_conversation_event(cid)
+    if event_state == "uncertain":
+        await db.finish_conversation_event(event["id"], state=event_state)
+    before = await db.get_chat(event["chat_id"])
+    app = web.Application()
+    app[server.DB_KEY] = db
+    app[server.RUNNING_KEY] = {}
+    app[server.PROGRESS_KEY] = {event["chat_id"]: SimpleNamespace(finished=False, closing=False)}
+    app[task_service.TASK_RUNNERS_KEY] = {}
+    request_obj = make_mocked_request(
+        "POST", "/experts/cancel/" + event["chat_id"], app=app,
+        match_info={"chat_id": event["chat_id"]})
+
+    response = await server_expert_routes.experts_cancel(request_obj)
+    assert response.status == 409
+    assert json.loads(response.text)["paused"] is True
+    assert (await db.conversation_event_for_chat(event["chat_id"]))["state"] == event_state
+    assert await db.get_chat(event["chat_id"]) == before
+    assert (await db.get_conversation_task(cid))["state"] == "paused"
+
+
 async def test_corrupt_export_does_not_block_later_outputs(db):
     ids = []
     for content in ("broken", "intact"):
@@ -193,6 +386,40 @@ async def test_generated_images_are_persisted_and_notified_without_llm_citation(
     from pathlib import Path
     assert f"/attachments/{aid}" in Path(row["md_path"]).read_text(encoding="utf-8")
     assert row["status"] == ("cancelled" if cancelled else "ok")
+
+
+async def test_running_expert_stays_registered_until_finish_persists(db, monkeypatch):
+    """El run sigue activo hasta que termina la persistencia durable."""
+    cid = await db.create_chat(project_slug="demo", source="test", author="", target="demo")
+    entered_finish, release_finish = asyncio.Event(), asyncio.Event()
+    running, progress = {}, {}
+
+    async def runner(*args, **kwargs):
+        return dict(content="listo", phase_at_end="done", model="test")
+
+    async def finish(*args, **kwargs):
+        entered_finish.set()
+        await release_finish.wait()
+        return "resultado.md"
+
+    monkeypatch.setattr(server.experts, "run_expert_staged", runner)
+    monkeypatch.setattr(server_expert_jobs, "_suggest_followups", AsyncMock(return_value=[]))
+    monkeypatch.setattr(server_expert_jobs.finalization, "finish", finish)
+    task = asyncio.create_task(server._run_expert_bg(
+        db=db, notify=AsyncMock(), running=running, progress=progress, chat_id=cid,
+        project=await db.get_project("demo"), user="capturar", skills_block="",
+        system_extra="", model_override="test", target="demo", source="test",
+        author="", conversation=None))
+    running[cid] = task
+    try:
+        await asyncio.wait_for(entered_finish.wait(), timeout=5)
+        assert running.get(cid) is task, "el experto salió de running antes de persistir"
+        assert progress[cid].finished is False
+    finally:
+        release_finish.set()
+    await task
+    assert cid not in running
+    assert progress[cid].finished is True
 
 
 @pytest.fixture

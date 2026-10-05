@@ -17,7 +17,7 @@ from . import planificador
 from .server_questions import _question_graph
 from .server_graph_helpers import (
     _PLANIFICANDO, _cancelar_grafo, _grafo_en_curso, _grafo_publico, _grafo_sintetico, _largar_grafo,
-    _graph_control_lock, _stages_de,
+    _finish_graph_cancel, _graph_control_lock, _stages_de,
 )
 @_require_auth
 @coordination.guard_workspace(DB_KEY)
@@ -592,9 +592,7 @@ async def _retomar_grafo_tras_respuesta(
         if not gid or not decision:
             return None
         if decision == "parar":
-            # Ya quedó `cancelado`; si además estaba corriendo, cortarlo.
-            if tarea := request.app[GRAFOS_KEY].get(gid):
-                tarea.cancel()
+            await _finish_graph_cancel(request.app, gid)
             return {"graph_id": gid, "decision": decision, "corriendo": False}
 
         g = await db.get_task_graph(gid)

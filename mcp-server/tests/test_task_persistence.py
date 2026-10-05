@@ -74,6 +74,20 @@ class TestTaskPersistence(unittest.IsolatedAsyncioTestCase):
         rows = await self.db.list_conversation_events(self.conv)
         self.assertEqual([row["state"] for row in rows], ["uncertain", "cancelled"])
 
+    async def test_stopped_task_does_not_claim_pending_event(self) -> None:
+        for state in ("paused", "cancelled", "finished", "blocked", "cleaned"):
+            with self.subTest(state=state):
+                await self.db.update_conversation_task(self.conv, state=state)
+                event = await self.db.enqueue_conversation_event(
+                    self.conv, f"stopped-{state}", "run", {"user": state})
+                before_chat = await self.db.get_chat(event["chat_id"])
+
+                self.assertIsNone(await self.db.claim_conversation_event(self.conv))
+                after_event = await self.db.list_conversation_events(self.conv)
+                after_chat = await self.db.get_chat(event["chat_id"])
+                self.assertEqual(after_event[-1], event)
+                self.assertEqual(after_chat, before_chat)
+
     async def test_feedback_during_processing_survives_restart_and_finish_respects_terminal_chat(self) -> None:
         run = await self.db.enqueue_conversation_event(self.conv, "run", "run", {"user": "uno"})
         claimed = await self.db.claim_conversation_event(self.conv)

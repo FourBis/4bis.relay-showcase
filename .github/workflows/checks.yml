@@ -55,6 +55,8 @@ jobs:
           mcp-server/tests/test_task_continuity.py
           mcp-server/tests/test_task_callers.py
           mcp-server/tests/test_task_index.py
+          mcp-server/tests/test_execution_integrity.py
+          mcp-server/tests/test_progress.py
           mcp-server/tests/test_module_boundaries.py
           mcp-server/tests/test_model_request_guard.py
           mcp-server/tests/test_tracing.py
@@ -70,7 +72,7 @@ jobs:
         run: >-
           python -m pytest
           mcp-server/tests/test_orquestador.py
-          -k "split or subdiv or fan_out or flag_apagado or subtarea or cancel or claim or salir_por_la_mala"
+          -k "split or subdiv or fan_out or flag_apagado or subtarea or cancel or claim or salir_por_la_mala or parar or decision or reintentar or contestar or darla_por_fallada or responder or texto_libre"
           -q
       - name: Check graph interruption and repeated requests
         shell: pwsh
