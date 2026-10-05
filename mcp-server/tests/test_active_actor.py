@@ -54,6 +54,7 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
             "question_json": json.dumps(question), "conversation_id": "c1", "chat_id": "chat1"}),
         active_task_graph=AsyncMock(return_value={"id": "g1"}),
         answer_expert_question=AsyncMock(return_value=True),
+        run=AsyncMock(return_value=[]),
         get_task_graph=AsyncMock(return_value={"id": "g1", "project_slug": "demo"}),
         get_project=AsyncMock(return_value={"slug": "demo"}))
     transition = AsyncMock(return_value="retry")
@@ -62,6 +63,7 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
     monkeypatch.setattr(orquestador, "responder_a_la_tarea", resume)
     monkeypatch.setattr(server_common, "_check_auth", lambda request: True)
     monkeypatch.setattr(identity, "requester", lambda request: "alex@example.test")
+    monkeypatch.setattr(identity, "can_control_graph", AsyncMock(return_value=True))
     request = SimpleNamespace(app={DB_KEY: db, GRAFOS_KEY: {"g1": SimpleNamespace(relay_actor=active_actor)}},
         match_info={"q_id": "q1"}, json=AsyncMock(return_value={"choice": "retry"}))
     response = await server_graph_routes.expert_question_answer(request)

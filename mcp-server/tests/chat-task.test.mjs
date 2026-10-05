@@ -89,6 +89,14 @@ const devReadOnly = panelHtml({mode:"read_only",state:"ready",
   allowed_actions:["continue","pause","cancel","enable_write"]});
 assert.match(devReadOnly, /data-task-action="enable_write"/);
 assert.doesNotMatch(devReadOnly, /Publicar PR|data-task-track/);
+const readOnlyCreator = panelHtml({mode:"read_only",state:"ready",can_control:false,
+  allowed_actions:["continue","pause","cancel"]});
+assert.deepEqual([...readOnlyCreator.matchAll(/data-task-action="([^"]+)"/g)]
+  .map((match) => match[1]), ["continue","pause","cancel"]);
+assert.doesNotMatch(readOnlyCreator, /enable_write|Publicar PR|data-task-track/);
+const readOnlyOtherActor = panelHtml({mode:"read_only",state:"ready",can_control:false,
+  allowed_actions:[]});
+assert.doesNotMatch(readOnlyOtherActor, /data-task-action=|data-task-track/);
 assert.doesNotMatch(panelHtml({mode:"read_only",state:"running",
   allowed_actions:["enable_write"]}), /data-task-action="enable_write"/);
 assert.doesNotMatch(panelHtml({mode:"read_only",state:"finished",

@@ -399,7 +399,8 @@ class MaybeAskBlockDecisionTests(unittest.IsolatedAsyncioTestCase):
             async def run(self, *a, **kw):
                 return FakeResult()
 
-        with patch.object(pydantic_ai, "Agent", FakeAgentCls):
+        with patch.object(pydantic_ai, "Agent", FakeAgentCls), \
+                patch("relay.experts.build_model", return_value=object()):
             await orch._maybe_ask_block_decision(
                 MagicMock(id="T-001", title="t"),
                 MagicMock(status="done"))
@@ -432,7 +433,8 @@ class MaybeAskBlockDecisionTests(unittest.IsolatedAsyncioTestCase):
             async def run(self, *a, **kw):
                 return FakeResult()
 
-        with patch.object(pydantic_ai, "Agent", FakeAgentCls):
+        with patch.object(pydantic_ai, "Agent", FakeAgentCls), \
+                patch("relay.experts.build_model", return_value=object()):
             await orch._maybe_ask_block_decision(
                 MagicMock(id="T-001", title="t"),
                 MagicMock(status="done"))

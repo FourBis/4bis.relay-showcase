@@ -25,7 +25,7 @@ async def _task_snapshot(request, db, cid):
     owner = identity.role_of(request) == "owner"
     if owner:
         actions = ["continue", "pause", "cancel", "publish", "track"]
-    elif identity.can_write_project(request, project):
+    elif identity.can_control_task(request, project, state, conv):
         actions = ["continue", "pause", "cancel"]
     if state.get("mode") == "read_only" and identity.can_write_project(request, project):
         actions.append("enable_write")

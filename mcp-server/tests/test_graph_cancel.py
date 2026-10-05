@@ -1,12 +1,13 @@
 """Cancelación de grafos históricos, repetición y permisos sin proveedores."""
 import asyncio
-from unittest.mock import Mock
+import json
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from relay import identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle
+from relay import coordination, identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle, server_questions
 from relay.db import Database
 
 
@@ -34,6 +35,8 @@ async def graph_client(tmp_path, monkeypatch):
     app.router.add_post("/graphs/{id}/cancel", server_graph_routes.graphs_cancel)
     app.router.add_post("/graphs/{id}/resume", server_graph_routes.graphs_resume)
     app.router.add_get("/graphs/{id}", server_graph_routes.graphs_get)
+    app.router.add_post("/questions/{q_id}/answer", server_graph_routes.expert_question_answer)
+    app.router.add_post("/questions/{q_id}/skip", server_questions.expert_question_skip)
     launch = Mock()
     monkeypatch.setattr(server_graph_routes, "_largar_grafo", launch)
     async with TestClient(TestServer(app)) as client:
@@ -116,7 +119,7 @@ async def test_cancel_checks_permissions_before_stopping_worker(graph_client, mo
     client, db, app, launch = graph_client
     conv_id = None
     if mode:
-        conv_id = await db.create_conversation(project_slug="demo")
+        conv_id = await db.create_conversation(project_slug="demo", requested_by="dev@example.test")
         await db.update_conversation_task(conv_id, mode=mode, state="running")
     await db.create_task_graph("running", "demo", tareas=[
         {"id": "node", "titulo": "Nodo"}], project_slug="demo", conversation_id=conv_id)
@@ -134,8 +137,6 @@ async def test_cancel_checks_permissions_before_stopping_worker(graph_client, mo
     task = asyncio.create_task(worker())
     app[server_common.GRAFOS_KEY]["running"] = task
     await started.wait()
-    # Las consultas read_only conservan el permiso de cancelación existente.
-    expected = 200 if mode == "read_only" else expected
     try:
         response = await client.post("/graphs/running/cancel", headers={"X-Test-Actor": actor})
         assert response.status == expected
@@ -326,14 +327,11 @@ async def test_cancel_cannot_overtake_resume_state_check(graph_client, monkeypat
         {"id": "pending", "titulo": "Pendiente"}], project_slug="demo")
     reading, release = asyncio.Event(), asyncio.Event()
     get_task_graph = db.get_task_graph
-    reads = 0
+    lock = server_graph_helpers._graph_control_lock(app, "overlap")
 
     async def delayed_read(graph_id):
-        nonlocal reads
         graph = await get_task_graph(graph_id)
-        reads += 1
-        # guard_workspace lee primero; el handler toma el segundo snapshot.
-        if graph_id == "overlap" and reads == 2:
+        if graph_id == "overlap" and lock.locked() and not reading.is_set():
             reading.set()
             await release.wait()
         return graph
@@ -358,3 +356,111 @@ async def test_cancel_cannot_overtake_resume_state_check(graph_client, monkeypat
     assert resume.result().status == 409
     launch.assert_not_called()
     assert (await get_task_graph("overlap"))["estado"] == "cancelado"
+
+
+@pytest.mark.parametrize("action", ["resume", "cancel"])
+@pytest.mark.parametrize("actor,expected", [
+    ("creator@example.test", 200), ("other@example.test", 403)])
+async def test_read_only_graph_controls_belong_to_creator(graph_client, monkeypatch, action, actor, expected):
+    client, db, app, launch = graph_client
+    identity._roles["creator@example.test"] = "member"
+    identity._project_grants["creator@example.test"] = []
+    cid = await db.create_conversation(project_slug="demo", requested_by="creator@example.test")
+    project = await db.get_project("demo")
+    await db.update_conversation_task(
+        cid, mode="read_only", state="ready", source_repo=project["repo_path"],
+        workspace_path=project["repo_path"], workspace_state="blocked",
+        workspace_error="diagnóstico que otro actor no debe borrar")
+    await db.create_task_graph("owned", "demo", tareas=[
+        {"id": "pending", "titulo": "Pendiente"}], project_slug="demo", conversation_id=cid)
+    graph_before = await db.get_task_graph("owned")
+    task_before = await db.get_conversation_task(cid)
+    resolved = AsyncMock(wraps=coordination.resolved_project)
+    monkeypatch.setattr(coordination, "resolved_project", resolved)
+    response = await client.post(f"/graphs/owned/{action}", headers={"X-Test-Actor": actor})
+    assert response.status == (202 if action == "resume" and expected == 200 else expected)
+    if expected == 403:
+        assert await db.get_task_graph("owned") == graph_before
+        assert await db.get_conversation_task(cid) == task_before
+        assert not app[server_common.GRAFOS_KEY]
+        launch.assert_not_called()
+        resolved.assert_not_called()
+    elif action == "resume":
+        launch.assert_called_once_with(app, project, "owned", actor)
+    else:
+        assert (await db.get_task_graph("owned"))["estado"] == "cancelado"
+        launch.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["answer", "skip"])
+@pytest.mark.parametrize("kind", ["grafo", "choice"])
+@pytest.mark.parametrize("orphaned", [False, True])
+@pytest.mark.parametrize("actor,expected", [
+    ("creator@example.test", 200), ("other@example.test", 403)])
+async def test_graph_question_controls_belong_to_creator(graph_client, action, kind, orphaned, actor, expected):
+    client, db, app, launch = graph_client
+    identity._roles["creator@example.test"] = "member"
+    identity._project_grants["creator@example.test"] = []
+    cid = await db.create_conversation(project_slug="demo", requested_by="creator@example.test")
+    await db.update_conversation_task(cid, mode="read_only", state="ready")
+    if not orphaned:
+        await db.create_task_graph("question", "demo", tareas=[
+            {"id": "waiting", "titulo": "Espera"}], project_slug="demo", conversation_id=cid)
+        await db.update_task("waiting", estado="esperando_humano", chat_id="chat-question")
+    payload = {"title": "¿Reintentar?", "options": [{"key": "reintentar", "label": "Sí"}]}
+    if kind == "grafo":
+        payload.update(graph_id="question", task_id="waiting")
+    await db.create_expert_question("q", "chat-question", json.dumps(payload),
+                                   conversation_id=cid, project_slug="demo", kind=kind)
+    graph_before = await db.get_task_graph("question")
+    question_before = await db.get_expert_question("q")
+    response = await client.post(f"/questions/q/{action}", json={"choice": "reintentar"},
+                                 headers={"X-Test-Actor": actor})
+    assert response.status == expected
+    if expected == 403:
+        assert await db.get_task_graph("question") == graph_before
+        assert await db.get_expert_question("q") == question_before
+        launch.assert_not_called()
+    elif action == "answer":
+        assert (await db.get_expert_question("q"))["status"] == "answered"
+        if orphaned:
+            launch.assert_not_called()
+        else:
+            launch.assert_called_once()
+    else:
+        assert (await db.get_expert_question("q"))["status"] == "skipped"
+        launch.assert_not_called()
+
+
+async def test_owner_resume_denial_preserves_workspace_diagnostic(graph_client):
+    client, db, app, launch = graph_client
+    cid = await db.create_conversation(project_slug="demo")
+    await db.update_conversation_task(cid, mode="write", state="ready",
+                                      workspace_error="diagnóstico original")
+    await db.disable_project("demo")
+    await db.create_task_graph("disabled", "demo", tareas=[
+        {"id": "pending", "titulo": "Pendiente"}], project_slug="demo", conversation_id=cid)
+    before = await db.get_conversation_task(cid)
+    response = await client.post("/graphs/disabled/resume")
+    assert response.status == 403
+    assert await db.get_conversation_task(cid) == before
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["answer", "skip"])
+@pytest.mark.parametrize("actor,expected", [
+    (identity.OWNER, 200), ("dev@example.test", 200), ("other@example.test", 403)])
+async def test_unlinked_question_requires_project_access(graph_client, action, actor, expected):
+    client, db, app, launch = graph_client
+    await db.create_expert_question("unlinked", "", '{"title":"¿Continuar?"}',
+                                   project_slug="demo", kind="choice")
+    before = await db.get_expert_question("unlinked")
+    response = await client.post(f"/questions/unlinked/{action}", json={"text": "Sí"},
+                                 headers={"X-Test-Actor": actor})
+    assert response.status == expected
+    if expected == 403:
+        assert await db.get_expert_question("unlinked") == before
+    else:
+        assert (await db.get_expert_question("unlinked"))["status"] == (
+            "answered" if action == "answer" else "skipped")
+    launch.assert_not_called()

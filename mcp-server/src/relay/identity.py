@@ -199,6 +199,31 @@ async def can_write_conversation(request: web.Request, db, conv_id: str) -> bool
     return can_write_project(request, project)
 
 
+def can_control_task(request: web.Request, project, state, conversation) -> bool:
+    """Controlar una consulta propia no concede escritura ni publicación."""
+    if can_write_project(request, project):
+        return True
+    state, conversation = state or {}, conversation or {}
+    role = role_of(request)
+    creator = conversation.get("requested_by") or state.get("requested_by")
+    return state.get("mode") == "read_only" and (
+        role == OWNER_ROLE or (
+            role in {"member", "subadmin"} and bool(creator)
+            and creator == requester(request)))
+
+
+async def can_control_graph(request: web.Request, db, graph: dict) -> bool:
+    cid = graph.get("conversation_id")
+    conversation = await db.get_conversation(cid) if cid else None
+    state = await db.get_conversation_task(cid) if cid else {}
+    project = await db.get_project(
+        (conversation or {}).get("project_slug") or graph.get("project_slug") or "")
+    # Admin conserva el control de grafos cuyo proyecto fue eliminado.
+    if not project and role_of(request) == OWNER_ROLE:
+        return True
+    return can_control_task(request, project, state, conversation)
+
+
 # Lo que puede tocar un member. Es allowlist y no blocklist a propósito:
 # hay 245 rutas y con una blocklist alcanza con olvidarse de UNA para
 # regalarla. Así, lo que se agregue mañana nace owner-only hasta que
