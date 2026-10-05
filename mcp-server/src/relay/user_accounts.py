@@ -9,6 +9,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -40,7 +41,7 @@ current_actor: ContextVar[tuple["AccountStore", str] | None] = ContextVar(
     "relay_account_actor", default=None)
 OAUTH_CONFIG_NAMES = frozenset({
     "RELAY_PUBLIC_URL", "RELAY_OAUTH_KEY",
-    "RELAY_GITHUB_CLIENT_ID", "RELAY_GITHUB_CLIENT_SECRET",
+    "RELAY_GITHUB_CLIENT_ID", "RELAY_GITHUB_CLIENT_SECRET", "RELAY_GITHUB_SCOPES",
     "RELAY_GOOGLE_CLIENT_ID", "RELAY_GOOGLE_CLIENT_SECRET",
 })
 _OAUTH_SECRET_NAMES = frozenset({
@@ -69,15 +70,24 @@ def _read_user_environment() -> dict[str, str]:
     return values
 
 
+def oauth_config_path(db_path=None) -> Path:
+    from . import config
+    return Path(db_path or config.db_path()).with_suffix(".oauth.json")
+
+
 def load_oauth_config() -> None:
     """Cachea solo OAuth permitido y quita claves privadas del env heredable."""
     global _oauth_config
     registry = _read_user_environment()
+    path = oauth_config_path()
+    local = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if not isinstance(local, dict) or any(not isinstance(v, str) for v in local.values()):
+        raise AccountError("La configuración OAuth local no es válida.")
     _oauth_config = {
-        name: os.environ[name] if name in os.environ else registry.get(name, "")
+        name: local.get(name, os.environ.get(name, registry.get(name, "")))
         for name in OAUTH_CONFIG_NAMES
     }
-    for name in _OAUTH_SECRET_NAMES:
+    for name in _OAUTH_SECRET_NAMES | (OAUTH_CONFIG_NAMES & local.keys()):
         os.environ.pop(name, None)
 
 
@@ -119,9 +129,10 @@ def provider_config(provider: str) -> dict:
         parsed = urlsplit(origin)
     except ValueError:
         raise AccountError("RELAY_PUBLIC_URL no es un origen HTTPS válido.") from None
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+    local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    if ((parsed.scheme != "https" and not local_http) or not parsed.hostname or parsed.username
             or parsed.password or parsed.query or parsed.fragment or parsed.path):
-        raise AccountError("El administrador debe configurar RELAY_PUBLIC_URL con el origen HTTPS de Relay.")
+        raise AccountError("Configura RELAY_PUBLIC_URL con HTTPS o HTTP exclusivamente en localhost.")
     client_id = _config_value(prefix + "CLIENT_ID").strip()
     secret = _config_value(prefix + "CLIENT_SECRET").strip()
     if not client_id or not secret:
@@ -137,7 +148,7 @@ def _cipher() -> Fernet:
         raise AccountError("Falta la clave de cifrado OAuth del servidor o no es válida.") from None
 
 
-async def oauth_request(method: str, url: str, **kwargs) -> dict:
+async def oauth_request(method: str, url: str, *, response_type=dict, **kwargs):
     """Endpoints fijos; no seguir redirects ni mostrar cuerpos con secretos."""
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
@@ -147,7 +158,7 @@ async def oauth_request(method: str, url: str, **kwargs) -> dict:
             "invalid_grant", "bad_refresh_token", "invalid_token", "bad_verification_code"})
         if response.status_code != 200:
             raise AccountError("El proveedor rechazó la autorización. Conecta tu cuenta nuevamente.", reauth=reauth)
-        if not isinstance(data, dict) or data.get("error"):
+        if not isinstance(data, response_type) or (isinstance(data, dict) and data.get("error")):
             raise AccountError("No se pudo completar la autorización del proveedor.", reauth=reauth)
         return data
     except (httpx.HTTPError, ValueError):

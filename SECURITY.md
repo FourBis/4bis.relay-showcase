@@ -2,7 +2,14 @@
 
 FourBis Relay es un proyecto experimental para ejecución local. Por defecto escucha en `127.0.0.1`; no se presenta como un servicio público desplegado ni como una instalación multiusuario endurecida.
 
-El proceso se ejecuta con los permisos del usuario que lo inicia. Sus herramientas pueden leer y modificar archivos, ejecutar comandos y consultar bases de datos dentro de las rutas autorizadas por la instalación. El acceso local sin cabeceras de identidad se trata como acceso de propietario. Ejecuta el relay solo sobre proyectos y datos que controles, y revisa las operaciones antes de autorizarlas.
+El proceso se ejecuta con los permisos del usuario que lo inicia. Sus herramientas pueden leer y modificar archivos, ejecutar comandos y consultar bases de datos dentro de las rutas autorizadas por la instalación. Las instalaciones anteriores mantienen el acceso local de propietario. Cuando se crea el primer Admin con GitHub, las peticiones locales requieren una sesión válida y los permisos de ese usuario. Ejecuta el relay solo sobre proyectos y datos que controles, y revisa las operaciones antes de autorizarlas.
+
+El alta inicial con GitHub solo está disponible sin usuarios y desde loopback,
+sin cabeceras de proxy. Usa state de un solo uso, PKCE y cookie ligada al navegador;
+crea el Admin, su identidad y su sesión en una transacción. Los secretos de la
+OAuth App quedan en el archivo local `.oauth.json` junto a la base. Este login
+local no sustituye Cloudflare Access para exponer una instalación de forma remota.
+Consulta [Cuentas personales](docs/USER_ACCOUNTS.md) para los límites del flujo.
 
 No expongas el puerto directamente a Internet. Las credenciales de proveedores, las conversaciones y los adjuntos pertenecen a la instalación local; no los subas a Git ni los incluyas en issues públicos. Los modelos remotos reciben los mensajes y resultados de herramientas que se incorporen a sus solicitudes.
 

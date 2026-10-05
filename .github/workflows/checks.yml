@@ -44,6 +44,7 @@ jobs:
           mcp-server/tests/test_team_access.py
           mcp-server/tests/test_team_users_db.py
           mcp-server/tests/test_user_accounts.py
+          mcp-server/tests/test_native_auth.py
           mcp-server/tests/test_user_mail.py
           mcp-server/tests/test_project_code_permissions.py
           mcp-server/tests/test_project_privacy.py

@@ -336,11 +336,25 @@ async function disconnect(provider) {
   }
 }
 
+async function logout() {
+  if (!snapshot?.native_login) return;
+  const button = $("#account-logout");
+  if (button) button.disabled = true;
+  try {
+    await api("auth/logout", { method: "POST", body: {} });
+    window.location.assign("/admin/");
+  } catch (error) {
+    toast(`No se pudo cerrar la sesión: ${error.message}`, "err");
+    if (button?.isConnected) button.disabled = false;
+  }
+}
+
 function wireRoot(root) {
   root.addEventListener("click", event => {
     const button = event.target.closest("[data-account-action]");
     if (!button) return;
     const action = button.dataset.accountAction;
+    if (action === "logout") logout();
     if (action === "connect") connect(button.dataset.provider);
     if (action === "disconnect") disconnect(button.dataset.provider);
     if (action === "compose") {
@@ -392,7 +406,17 @@ export async function loadAccount() {
     snapshot = await api("account/connections");
     if (request !== generation) return;
     const label = snapshot.local_identity ? "Acceso local de Relay" : snapshot.email;
-    $("#account-identity").textContent = `Identidad Relay: ${label || actor?.email || "sin identificar"}`;
+    const identity = $("#account-identity");
+    identity.textContent = `Identidad Relay: ${label || actor?.email || "sin identificar"}`;
+    if (snapshot.native_login) {
+      const logoutButton = document.createElement("button");
+      logoutButton.id = "account-logout";
+      logoutButton.className = "btn btn-xs ml-3";
+      logoutButton.type = "button";
+      logoutButton.dataset.accountAction = "logout";
+      logoutButton.textContent = "Cerrar sesión";
+      identity.append(logoutButton);
+    }
     $("#account-connections").innerHTML = (snapshot.connections || []).map(connectionMarkup).join("");
     renderGmailShell();
     if (showGmail()) {

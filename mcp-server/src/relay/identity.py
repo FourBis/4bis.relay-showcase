@@ -18,8 +18,8 @@ JWT es el único discriminador que hay.
 Tres casos, y el tercero es el único que huele mal:
 
   JWT válido              → ese mail.
-  sin headers de Access   → OWNER. Es el bot, la CLI o vos en tu máquina:
-                            el comportamiento de siempre, intacto.
+  sin headers de Access   → sesión GitHub si el alta inicial la habilitó;
+                            OWNER local en instalaciones anteriores.
   headers + JWT inválido  → 403. Alguien llegó al origen sin cruzar el
                             portón y se escribió la identidad a mano.
 
@@ -103,7 +103,9 @@ async def resolve(request: web.Request) -> str:
             raise web.HTTPForbidden(
                 text='{"error": "identidad no verificable"}',
                 content_type="application/json")
-        return OWNER
+        from .native_auth import session_actor
+        actor = await session_actor(request)
+        return OWNER if actor is None else actor or "anonymous"
     try:
         return await asyncio.to_thread(verify, token)
     except Exception as e:  # noqa: BLE001 — cualquier fallo acá es un 403
@@ -271,6 +273,9 @@ MEMBER_ALLOWED = frozenset({
 _SESSION_ROUTES = frozenset({
     ("GET", "/admin"), ("GET", "/admin/"),
     ("GET", "/admin/static/{filename}"), ("GET", "/admin/api/me"),
+    ("GET", "/admin/api/auth/status"), ("POST", "/admin/api/auth/setup"),
+    ("POST", "/admin/api/auth/github/start"), ("POST", "/admin/api/auth/logout"),
+    ("GET", "/admin/api/account/{provider}/callback"),
 })
 _FINANCE_ROUTES = _SESSION_ROUTES | frozenset({
     ("GET", "/admin/api/projects"),
@@ -323,7 +328,7 @@ async def require_role(request: web.Request, handler):
     """
     role = role_of(request)
     allowed = {
-        "member": MEMBER_ALLOWED | _ACCOUNT_ROUTES,
+        "member": MEMBER_ALLOWED | _ACCOUNT_ROUTES | _SESSION_ROUTES,
         "subadmin": MEMBER_ALLOWED | _FINANCE_ROUTES | _TEAM_ROUTES | _ACCOUNT_ROUTES,
         "finance": _FINANCE_ROUTES | _ACCOUNT_ROUTES,
     }.get(role, _SESSION_ROUTES)

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Mapping
 from aiohttp import web
 from . import __version__ as RELAY_VERSION
-from . import bot_control
+from . import bot_control, identity
 from . import config as relay_config
 from . import logctx
 from .experts import cbm_binary_path
@@ -26,6 +26,12 @@ ADMIN_INDEX: tuple[float, str] | None = None
 async def admin_index(request: web.Request) -> web.Response:
     """Sirve el index.html del UI admin (single page app vanilla)."""
     global ADMIN_INDEX
+    from . import native_auth
+    db = request.app.get(DB_KEY)
+    if db is not None and (not await db.list_users() or
+                          (await native_auth.enabled(db) and identity.requester(request) == "anonymous")):
+        return web.Response(text=(ADMIN_STATIC_DIR / "login.html").read_text(encoding="utf-8"),
+                            content_type="text/html", headers={"Cache-Control": "no-store"})
     path = ADMIN_STATIC_DIR / "index.html"
     try:
         mtime = path.stat().st_mtime

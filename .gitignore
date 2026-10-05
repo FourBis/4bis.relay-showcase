@@ -102,3 +102,6 @@ htmlcov/
 test-results/
 playwright-report/
 /pip/cache/
+
+# Credenciales de una instalación local junto a su SQLite.
+*.oauth.json

@@ -37,7 +37,7 @@ MARCA = re.compile(r"/\*!classes-sha256:([0-9a-f]{64})\*/")
 
 # Los mismos archivos que escanea Tailwind (content en la config).
 def _fuentes() -> list[Path]:
-    return [AQUI / "index.html"] + sorted((AQUI / "static").glob("*.js"))
+    return [AQUI / "index.html", AQUI / "login.html"] + sorted((AQUI / "static").glob("*.js"))
 
 
 def _tokens(texto: str, es_js: bool) -> set[str]:
