@@ -105,6 +105,8 @@ def get(key: str, default: str = "") -> str:
     if secret is not None:
         return secret
     value = _runtime.get(key)
+    if PANEL_SETTINGS.get(key, {}).get("type") == "path" and not (value or "").strip():
+        value = None
     # Un número vacío significa restablecer el default del panel; las
     # cadenas/secretos vacíos sí son valores efectivos (p. ej. desactivar).
     if value is not None and not (
