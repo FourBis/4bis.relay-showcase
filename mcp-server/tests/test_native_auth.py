@@ -3,18 +3,21 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import account_oauth, admin_observability, admin_users, identity, native_auth, user_accounts
-from relay.app_state import DB_KEY
+from relay import account_oauth, admin_observability, admin_users, identity, native_auth, user_accounts, task_service
+from relay.app_state import BG_TASKS_KEY, DB_KEY, NOTIFY_KEY, PROGRESS_KEY, RUNNING_KEY, SKILLS_KEY
 from relay.db import Database
 from relay.server_common import browser_guard, localhost_guard
 from relay.server_conversation_routes import conversations_create
+from relay.server_expert_routes import experts_run, experts_cancel, experts_status
+from relay.server_projects import chats_get
 
 
 @pytest.fixture
@@ -29,12 +32,21 @@ async def auth(tmp_path, monkeypatch):
     app = web.Application(middlewares=[browser_guard, localhost_guard,
                                       identity.access_identity, identity.require_role])
     app[DB_KEY] = db
+    app[RUNNING_KEY], app[PROGRESS_KEY] = {}, {}
+    app[BG_TASKS_KEY] = set()
+    app[NOTIFY_KEY] = None
+    app[SKILLS_KEY] = AsyncMock()
+    app[SKILLS_KEY].get_block.return_value = ""
     native_auth.register_routes(app)
     account_oauth.register_routes(app)
     app.router.add_get("/admin/", admin_observability.admin_index)
     app.router.add_get("/admin/api/me", admin_users.api_me)
     app.router.add_get("/admin/api/users", admin_users.api_users_list)
     app.router.add_post("/conversations", conversations_create)
+    app.router.add_post("/experts/run", experts_run)
+    app.router.add_post("/experts/cancel/{chat_id}", experts_cancel)
+    app.router.add_get("/experts/status/{chat_id}", experts_status)
+    app.router.add_get("/chats/{id}", chats_get)
     async with TestClient(TestServer(app), cookie_jar=CookieJar(unsafe=True)) as client:
         yield client, db
 
@@ -136,6 +148,107 @@ async def test_personal_session_sets_conversation_requester_not_author(auth, mon
     conversation = await db.get_conversation((await response.json())["id"])
     assert conversation["requested_by"] == "personal@example.test"
     assert conversation["author"] == "spoof@example.test"
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+@pytest.mark.parametrize("conversation_field", ["conversation", "conversation_id"])
+async def test_agent_session_retry_poll_cancel_and_durable_result(auth, monkeypatch, tmp_path, role, conversation_field):
+    client, db = auth
+    await configure(client)
+    await login(client, monkeypatch, email="personal@example.test")
+    if role == "member":
+        await db.set_user_role("backup@example.test", "owner")
+        await db.set_user_role("personal@example.test", role)
+        identity.load_roles(await db.list_users())
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    cid = await db.create_conversation(project_slug="demo", requested_by="personal@example.test")
+    await db.update_conversation_task(cid, mode="read_only", state="ready")
+    monkeypatch.setattr(task_service, "start_pending", lambda *_: None)
+    monkeypatch.setattr("relay.server_expert_routes._run_expert_bg", AsyncMock())
+    body = {"target": "demo", conversation_field: cid, "user": "revisa", "request_id": "agent-1",
+            "source": "api", "author": "spoof@example.test"}
+    first = await client.post("/experts/run", json=body)
+    assert first.status == 202, await first.text()
+    run = await first.json()
+    assert run["conversation_id"] == cid
+    retry = await client.post("/experts/run", json=body)
+    assert retry.status == 202 and (await retry.json())["id"] == run["id"]
+    events = await db.list_conversation_events(cid)
+    assert len(events) == 1 and events[0]["payload"]["requested_by"] == "personal@example.test"
+    mismatch = await client.post("/experts/run", json={**body, "user": "otro pedido"})
+    assert mismatch.status == 409 and len(await db.list_conversation_events(cid)) == 1
+    conflict = await client.post("/experts/run", json={
+        **body, "conversation": cid, "conversation_id": "different"})
+    assert conflict.status == 400 and len(await db.list_conversation_events(cid)) == 1
+    status = await client.get(f"/experts/status/{run['id']}")
+    assert status.status == 200 and (await status.json())["phase"] == "queued"
+    assert (await client.post(f"/experts/cancel/{run['id']}")).status == 200
+    client.server.app[PROGRESS_KEY].clear()
+    status = await client.get(f"/experts/status/{run['id']}")
+    assert (await status.json())["finished"] is True
+    result = await client.get(f"/chats/{run['id']}")
+    assert result.status == 200 and (await result.json())["status"] == "cancelled"
+    await client.post("/admin/api/auth/logout", json={})
+    assert (await client.post("/experts/run", json=body)).status == 403
+    assert (await client.get(f"/chats/{run['id']}")).status == 403
+    assert len(await db.list_conversation_events(cid)) == 1
+
+
+@pytest.mark.parametrize("state", ["ready", "paused"])
+@pytest.mark.parametrize("lookup", ["explicit", "discord", "implicit"])
+async def test_agent_cannot_append_to_another_members_read_only_task(auth, monkeypatch, tmp_path, state, lookup):
+    client, db = auth
+    await configure(client)
+    await login(client, monkeypatch, email="personal@example.test")
+    await db.set_user_role("backup@example.test", "owner")
+    await db.set_user_role("personal@example.test", "member")
+    identity.load_roles(await db.list_users())
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    cid = await db.create_conversation(project_slug="demo", requested_by="other@example.test",
+        discord_thread_id="fixture-thread" if lookup == "discord" else None,
+        conversation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, "relay:implicit:demo:intruder")) if lookup == "implicit" else None)
+    await db.update_conversation_task(cid, mode="read_only", state=state)
+    start = Mock()
+    monkeypatch.setattr(task_service, "start_pending", start)
+    before = await db.get_conversation(cid)
+    body = {"target": "demo", "user": "nuevo trabajo", "request_id": "intruder"}
+    if lookup == "explicit":
+        body["conversation"] = cid
+    elif lookup == "discord":
+        body.update(discord_thread_id="fixture-thread", discord_user_id="spoofed")
+    else:
+        monkeypatch.setattr("relay.git_flow.is_git_repo", AsyncMock(return_value=True))
+    response = await client.post("/experts/run", json=body)
+    assert response.status == 403, await response.text()
+    start.assert_not_called()
+    assert await db.get_conversation(cid) == before
+    assert await db.list_conversation_events(cid) == []
+
+
+@pytest.mark.parametrize("change,expected", [("pause", 409), ("revoke", 403)])
+async def test_agent_rechecks_task_and_permission_after_preparation(auth, monkeypatch, tmp_path, change, expected):
+    client, db = auth
+    await configure(client)
+    await login(client, monkeypatch, email="personal@example.test")
+    await db.set_user_role("backup@example.test", "owner")
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    cid = await db.create_conversation(project_slug="demo", requested_by="personal@example.test")
+    await db.update_conversation_task(cid, mode="read_only", state="ready")
+    async def change_during_preparation():
+        if change == "pause":
+            await db.update_conversation_task(cid, state="paused")
+        else:
+            await db.set_user_role("personal@example.test", "member", enabled=False)
+            identity.load_roles(await db.list_users())
+        return ""
+    client.server.app[SKILLS_KEY].get_block.side_effect = change_during_preparation
+    start = Mock()
+    monkeypatch.setattr(task_service, "start_pending", start)
+    response = await client.post("/experts/run", json={
+        "target": "demo", "conversation": cid, "user": "revisa", "request_id": "late-change"})
+    assert response.status == expected, await response.text()
+    assert await db.list_conversation_events(cid) == []
+    start.assert_not_called()
 
 
 @pytest.mark.parametrize("headers", [{"Origin": "https://evil.test"},

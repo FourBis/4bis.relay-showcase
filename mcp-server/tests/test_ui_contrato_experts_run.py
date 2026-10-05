@@ -31,7 +31,7 @@ import io
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -42,15 +42,17 @@ from relay.server import create_app
 
 
 @pytest.fixture
-async def env():
+async def env(monkeypatch):
     """Mismo patron que test_experts.py::env: DB + create_app() aislados,
     FOURBIS_MODEL=test para correr sin red ni tokens reales."""
+    monkeypatch.setattr("relay.notify.NotifyClient.send", AsyncMock(return_value=True))
     with tempfile.TemporaryDirectory() as tmp:
         env_vars = {
             "FOURBIS_DB_PATH": str(Path(tmp) / "relay.db"),
             "FOURBIS_CHATS_DIR": str(Path(tmp) / "chats"),
             "FOURBIS_JSONL_DIR": str(Path(tmp) / "jsonl"),
             "FOURBIS_ATTACHMENTS_DIR": str(Path(tmp) / "attachments"),
+            "FOURBIS_SKILLS_DIR": str(Path(tmp) / "skills"),
             "FOURBIS_MODEL": "test",
             "LOG_LEVEL": "WARNING",
         }
@@ -129,7 +131,7 @@ async def test_payload_minimo_como_lo_manda_la_ui(env):
     })
     assert r.status == 202, await r.text()
     chat = await _espera_terminal(db, (await r.json())["id"])
-    assert chat["status"] == "ok"
+    assert chat["status"] == "ok", chat.get("error")
 
 
 async def test_payload_con_model_elegido_en_el_popover(env, monkeypatch):
@@ -160,7 +162,7 @@ async def test_payload_con_model_elegido_en_el_popover(env, monkeypatch):
     })
     assert r.status == 202, await r.text()
     chat = await _espera_terminal(db, (await r.json())["id"])
-    assert chat["status"] == "ok"
+    assert chat["status"] == "ok", chat.get("error")
     assert capturado["model_override"] == "un-modelo-cualquiera"
 
 
@@ -199,7 +201,7 @@ async def test_payload_con_stage_models_elegidos_en_el_popover(env, monkeypatch)
     # nada deberia descartarse en silencio.
     assert body["ignored_stages"] == []
     chat = await _espera_terminal(db, body["id"])
-    assert chat["status"] == "ok"
+    assert chat["status"] == "ok", chat.get("error")
     assert capturado == enviado, (
         f"stage_models llego incompleto/alterado a run_expert_staged: "
         f"mande {enviado}, llego {capturado}")
