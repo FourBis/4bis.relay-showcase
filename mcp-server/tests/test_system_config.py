@@ -214,6 +214,25 @@ async def test_config_put_repos_root_applies_live(cli, tmp_path):
     assert body["effective"]["repos_root"] == str(tmp_path)
     # limpiar para no ensuciar otros tests de la sesión
     await cli.put("/admin/api/config", json={"FOURBIS_REPOS_ROOT": ""})
+    from relay import config
+
+    expected = Path(config.PANEL_SETTINGS["FOURBIS_REPOS_ROOT"]["default"])
+    assert Path(config.repos_root()) == expected
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_empty_paths_use_defaults_without_clearing_optional_settings(blank):
+    from relay import config
+
+    paths = {key: meta for key, meta in config.PANEL_SETTINGS.items()
+             if meta["type"] == "path"}
+    config.set_runtime_config({**dict.fromkeys(paths, blank),
+                               "FOURBIS_PLANNER_FALLBACK": "",
+                               "secret:RELAY_API_KEY": ""})
+    for key, meta in paths.items():
+        assert config.get(key) == meta["default"], key
+    assert config.get("FOURBIS_PLANNER_FALLBACK", "fallback") == ""
+    assert config.get("RELAY_API_KEY", "fallback") == ""
 
 
 # ---------- localhost_guard ----------

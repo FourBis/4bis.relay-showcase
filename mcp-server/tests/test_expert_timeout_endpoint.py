@@ -137,7 +137,8 @@ class TestExpertTimeoutEndpoint(unittest.IsolatedAsyncioTestCase):
                 ):
                     url = "/admin/api/config/" + path
                     assert (await client.put(url, json={"value": value})).status == 200
-                    for body in ([], False, "invalid", {"value": "NaN"}, {"value": "Infinity"}):
+                    for body in ([], False, "invalid", {"value": "NaN"},
+                                 {"value": "Infinity"}, {"value": 10**1000}):
                         assert (await client.put(url, json=body)).status == 400
                         assert await self.db.get_config(key) == str(value)
 

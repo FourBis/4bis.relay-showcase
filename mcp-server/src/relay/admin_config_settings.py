@@ -324,7 +324,7 @@ async def api_config_expert_timeout(request: web.Request) -> web.Response:
     else:
         try:
             v = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return web.json_response(
                 {"error": "value debe ser número o null"}, status=400,
             )
@@ -343,12 +343,11 @@ async def api_config_tool_timeout(request: web.Request) -> web.Response:
 
     Body: {"value": 60} (segundos, float).
     Persiste en system_config (sobrevive reinicios). Permite null
-    para volver al env (o default 60s).
+    para volver al default del panel (60s).
 
     Cascada efectiva (al usar el valor):
       1. system_config.FOURBIS_MCP_TIMEOUT (este endpoint)
-      2. env var FOURBIS_MCP_TIMEOUT
-      3. default 60s
+      2. default del schema (60s)
 
     Rango: 5..600s. Sub-ola 2.6.
     """
@@ -365,7 +364,7 @@ async def api_config_tool_timeout(request: web.Request) -> web.Response:
     else:
         try:
             v = float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return web.json_response(
                 {"error": "value debe ser número o null"}, status=400,
             )
