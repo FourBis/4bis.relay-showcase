@@ -3,7 +3,7 @@
 // (los innerHTML dinámicos usan literales completos — verificado: las únicas
 // interpolaciones son budget-seg-*, clases propias no-Tailwind).
 module.exports = {
-  content: ["./index.html", "./static/**/*.js"],
+  content: ["./index.html", "./login.html", "./static/**/*.js"],
   theme: { extend: {} },
   plugins: [],
 };

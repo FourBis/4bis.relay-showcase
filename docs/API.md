@@ -4,6 +4,25 @@ Base local predeterminada: `http://127.0.0.1:8413`.
 La UI usa la misma API. Este documento resume los endpoints principales;
 las rutas completas están registradas en `server.py` y `admin.py`.
 
+## Alta inicial y sesión GitHub
+
+En una base sin usuarios, la UI permite configurar una OAuth App propia desde
+localhost y crear el primer Admin con identidad verificada. No modifica el
+acceso de instalaciones existentes. Consulta [Cuentas personales](USER_ACCOUNTS.md).
+
+| Método | Ruta | Contrato |
+| --- | --- | --- |
+| GET | `/admin/api/auth/status` | Estado del alta, sesión y URL de callback; nunca devuelve secretos |
+| POST | `/admin/api/auth/setup` | JSON `client_id`, `client_secret`; solo alta local abierta; 409 si ya hay usuarios |
+| POST | `/admin/api/auth/github/start` | JSON vacío; devuelve `authorization_url` y cookie OAuth de un solo flujo |
+| GET | `/admin/api/account/github/callback` | Verifica state, PKCE e identidad; crea sesión y redirige al workspace |
+| POST | `/admin/api/auth/logout` | JSON vacío; revoca la sesión y borra su cookie |
+
+Después del alta, las APIs locales requieren la sesión y el rol correspondiente.
+El login no guarda tokens de herramientas; estas se conectan desde **Mi cuenta**.
+Las solicitudes JSON verifican origen y el alta rechaza proxies. Un host público
+sigue requiriendo Cloudflare Access; la sesión nativa no abre el servidor a Internet.
+
 ## Consulta y configuración
 
 | Método | Ruta | Uso |

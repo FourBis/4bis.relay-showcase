@@ -2,8 +2,10 @@
 
 **Equipo** permite registrar integrantes, editar su rol, activar o desactivar
 su acceso y asignar proyectos. Cloudflare Access verifica la identidad remota;
-Relay exige que esa cuenta esté registrada y activa. El acceso local conserva
-el administrador local y los límites descritos en [SECURITY.md](../SECURITY.md).
+Relay exige que esa cuenta esté registrada y activa. Una instalación nueva puede
+crear el primer Admin y su sesión local con [GitHub](USER_ACCOUNTS.md).
+Las instalaciones anteriores conservan el acceso local existente y los límites
+descritos en [SECURITY.md](../SECURITY.md).
 
 | Rol | Alcance |
 |---|---|

@@ -14,7 +14,7 @@ Detrás del chat hay un catálogo de modelos, un índice de código consultable,
 
 *Interfaz de Relay con un escenario ficticio. El grafo muestra dependencias y estados; una ejecución terminada, una tarea cumplida y un resultado verificado se presentan por separado.*
 
-La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte del recorrido en el navegador: no llama a modelos ni ejecuta herramientas. Este repositorio incluye también el servidor y el workspace para instalación local. Relay es experimental; la [evidencia de validación](docs/VALIDATION.md) describe qué se ha comprobado.
+La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte del recorrido en el navegador: no llama a modelos ni ejecuta herramientas. Este repositorio incluye también el servidor y el workspace para instalación local, con [alta del primer administrador mediante GitHub](docs/SETUP.md#crear-el-primer-admin-con-github). Relay es experimental; la [evidencia de validación](docs/VALIDATION.md) describe qué se ha comprobado.
 
 ## Explora Relay
 

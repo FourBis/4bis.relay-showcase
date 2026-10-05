@@ -19,7 +19,7 @@ El paquete y sus dependencias se describen en [mcp-server/pyproject.toml](../mcp
 
 El servidor no carga `.env` por sí mismo. La plantilla de variables está en `.env.example`, en la raíz del repositorio. Conserva los secretos fuera del repositorio y deja los valores sensibles vacíos en ejemplos y documentación.
 
-Para una instalación mínima, ejecuta `start.ps1` y abre la Admin UI. El script prepara las variables de arranque que necesita el proceso; la configuración operativa se completa desde el catálogo **Modelos** y el tab **Config** de la Admin UI.
+Para una instalación mínima, ejecuta `start.ps1` y abre la Admin UI. Si la base no tiene usuarios, aparece el alta del primer administrador con GitHub. El script prepara las variables de arranque que necesita el proceso; después del acceso, la configuración operativa se completa desde **Modelos** y **Config**.
 
 ```powershell
 Start-Process http://127.0.0.1:8413/admin/
@@ -53,6 +53,11 @@ Invoke-RestMethod http://127.0.0.1:8413/health
 ```
 
 ## 4. Probar la API
+
+Una instalación configurada con el alta GitHub exige una sesión válida también
+para las llamadas locales a la API; los ejemplos siguientes describen el contrato
+para clientes autenticados. La UI envía su cookie automáticamente. No desactives
+la autenticación para adaptar un script anterior.
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8413/admin/api/projects
@@ -90,6 +95,25 @@ node --test mcp-server/tests/*.test.mjs
 Estos comandos son instrucciones de validación; su resultado depende del entorno y no se declara aquí como aprobado.
 
 ## Problemas frecuentes
+
+### Crear el primer Admin con GitHub
+
+1. Con una base nueva y sin `RELAY_OWNER_EMAIL`, abre
+   `http://127.0.0.1:8413/admin/` en el equipo donde corre Relay.
+2. En [GitHub → Developer settings → OAuth Apps](https://github.com/settings/developers),
+   crea una OAuth App para tu instalación. Usa la URL de inicio local y copia
+   exactamente la URL de callback que muestra Relay.
+3. Pega el **Client ID** y **Client secret** en Relay y pulsa **Guardar y autorizar GitHub**.
+4. Autoriza tu cuenta con correo principal verificado. Ese primer acceso crea
+   el Admin y abre el workspace. Las siguientes visitas requieren iniciar sesión.
+5. Para trabajar con repositorios, conecta GitHub desde **Mi cuenta**; esta
+   autorización adicional solicita acceso a repositorios. El login solo verifica identidad.
+
+Si interrumpes el primer acceso, puedes continuar o corregir las credenciales
+desde la misma pantalla. Después de crear el Admin, el alta inicial se cierra.
+Las instalaciones con usuarios previos conservan su acceso y no se migran solas.
+La demo de GitHub Pages es estática: este flujo corresponde al servidor instalado.
+Detalles de sesiones, configuración y alcance: [Cuentas personales](USER_ACCOUNTS.md).
 
 - Si el puerto 8413 está ocupado, detén la instancia anterior con `mcp-server\stop.ps1`.
 - Si `/experts/run` devuelve `503`, revisa el modelo seleccionado y la variable de clave del proveedor.

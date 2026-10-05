@@ -560,6 +560,15 @@ CREATE TABLE IF NOT EXISTS users (
     project_slugs_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS github_logins (
+    subject TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE REFERENCES users(email) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS login_sessions (
+    token_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+    expires_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS user_accounts (
     email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
     provider TEXT NOT NULL CHECK(provider IN ('github','google')),

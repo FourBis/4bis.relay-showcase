@@ -19,6 +19,11 @@ COOKIE = "__Host-relay-oauth"
 STATE_TTL = 600
 
 
+def cookie_options(cfg):
+    secure = urlsplit(cfg["redirect_uri"]).scheme == "https"
+    return (COOKIE if secure else "relay-oauth-local"), secure
+
+
 def _response(data, status=200):
     return web.json_response(data, status=status,
         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
@@ -36,6 +41,7 @@ def _callback_error(message):
 
 
 async def connections(request):
+    from . import native_auth
     email = identity.requester(request)
     store = store_for(request.app[DB_KEY])
     items = []
@@ -66,7 +72,8 @@ async def connections(request):
                       "email": (row or {}).get("account_email", ""),
                       "needs_reconnect": bool(row and not connected),
                       "can_connect": configured and allowed, "message": message})
-    return _response({"email": email, "local_identity": email == identity.OWNER, "connections": items})
+    return _response({"email": email, "local_identity": email == identity.OWNER,
+                      "native_login": await native_auth.enabled(request.app[DB_KEY]), "connections": items})
 
 
 async def connect(request):
@@ -78,7 +85,7 @@ async def connect(request):
         cfg = provider_config(provider)
         user_accounts._cipher()
         if request.host != urlsplit(cfg["redirect_uri"]).netloc:
-            raise AccountError("Abre Relay desde su dirección HTTPS pública para conectar la cuenta.")
+            raise AccountError("Abre Relay desde su dirección registrada para conectar la cuenta.")
     except (AccountError, ValueError) as exc:
         return _response({"error": str(exc)}, 403)
     now = time.time()
@@ -96,21 +103,32 @@ async def connect(request):
               "code_challenge_method": "S256"}
     if provider == "github":
         params.update(prompt="select_account", allow_signup="false")
+        scopes = user_accounts._config_value("RELAY_GITHUB_SCOPES")
+        if scopes:
+            params["scope"] = scopes
     else:
         params.update(scope=" ".join(sorted(GOOGLE_SCOPES | {"openid", "email"})),
                       access_type="offline", prompt="consent select_account", login_hint=email)
     response = _response({"authorization_url": cfg["authorize"] + "?" + urlencode(params)})
-    response.set_cookie(COOKIE, browser, max_age=STATE_TTL, secure=True, httponly=True,
+    cookie, secure = cookie_options(cfg)
+    response.set_cookie(cookie, browser, max_age=STATE_TTL, secure=secure, httponly=True,
                         samesite="Lax", path="/")
     return response
 
 
 async def callback(request):
+    from . import native_auth
+    if request.match_info["provider"] == "github" and native_auth.pending_login(request):
+        return await native_auth.callback(request)
     provider, email = request.match_info["provider"], identity.requester(request)
     store = store_for(request.app[DB_KEY])
     state = request.query.get("state", "")
     pending = store.pending.pop(hashlib.sha256(state.encode()).hexdigest(), None)
-    browser = hashlib.sha256(request.cookies.get(COOKIE, "").encode()).hexdigest()
+    try:
+        cookie, secure = cookie_options(provider_config(provider))
+    except AccountError as exc:
+        return _callback_error(str(exc))
+    browser = hashlib.sha256(request.cookies.get(cookie, "").encode()).hexdigest()
     if (not pending or pending["provider"] != provider or pending["email"] != email
             or pending["expires_at"] <= time.time()
             or not secrets.compare_digest(pending["browser"], browser)):
@@ -121,7 +139,7 @@ async def callback(request):
         await store.check_user(provider, email)
         cfg = provider_config(provider)
         if request.host != urlsplit(cfg["redirect_uri"]).netloc:
-            raise AccountError("El callback debe entrar por la dirección HTTPS registrada de Relay.")
+            raise AccountError("El callback debe entrar por la dirección registrada de Relay.")
         async with store.lock(provider, email):
             if pending["generation"] != store.generations.get((provider, email), 0):
                 raise AccountError("La conexión fue cancelada. Vuelve a conectar tu cuenta.")
@@ -139,7 +157,7 @@ async def callback(request):
     except AccountError as exc:
         return _callback_error(str(exc))
     response = web.HTTPFound("/admin/#/account", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-    response.del_cookie(COOKIE, path="/", secure=True, httponly=True, samesite="Lax")
+    response.del_cookie(cookie, path="/", secure=secure, httponly=True, samesite="Lax")
     return response
 
 

@@ -168,7 +168,10 @@ async def browser_guard(request: web.Request, handler):
         # usar esa excepción para llamar APIs, formularios o subrecursos.
         ui_navigation = (request.method == "GET" and request.path in {"/admin", "/admin/"}
                          and request.headers.get("Sec-Fetch-Mode") == "navigate")
-        if request.headers.get("Sec-Fetch-Site") == "cross-site" and not ui_navigation:
+        oauth_navigation = (request.method == "GET" and request.path in {
+            "/admin/api/account/github/callback", "/admin/api/account/google/callback"}
+            and request.headers.get("Sec-Fetch-Mode") == "navigate")
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" and not (ui_navigation or oauth_navigation):
             raise denied
     except ValueError:
         raise denied from None
