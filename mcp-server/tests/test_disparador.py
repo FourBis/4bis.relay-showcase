@@ -538,6 +538,39 @@ class TestRetomar(_Base):
         self.assertEqual(response.status, 202)
         launch.assert_called_once()
 
+    async def test_resume_no_muta_mientras_otro_control_de_tarea_tiene_el_lock(self) -> None:
+        from relay import task_service
+        from relay.app_state import DB_KEY
+
+        for node_state in ("pendiente", "fallado"):
+            with self.subTest(node_state=node_state):
+                conv_id = await self.db.create_conversation(project_slug="demo")
+                await self.db.update_conversation_task(
+                    conv_id, mode="read_only", state="ready",
+                    source_repo=self._tmp.name, workspace_path=self._tmp.name)
+                gid = f"busy-{node_state}"
+                await self.db.create_task_graph(
+                    gid, "Retomar", project_slug="demo", conversation_id=conv_id,
+                    tareas=[{"id": gid, "titulo": "Trabajo pendiente"}])
+                await self.db.update_task(
+                    gid, estado=node_state, intentos=1, max_intentos=1,
+                    error="el nodo terminó en 'budget_exceeded'"
+                    if node_state == "fallado" else "")
+                await self.db.set_task_graph_state(gid, "fallado")
+                before = await self.db.get_task_graph(gid)
+
+                # Pausar/cancelar reserva este control antes de cambiar el estado.
+                async with task_service.control_lock(self.app[DB_KEY], conv_id):
+                    with patch("relay.server_graph_routes._largar_grafo") as launch:
+                        response = await asyncio.wait_for(
+                            self.client.post(f"/graphs/{gid}/resume"), 5)
+
+                    self.assertEqual(response.status, 409, await response.text())
+                    self.assertEqual(await self.db.get_task_graph(gid), before)
+                    self.assertEqual(
+                        (await self.db.get_conversation_task(conv_id))["state"], "ready")
+                    launch.assert_not_called()
+
     async def test_resume_de_un_grafo_ya_corriendo_es_409(self) -> None:
         """Largar dos veces el mismo grafo duplicaría cada nodo."""
         await self.db.create_task_graph("g1", "x", tareas=[

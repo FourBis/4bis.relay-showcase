@@ -278,7 +278,17 @@ async def graphs_resume(request: web.Request) -> web.Response:
     # El guard de workspace puede reparar estado; autorizar antes de entrar.
     if not await identity.can_control_graph(request, db, graph):
         return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
-    return await _resume_with_workspace(request)
+    # Mismo orden que pausar/cancelar: conversación antes del grafo.
+    async with AsyncExitStack() as controls:
+        if conv_id := graph.get("conversation_id"):
+            from .task_service import control_lock
+            lock = control_lock(db, conv_id)
+            if lock.locked():
+                return web.json_response(
+                    {"error": "La tarea está completando otra acción; espera y reintenta.",
+                     "graph_id": graph["id"]}, status=409)
+            await controls.enter_async_context(lock)
+        return await _resume_with_workspace(request)
 
 
 @coordination.guard_workspace(DB_KEY, source="graph")
