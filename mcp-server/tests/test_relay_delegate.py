@@ -136,7 +136,8 @@ def test_resume_rejects_persisted_empty_answer_with_or_without_journal(
     assert [call.args[0] for call in request.call_args_list] == ["GET", "GET"]
 
 
-def test_resume_accepts_real_markdown_with_journal(client, monkeypatch, tmp_path):
+def test_resume_prints_only_real_markdown_response_with_journal(
+        client, monkeypatch, tmp_path, capsys):
     from relay import config, persist
 
     chats_dir = tmp_path / "chats"
@@ -151,6 +152,7 @@ def test_resume_accepts_real_markdown_with_journal(client, monkeypatch, tmp_path
     monkeypatch.setattr(client, "_req", request)
 
     assert client.delegate(chat_id="existing-run") == 0
+    assert capsys.readouterr().out == "## Resultado\n\nContenido entregado.\n"
 
 
 def test_extract_keeps_text_that_explains_the_empty_marker(client):

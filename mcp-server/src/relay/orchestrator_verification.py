@@ -276,11 +276,11 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
         continued = await continue_verification(
             db, graph_id, g, payload, allow_continue=allow_continue)
         if continued is None:
+            # La verificación no vuelve a poner el grafo por delante de turnos posteriores.
             await db.run(
                 "UPDATE task_graphs SET verificacion_json=?, "
-                "estado=CASE WHEN estado='cancelado' THEN estado ELSE ? END, "
-                "updated_at=? WHERE id=?",
-                (json.dumps(payload, ensure_ascii=False), prog["estado"], _ahora(), graph_id))
+                "estado=CASE WHEN estado='cancelado' THEN estado ELSE ? END WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), prog["estado"], graph_id))
         return bool(continued)
     except Exception:  # noqa: BLE001 — ídem: no puede voltear el cierre
         logger.exception("grafo %s: no pude guardar el veredicto y su corrección", graph_id)

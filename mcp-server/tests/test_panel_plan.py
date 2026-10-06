@@ -287,6 +287,35 @@ class TestEndpointPlan(unittest.IsolatedAsyncioTestCase):
         titulos = [t["titulo"] for t in body["grafo"]["tasks"]]
         self.assertEqual(titulos, ["pedido del humano"])
 
+    async def test_verificacion_final_no_oculta_turno_recibido_durante_la_espera(self):
+        from relay.orchestrator_verification import _verificar_al_cerrar
+
+        await self.db.create_task_graph("g1", "Trabajo previo", tareas=[
+            {"id": "a", "titulo": "A"}], conversation_id=self.conv, project_slug="demo")
+        await self.db.update_task("a", estado="hecho")
+        await self.db.run(
+            "UPDATE task_graphs SET updated_at=? WHERE id='g1'",
+            ("2000-01-01T00:00:00+00:00",))
+        graph = await self.db.get_task_graph("g1")
+        later = None
+
+        async def verify(**_):
+            nonlocal later
+            later = await self._chat_con_plan("", status="running", prompt="Seguimiento")
+            await self.db.run("UPDATE chats SET started_at=? WHERE id=?",
+                              ("2000-01-01T00:00:01+00:00", later))
+            return {"verdict": "complete"}
+
+        await _verificar_al_cerrar(self.db, "g1", graph, {"estado": "hecho"}, verify)
+        await self.db.finish_chat(later, status="ok")
+        saved = await self.db.get_task_graph("g1")
+        self.assertEqual(saved["estado"], "hecho")
+        self.assertEqual(json.loads(saved["verificacion_json"])["verdict"], "complete")
+        body = await self._plan()
+        self.assertTrue(body["grafo"].get("sintetico"), body)
+        self.assertEqual([t["id"] for t in body["grafo"]["tasks"]], [later])
+        self.assertEqual(saved["updated_at"], graph["updated_at"])
+
     async def test_el_grafo_viejo_cede_ante_los_turnos_posteriores(
             self) -> None:
         """El síntoma que reportó el humano: terminado el plan, el hilo

@@ -73,7 +73,7 @@ def _extract_respuesta(md_text):
         return ""
     answer = m.group(1).strip()
     before_journal = answer.split("\n\n## Bitácora de la corrida\n", 1)[0].strip()
-    return "" if before_journal == "(sin contenido)" else answer
+    return "" if before_journal == "(sin contenido)" else before_journal
 
 
 def _selftest():
