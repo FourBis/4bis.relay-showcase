@@ -201,7 +201,26 @@ async def test_bang_en_el_chat_corre_el_comando(env):
     body = await r.json()
     assert body["command"] == "proyectos"
     assert "demo" in body["text"]
+    assert body["ok"] is True
     assert "id" not in body                      # no se creó chat
+
+
+@pytest.mark.parametrize("error", [ValueError("argumento inválido"),
+                                    RuntimeError("fallo del comando")])
+async def test_bang_comando_error_reporta_ok_false(env, monkeypatch, error):
+    cli = env
+
+    async def fail_dispatch(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(CommandRegistry, "dispatch", fail_dispatch)
+    r = await cli.post("/experts/run", json={
+        "target": "demo", "user": "!proyectos", "source": "ui"})
+    assert r.status == 200
+    body = await r.json()
+    assert body["command"] == "proyectos"
+    assert body["ok"] is False
+    assert "falló" in body["text"]
 
 
 async def test_bang_desconocido_sigue_al_experto(env):

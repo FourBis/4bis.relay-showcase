@@ -123,6 +123,12 @@ creación Git implícita; no vuelve idempotente cualquier POST. Reutiliza el mis
 ID y payload para reintentar; cambiar el payload con el mismo ID devuelve `409`.
 Usa un ID nuevo, como un UUID, para cada pedido nuevo.
 
+Un comando registrado (`!nombre`) responde de inmediato con HTTP 200 y
+`{"command": "nombre", "text": "resultado", "ok": true}`; si falla, `ok` es
+`false`. El estado HTTP por sí solo no confirma éxito. El cliente versionado
+sale con código 0 solo ante `ok: true`, 1 ante `ok: false` y 2 si un servidor
+anterior omite ese estado; conserva el texto y no repite el comando.
+
 Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
 Conserva el `conversation_id` devuelto y consulta
 `/experts/status/{chat_id}` mientras el relay conserva el progreso en memoria.
@@ -161,6 +167,8 @@ Si el proceso se interrumpe durante la verificación final, el grafo conserva
 sus nodos estén terminados. **Retomar** (`POST /graphs/{id}/resume`) vuelve a
 verificar sin repetir esos nodos; el arranque por sí solo no lo relanza.
 Una tarea pausada o cancelada sigue protegida por sus controles habituales.
+El veredicto final y el estado se guardan juntos; una corrección tardía no
+crea trabajo ni reactiva un grafo que ya fue cancelado.
 
 Sin nodos listos, ejecuciones interrumpidas ni verificación pendiente,
 reanudar responde 409 y conserva estado y resultados. El error distingue un

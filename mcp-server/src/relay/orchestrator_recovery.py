@@ -153,16 +153,19 @@ async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
               else "El verificador no entregó una corrección válida. ")
     # ponytail: un nodo independiente con ID local, sin aristas del modelo.
     # Alta + checkpoint + estado deben sobrevivir juntos a reinicios/cancelación.
+    # El estado se comprueba dentro de la escritura: el veredicto puede llegar tarde.
     from .db_support import now_iso
     await db.run_tx([
         ("INSERT INTO tasks (id, graph_id, titulo, detalle, idempotente, max_intentos, "
-         "orden, estado, error) VALUES (?,?,?,?,0,1,?,?,?)",
+         "orden, estado, error) SELECT ?,?,?,?,0,1,?,?,? "
+         "FROM task_graphs WHERE id=? AND estado <> 'cancelado'",
          (task_id, graph_id, "Corregir criterios pendientes de la verificación final",
           detail[:8000], max(int(t.get("orden") or 0) for t in graph["tasks"]) + 1,
           G.PENDIENTE if proceed else G.FALLADO,
-          "" if proceed else reason + str(verdict.get("feedback") or "")[:1200])),
-        ("UPDATE task_graphs SET verificacion_json=?, estado=?, updated_at=? WHERE id=?",
+          "" if proceed else reason + str(verdict.get("feedback") or "")[:1200], graph_id)),
+        ("UPDATE task_graphs SET verificacion_json=?, estado=?, updated_at=? "
+         "WHERE id=? AND estado <> 'cancelado'",
          (json.dumps(verdict, ensure_ascii=False), "activo" if proceed else "fallado",
           now_iso(), graph_id)),
     ])
-    return proceed
+    return proceed and bool(await db.run("SELECT id FROM tasks WHERE id=?", (task_id,)))

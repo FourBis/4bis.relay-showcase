@@ -175,8 +175,7 @@ async function refrescar() {
   // primera condición el panel se congelaba justo ahí — el caso que
   // reportó el humano el 30/8: "el proceso siguiente lo hizo bien pero
   // en la UI se refleja mal".
-  if (r.grafo.progreso?.estado === "activo" || r.grafo.corriendo === true
-      || r.grafo.estado_visible === "verificacion_pendiente") {
+  if (r.grafo.progreso?.estado === "activo" || r.grafo.corriendo === true) {
     programar(propio);
   }
 }

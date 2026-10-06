@@ -1,5 +1,6 @@
 """El cliente conserva el run ante cortes de polling y no aprueba entregas vacias."""
 import importlib.util
+import asyncio
 import json
 import io
 import os
@@ -109,6 +110,54 @@ def result(tmp_path, *, answer="Entrega concreta", status="ok", stages=None):
     return {"status": status, "md_path": str(path), "stages": stages or {}}
 
 
+def persisted_empty_chat(tmp_path, monkeypatch, *, events):
+    from relay import config, persist
+
+    chats_dir = tmp_path / "chats"
+    monkeypatch.setattr(config, "chats_dir", lambda: chats_dir)
+    path = asyncio.run(persist.write_chat_md(
+        target="demo", chat_id="existing-run", user="Tarea",
+        content="", source="cli", author="", model="test", status="ok",
+        duration_ms=1, events=events))
+    return {"status": "ok", "md_path": path}
+
+
+@pytest.mark.parametrize("events", [[], [{
+    "phase": "tool_call", "tool": "shell", "message": "ejecutó comando",
+    "ts": "2026-10-06T12:00:00Z",
+}]])
+def test_resume_rejects_persisted_empty_answer_with_or_without_journal(
+        client, monkeypatch, tmp_path, events):
+    chat = persisted_empty_chat(tmp_path, monkeypatch, events=events)
+    request = Mock(side_effect=[{"finished": True}, chat])
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate(chat_id="existing-run") == 1
+    assert [call.args[0] for call in request.call_args_list] == ["GET", "GET"]
+
+
+def test_resume_accepts_real_markdown_with_journal(client, monkeypatch, tmp_path):
+    from relay import config, persist
+
+    chats_dir = tmp_path / "chats"
+    monkeypatch.setattr(config, "chats_dir", lambda: chats_dir)
+    path = asyncio.run(persist.write_chat_md(
+        target="demo", chat_id="existing-run", user="Tarea",
+        content="## Resultado\n\nContenido entregado.", source="cli",
+        author="", model="test", status="ok", duration_ms=1,
+        events=[{"phase": "tool_call", "tool": "shell",
+                 "message": "ejecutó comando", "ts": "2026-10-06T12:00:00Z"}]))
+    request = Mock(side_effect=[{"finished": True}, {"status": "ok", "md_path": path}])
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate(chat_id="existing-run") == 0
+
+
+def test_extract_keeps_text_that_explains_the_empty_marker(client):
+    assert client._extract_respuesta(
+        "## Respuesta\n\n(sin contenido) explicado") == "(sin contenido) explicado"
+
+
 def test_transient_poll_timeout_does_not_resubmit(client, monkeypatch, tmp_path):
     request = Mock(side_effect=[{"id": "existing-run"}, TimeoutError(),
                                {"finished": True}, result(tmp_path)])
@@ -169,11 +218,37 @@ def test_queued_resume_stays_active_without_resubmitting(
 
 def test_enabled_command_post_result_prints_text_without_polling(
         client, monkeypatch, capsys):
-    request = Mock(return_value={"command": "echo", "text": "comando listo"})
+    request = Mock(return_value={"command": "echo", "text": "comando listo", "ok": True})
     monkeypatch.setattr(client, "_req", request)
 
     assert client.delegate("demo", "tarea") == 0
     assert "comando listo" in capsys.readouterr().out
+    assert request.call_count == 1
+
+
+@pytest.mark.parametrize("ok,expected", [(True, 0), (False, 1)])
+def test_command_post_uses_explicit_ok_verdict(client, monkeypatch, capsys, ok, expected):
+    request = Mock(return_value={"command": "echo", "text": "comando", "ok": ok})
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate("demo", "!echo") == expected
+    assert "comando" in capsys.readouterr().out
+    request.assert_called_once()
+
+
+@pytest.mark.parametrize("response", [
+    {"command": "echo", "text": "comando"},
+    {"command": "echo", "text": "comando", "ok": "yes"},
+    {"command": "echo", "text": "comando", "ok": 0},
+])
+def test_command_post_without_boolean_verdict_is_unverifiable(
+        client, monkeypatch, capsys, response):
+    request = Mock(return_value=response)
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate("demo", "!echo") == 2
+    output = capsys.readouterr()
+    assert "estado no verificable" in output.err
     assert request.call_count == 1
 
 
@@ -230,7 +305,7 @@ def test_uncertain_cancellation_does_not_resubmit_or_claim_success(client, monke
     monkeypatch.setattr(client, "_req", request)
     assert client.delegate(chat_id="own-run", max_tools=8) == 2
     error = capsys.readouterr().err
-    assert "cancelacion no confirmada" in error
+    assert "cancelación no confirmada" in error
     assert "--resume own-run --max-tools 8" in error
     assert request.call_count == 2
 

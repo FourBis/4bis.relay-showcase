@@ -69,7 +69,11 @@ def _extract_respuesta(md_text):
     """
     m = re.search(r"^##[ \t]+Respuesta[ \t]*$(.*?)(?=" + _MD_SECTIONS_RE +
                   r"|\Z)", md_text, re.MULTILINE | re.DOTALL)
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    answer = m.group(1).strip()
+    before_journal = answer.split("\n\n## Bitácora de la corrida\n", 1)[0].strip()
+    return "" if before_journal == "(sin contenido)" else answer
 
 
 def _selftest():
@@ -114,7 +118,12 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
 
     if isinstance(run, dict) and run.get("command") and isinstance(run.get("text"), str):
         print(run["text"])
-        return 0
+        if run.get("ok") is True:
+            return 0
+        if run.get("ok") is False:
+            return 1
+        print("estado no verificable; no se reintenta el comando", file=sys.stderr)
+        return 2
     if not isinstance(run, dict) or not isinstance(run.get("id"), str) or not run["id"]:
         print("respuesta de Relay sin identificador válido; no se reintenta el envío", file=sys.stderr)
         return 2
@@ -148,14 +157,14 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
         if st.get("finished"):
             break
         # ponytail: umbral observado cada 3s, no un tope estricto de gasto.
-        # Para impedir incluso una llamada extra, el limite debe vivir en el runner.
+        # Para impedir incluso una llamada extra, el límite debe vivir en el runner.
         if max_tools is not None and st.get("tool_calls", 0) >= max_tools:
             print(f"umbral de {max_tools} tools; solicito cancelar solo chat_id={chat_id}. "
                   "Conservar y revisar el diff parcial.", file=sys.stderr)
             try:
                 _req("POST", f"/experts/cancel/{chat_id}")
             except (urllib.error.URLError, TimeoutError):
-                print(f"cancelacion no confirmada; revisar {resume}", file=sys.stderr)
+                print(f"cancelación no confirmada; revisar {resume}", file=sys.stderr)
                 return 2
             break
 
@@ -165,7 +174,7 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
         print(f"no pude recuperar el resultado; usar {resume}", file=sys.stderr)
         return 2
     if chat.get("status") in ("queued", "running"):
-        print(f"run sigue activo; usar {resume}. No se relanzo.", file=sys.stderr)
+        print(f"run sigue activo; usar {resume}. No se relanzó.", file=sys.stderr)
         return 2
     if chat.get("status") == "error":
         print(f"error del experto: {chat.get('error')}", file=sys.stderr)

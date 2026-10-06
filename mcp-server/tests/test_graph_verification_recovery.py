@@ -421,16 +421,59 @@ async def test_interrupcion_del_verificador_conserva_el_grafo_recuperable(db):
     assert len(runs) == 2
 
 
-async def test_veredicto_tardio_no_sobrescribe_cancelacion_del_grafo(db):
-    async def execute(_):
+@pytest.mark.parametrize("response", [
+    {"verdict": "complete"}, verdict(), {"verdict": "needs_more"},
+])
+async def test_veredicto_tardio_no_sobrescribe_cancelacion_del_grafo(db, response):
+    runs = []
+
+    async def execute(task):
+        runs.append(task["id"])
         return {"ok": True}
 
     async def verify(**_):
         await db.set_task_graph_state("g", "cancelado")
-        return {"verdict": "complete"}
+        return response
 
     await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
-    assert (await db.get_task_graph("g"))["estado"] == "cancelado"
+    graph = await db.get_task_graph("g")
+    assert graph["estado"] == "cancelado"
+    assert [task["id"] for task in graph["tasks"]] == runs == ["original"]
+
+
+async def test_cancelacion_antes_del_commit_no_materializa_correccion(db, monkeypatch):
+    from relay.orchestrator_recovery import continue_verification
+
+    await db.update_task("original", estado=grafo.HECHO)
+    stale = await db.get_task_graph("g")
+    payload = verdict()
+    payload["plan_correction"] = payload["usage"]["plan_correction"]
+    run_tx = db.run_tx
+    cancelled = None
+
+    async def cancel_before_transaction(statements):
+        nonlocal cancelled
+        await db.set_task_graph_state("g", "cancelado")
+        cancelled = await db.get_task_graph("g")
+        await run_tx(statements)
+
+    monkeypatch.setattr(db, "run_tx", cancel_before_transaction)
+    assert not await continue_verification(db, "g", stale, payload)
+    assert await db.get_task_graph("g") == cancelled
+
+
+async def test_veredicto_y_estado_final_se_confirman_juntos(db):
+    await db.update_task("original", estado=grafo.HECHO)
+    await db.run("CREATE TRIGGER reject_terminal BEFORE UPDATE OF estado ON task_graphs "
+                 "WHEN NEW.estado='hecho' BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
+    before = await db.get_task_graph("g")
+
+    async def verify(**_):
+        return {"verdict": "complete", "feedback": "Comprobado"}
+
+    assert not await orquestador._verificar_al_cerrar(
+        db, "g", before, {"estado": "hecho"}, verify)
+    assert await db.get_task_graph("g") == before
 
 
 async def test_resume_http_repite_verificacion_interrumpida_sin_repetir_nodos(monkeypatch):
