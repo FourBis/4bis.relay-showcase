@@ -10,32 +10,15 @@ from . import grafo as G
 logger = logging.getLogger("relay.orquestador")
 
 # =====================================================================
-# La verificación de cierre: UNA por grafo
+# La verificación de cierre: una por pasada del grafo
 # =====================================================================
 #
-# Los chats pasan por `run_expert_staged` —planificador, ejecutor,
-# verificador— y el grafo llama a `run_expert` pelado, un nodo a la vez.
-# El motivo de saltear el PLANIFICADOR por nodo sigue en pie: el plan ya
-# existe, es el grafo, y volver a derivarlo por nodo sería pagar por una
-# decisión ya tomada.
+# La aceptación de cada nodo no sustituye la comprobación del objetivo
+# completo: el cierre revisa la integración y los criterios transversales.
 #
-# El verificador se había arrastrado en la misma decisión y ahí el
-# argumento no aplica: verificar no es re-derivar el plan, es mirar si lo
-# que salió se parece a lo que se pidió. La tarea que MÁS se puede
-# desviar —la grande, la de decenas de nodos— corría sin nadie mirando:
-# seis grafos muertos el 2026-09-06/07 se llevaron el 50 % de los tokens
-# del día sin entregar nada.
-#
-# Por qué UNA y no una por nodo: por nodo es exactamente el costo que la
-# decisión original evitaba (doblar el precio del grafo para revisar el
-# 90 % de tareas que salieron bien). Una al cerrar cuesta un turno corto
-# por grafo entero.
-#
-# Lo que esta etapa NO hace: relanzar. Aunque el veredicto sea
-# `needs_more`, el grafo no se reanuda solo — mismo criterio que los
-# grafos a medias en el boot del server: reparar es una cosa y arrancar
-# trabajo que nadie pidió es otra. El humano decide, con el veredicto a
-# la vista.
+# `needs_more` conserva la corrección estructurada: el scheduler puede
+# continuar los criterios pendientes dentro de la ejecución autorizada.
+# El arranque del servidor sigue sin relanzar grafos por su cuenta.
 
 # Tope del resumen de nodos que viaja al verificador, en caracteres. Un
 # grafo tiene decenas de nodos y este turno tiene que ser barato: las
@@ -228,7 +211,7 @@ async def _evidencia_de_los_nodos(db, g: dict) -> str:
 
 
 async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
-                               verificar) -> None:
+                               verificar) -> dict:
     """Corre la verificación del grafo y la guarda. NUNCA lanza.
 
     El grafo ya terminó su trabajo: que esta etapa falle es una falla de
@@ -239,6 +222,14 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
     """
     payload: dict = {"at": _ahora(), "estado_grafo": prog.get("estado") or "",
                      "verdict": "", "feedback": "", "modelo": "", "error": ""}
+    try:
+        previous = json.loads(g.get("verificacion_json") or "{}")
+        if isinstance(previous.get("recovery"), dict):
+            # Conservarlo incluso si el proceso cae entre verificar y decidir
+            # la siguiente corrección: un reinicio no reinicia el progreso.
+            payload["recovery"] = previous["recovery"]
+    except (TypeError, ValueError, AttributeError):
+        pass
     try:
         res = await verificar(
             user=g.get("objetivo") or "",
@@ -269,6 +260,8 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
         # `chats.stages_json`: la clave solo existe si se midió, así
         # que ausente = "sin dato" y no cero.
         usage = res.get("usage") or {}
+        if usage.get("plan_correction"):
+            payload["plan_correction"] = usage["plan_correction"]
         if usage:
             payload["tokens_in"] = usage.get("tokens_in", 0)
             payload["tokens_out"] = usage.get("tokens_out", 0)
@@ -283,6 +276,8 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
             graph_id, json.dumps(payload, ensure_ascii=False))
     except Exception:  # noqa: BLE001 — ídem: no puede voltear el cierre
         logger.exception("grafo %s: no pude guardar el veredicto", graph_id)
+        payload["error"] = "No se pudo persistir la verificación; no se inicia corrección."
+    return payload
 
 
 async def _seguro(fn, *a):

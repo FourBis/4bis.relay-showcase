@@ -479,9 +479,7 @@ function pintar(g) {
       evis === "fallado" ? "err" :
       (evis === "activo" || evis === "esperando_humano") ? "warn" : "dim");
   }
-  // Verde lo que salió bien, rojo lo que no. `p.porcentaje` cuenta las
-  // CERRADAS —y una fallada está cerrada—, así que usarlo para una sola
-  // barra verde pintaba 75% de avance con una sola tarea hecha.
+  // Verde lo que salió bien, rojo lo que falló o quedó bloqueado.
   const total = p.total || 0;
   const bien = $("#chat-grafo-barra-ok");
   const mal = $("#chat-grafo-barra-mal");

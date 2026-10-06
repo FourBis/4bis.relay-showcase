@@ -430,6 +430,8 @@ async def test_un_nodo_que_para_deja_la_decision_anotada(db):
     """El agujero que tenía la primera versión: marcaba el estado y no
     preguntaba nada. Un grafo esperando a un humano que nunca se enteró
     de que lo esperaban es peor que uno que falla."""
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": "."})
+    await db.create_conversation(project_slug="demo", conversation_id="conv-1")
     await db.create_task_graph("g", "objetivo", tareas=[
         {"id": "t1", "titulo": "migrar el esquema", "archivos": ["schema.sql"]}],
         conversation_id="conv-1", project_slug="demo")
@@ -1234,9 +1236,7 @@ async def test_un_verificador_que_revienta_no_voltea_el_grafo(db):
 
 
 async def test_needs_more_no_relanza_el_grafo(db):
-    """Mismo criterio que los grafos a medias en el boot: reparar es una
-    cosa y arrancar trabajo que nadie pidió es otra. El humano decide,
-    con el veredicto a la vista."""
+    """Un veredicto sin corrección conserva lo hecho y registra el pendiente."""
     await db.create_task_graph("g", "x", tareas=[{"id": "t1", "titulo": "1"}])
     corridas: list = []
 
@@ -1249,10 +1249,10 @@ async def test_needs_more_no_relanza_el_grafo(db):
         verificar=_verificador_que_dice("needs_more", "falta el test"))
 
     assert corridas == ["t1"], "el veredicto relanzó trabajo por su cuenta"
-    assert prog["estado"] == "hecho"
+    assert prog["estado"] == "fallado"
     g = await db.get_task_graph("g")
-    assert g["estado"] == "hecho"
-    assert [t["estado"] for t in g["tasks"]] == [grafo.HECHO]
+    assert g["estado"] == "fallado"
+    assert [t["estado"] for t in g["tasks"]] == [grafo.HECHO, grafo.FALLADO]
     assert _veredicto(g)["verdict"] == "needs_more"
 
 

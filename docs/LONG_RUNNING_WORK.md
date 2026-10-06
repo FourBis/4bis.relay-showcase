@@ -67,6 +67,37 @@ La persistencia, la reanudación HTTP y el orden de ejecución se comprueban en
 `mcp-server/tests/test_graph_budget_resume.py` con base temporal y ejecutor
 simulado. Estas pruebas no demuestran el resultado de una ejecución real de IA.
 
+## Continuar criterios pendientes de la verificación
+
+Cuando todos los nodos terminan correctamente, la verificación revisa el
+objetivo completo. Si devuelve `needs_more` con una corrección estructurada
+válida, Relay agrega un nodo con los criterios pendientes y continúa en la
+misma ejecución autorizada. Los nodos terminados conservan su resultado y
+no vuelven a ejecutarse. La corrección usa el mismo workspace, identidad y
+controles de la ejecución original.
+
+**Pausar** impide iniciar nuevos nodos, también si se pulsa mientras responde
+el verificador. Los nodos en curso pueden terminar y la corrección queda
+pendiente con su progreso guardado. Para ejecutarla después, usa **Continuar**
+en la tarea y **Retomar** en el plan. Una tarea cancelada permanece terminal.
+
+Cada nueva corrección debe acreditar un criterio pendiente anterior y no
+repetir una lista de pendientes ya intentada. Si falta una corrección válida,
+no hay progreso o se alcanza el límite global de 200 vueltas del scheduler,
+se registra un nodo fallido con el motivo y se detiene la continuación. El
+porcentaje de progreso cuenta solo tareas terminadas correctamente; un fallo
+o un bloqueo no equivale a trabajo cumplido.
+
+Las cancelaciones, preguntas pendientes, fallos de ejecución y veredictos
+`off_plan` o `needs_human` conservan sus controles. Un error del verificador
+o al guardar su respuesta tampoco inicia trabajo adicional. El alta del nodo
+y su registro de progreso se guardan juntos; reiniciar el servidor no arranca
+los grafos automáticamente ni borra el freno ante criterios repetidos.
+
+Las pruebas de `mcp-server/tests/test_graph_verification_recovery.py` usan una
+base temporal y respuestas simuladas. Comprueban el mecanismo de continuación;
+no demuestran que un modelo real evalúe correctamente los criterios.
+
 ## Equipo, cuentas y escritura
 
 El Admin asigna proyectos a Dev o Subadmin desde **Equipo**. Una asignación

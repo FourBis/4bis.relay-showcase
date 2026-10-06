@@ -70,7 +70,9 @@ jobs:
           mcp-server/tests/test_tool_timeout.py
           mcp-server/tests/test_db.py
           mcp-server/tests/test_dbtool.py
+          mcp-server/tests/test_crm_digest.py
           mcp-server/tests/test_ui_contrato_experts_run.py
+          mcp-server/tests/test_relay_delegate.py
           -q
       - name: Check focused orchestrator autosplit and cancellation
         shell: pwsh
@@ -86,6 +88,8 @@ jobs:
           mcp-server/tests/test_disparador.py
           mcp-server/tests/test_graph_cancel.py
           mcp-server/tests/test_graph_budget_resume.py
+          mcp-server/tests/test_graph_verification_recovery.py
+          mcp-server/tests/test_grafo.py
           mcp-server/tests/test_graphs_create_dup_guard.py
           mcp-server/tests/test_planificador.py
           -q

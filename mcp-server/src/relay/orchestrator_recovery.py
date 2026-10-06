@@ -1,9 +1,11 @@
-"""Reanudación explícita de nodos cortados por presupuesto."""
+"""Reanudación explícita por presupuesto y corrección de criterios pendientes."""
 from __future__ import annotations
 
 import json
+import uuid
 
 from . import grafo as G
+from .expert_verdicts import _validate_plan_correction
 
 _RESUME_NOTICE = (
     "## Continuación autorizada tras un límite de ejecución\n"
@@ -81,3 +83,84 @@ async def graph_resume_context(db, task: dict) -> tuple[str, str]:
                    "reutilizable. Inspecciona los archivos y vuelve a comprobar "
                    "el estado antes de actuar.\n" + context)
     return history, context
+
+
+def _criteria(steps: list[dict], *, done: bool) -> set[str]:
+    return {" ".join((step["description"] + " " + step["expected_output"]).split()).casefold()
+            for step in steps if (step["status"] == "done") == done}
+
+
+async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
+                                *, allow_continue: bool = True) -> bool:
+    """Una tarea nueva, sin repetir las anteriores ni reinterpretar sus efectos.
+
+    Solo se corrige un grafo cuyos nodos cerraron bien. Los fallos de ejecución,
+    permisos, cancelación o una pregunta siguen su circuito de recuperación.
+    Una nueva pasada exige que el verificador dé por resuelto algún criterio
+    pendiente anterior. Cambiar la redacción del feedback no alcanza.
+    """
+    if (graph.get("estado") == "cancelado" or verdict.get("error")
+            or verdict.get("verdict") != "needs_more"):
+        return False
+    nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in graph["tasks"]]
+    if G.estado_del_grafo(nodes) != "hecho":
+        return False
+
+    correction = verdict.get("plan_correction")
+    valid = isinstance(correction, dict)
+    if valid:
+        try:
+            valid = _validate_plan_correction(correction) is None
+            steps = correction["revised_steps"]
+            valid = valid and all(isinstance(s.get(k), str) and s[k].strip()
+                                  for s in steps for k in ("id", "description", "expected_output"))
+        except (KeyError, TypeError, ValueError):
+            valid = False
+    pending = _criteria(steps, done=False) if valid else set()
+    try:
+        previous = json.loads(graph.get("verificacion_json") or "{}")
+        recovery = previous.get("recovery") or {}
+    except (TypeError, ValueError, AttributeError):
+        recovery = {}
+    prior = set(recovery.get("pending") or ())
+    done = _criteria(steps, done=True) if valid else set()
+    progressed = not prior or bool(prior & done)
+    seen = {tuple(items) for items in recovery.get("seen") or []}
+    signature = tuple(sorted(pending))
+    proceed = bool(allow_continue and pending and progressed and signature not in seen)
+
+    task_id = f"{graph_id}:verify:{uuid.uuid4().hex[:8]}"
+    detail = ("Continúa el objetivo del grafo desde el estado actual del workspace. "
+              "Conserva lo terminado; inspecciona lo existente antes de modificar. "
+              "Corrige la causa de estos fallos y ejecuta sus comprobaciones reales. "
+              "No repitas migraciones, publicaciones ni otros efectos ya realizados; "
+              "si un efecto previo es incierto, pide la decisión correspondiente.\n\n")
+    if valid:
+        detail += correction["feedback_to_executor"][:2000] + "\n\n"
+        detail += "\n".join(f"- {s['description']}: {s['expected_output']}"
+                            for s in steps if s["status"] != "done")
+    else:
+        detail += str(verdict.get("feedback") or "Falta una corrección verificable.")
+    if proceed:
+        seen.add(signature)
+        verdict["recovery"] = {"pending": sorted(pending), "seen": sorted(seen)}
+    else:
+        verdict["recovery"] = recovery
+    reason = ("Se alcanzó el límite global de vueltas del grafo. " if not allow_continue
+              else "La verificación repite criterios sin avance comprobado. " if valid
+              else "El verificador no entregó una corrección válida. ")
+    # ponytail: un nodo independiente con ID local, sin aristas del modelo.
+    # Alta + checkpoint + estado deben sobrevivir juntos a reinicios/cancelación.
+    from .db_support import now_iso
+    await db.run_tx([
+        ("INSERT INTO tasks (id, graph_id, titulo, detalle, idempotente, max_intentos, "
+         "orden, estado, error) VALUES (?,?,?,?,0,1,?,?,?)",
+         (task_id, graph_id, "Corregir criterios pendientes de la verificación final",
+          detail[:8000], max(int(t.get("orden") or 0) for t in graph["tasks"]) + 1,
+          G.PENDIENTE if proceed else G.FALLADO,
+          "" if proceed else reason + str(verdict.get("feedback") or "")[:1200])),
+        ("UPDATE task_graphs SET verificacion_json=?, estado=?, updated_at=? WHERE id=?",
+         (json.dumps(verdict, ensure_ascii=False), "activo" if proceed else "fallado",
+          now_iso(), graph_id)),
+    ])
+    return proceed
