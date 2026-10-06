@@ -52,6 +52,21 @@ pruebas reproducibles están en `mcp-server/tests/test_orquestador.py`:
 python -m pytest mcp-server/tests/test_orquestador.py -k "split or subdiv or fan_out or flag_apagado or subtarea" -q
 ```
 
+## Retomar un corte de presupuesto
+
+Tras un corte por `budget_exceeded` o `budget_split`, **Retomar** concede un
+nuevo intento explícito y recupera el historial del nodo antes de abrir otro
+chat. Los nodos terminados y los padres ya sustituidos se conservan. Si el
+historial falta o es inválido, el siguiente intento recibe la instrucción de
+inspeccionar los archivos y comprobar el estado antes de actuar. Las preguntas,
+los fallos funcionales y un veredicto global `off_plan` mantienen sus propios
+controles. El historial orienta la continuación; un efecto externo incierto
+requiere revisión antes de repetirlo.
+
+La persistencia, la reanudación HTTP y el orden de ejecución se comprueban en
+`mcp-server/tests/test_graph_budget_resume.py` con base temporal y ejecutor
+simulado. Estas pruebas no demuestran el resultado de una ejecución real de IA.
+
 ## Equipo, cuentas y escritura
 
 El Admin asigna proyectos a Dev o Subadmin desde **Equipo**. Una asignación

@@ -64,6 +64,12 @@ La ruta `GET /projects` de versiones antiguas ya no está registrada.
 | GET | `/chats/{id}/md` | Consultar su exportación Markdown |
 | POST | `/attachments` | Subir un archivo multipart, campo `file` |
 
+Retomar un grafo concede otro intento a los nodos cortados por presupuesto y
+desbloquea sus dependientes cuando corresponde. Conserva los nodos terminados,
+los padres sustituidos y los fallos ajenos. Requiere los permisos del proyecto;
+una tarea pausada o cancelada debe continuarse desde sus propios controles.
+`202` confirma el inicio solicitado: consulta el grafo para verificar el resultado.
+
 Con el proyecto `demo` ya registrado y un modelo configurado:
 
 ```json

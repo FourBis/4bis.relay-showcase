@@ -306,7 +306,7 @@ async def _resume_with_workspace(request: web.Request) -> web.Response:
 async def _resume_graph(request: web.Request) -> web.Response:
     """POST /graphs/{id}/resume — retoma un grafo cortado.
 
-    El orquestador recupera nodos interrumpidos al arrancar. Un grafo
+    Reabre cortes de presupuesto mediante esta acción explícita. Un grafo
     ya corriendo o sin trabajo ejecutable devuelve 409 sin relanzarlo.
     """
     db = request.app[DB_KEY]
@@ -332,6 +332,9 @@ async def _resume_graph(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "La tarea está detenida; continúa desde sus controles",
              "graph_id": graph_id}, status=409)
+    from .orchestrator_recovery import prepare_graph_resume
+    await prepare_graph_resume(db, g)
+    g = await db.get_task_graph(graph_id)
     from . import grafo as G
     nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in g["tasks"]]
     if not G.listas(nodes) and not any(n.estado == G.CORRIENDO for n in nodes):
