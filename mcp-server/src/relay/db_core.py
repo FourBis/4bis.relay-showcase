@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
@@ -44,7 +45,24 @@ class DatabaseCore:
             conn.close()
 
     async def run(self, sql: str, params: tuple = ()) -> list[dict]:
-        return await asyncio.to_thread(self._run, sql, params)
+        return await self._in_thread(self._run, sql, params)
+
+    async def _in_thread(self, operation, *args):
+        """Espera el cierre del SQLite interno incluso al cancelar el await.
+
+        Cancelar una coroutine no detiene el hilo ni deshace su transacción.
+        La cancelación se propaga una vez terminado el commit/rollback y cierre.
+        """
+        worker = asyncio.create_task(asyncio.to_thread(operation, *args))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(worker)
+            with suppress(asyncio.CancelledError, Exception):
+                worker.result()
+            raise
 
     def _run_tx(self, sentencias: list) -> None:
         """Varias sentencias en UNA transacción: entran todas o ninguna.
@@ -69,6 +87,6 @@ class DatabaseCore:
             conn.close()
 
     async def run_tx(self, sentencias: list) -> None:
-        await asyncio.to_thread(self._run_tx, sentencias)
+        await self._in_thread(self._run_tx, sentencias)
 
     # ---- projects ----

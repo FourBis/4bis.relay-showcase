@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 from . import config
 from typing import Optional
 
@@ -407,7 +406,7 @@ class DatabaseGraphMixin:
         verdad garantiza, y una capa que garantiza tiene que poder decir
         que no. Ver `_claim_files_tx` por qué esto no es un `run()` más.
         """
-        return await asyncio.to_thread(
+        return await self._in_thread(
             self._claim_files_tx, task_id, graph_id, archivos)
 
     async def renovar_claims(self, task_ids: list) -> int:

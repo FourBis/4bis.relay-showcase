@@ -1,7 +1,6 @@
 """Inicialización y migraciones idempotentes del esquema Relay."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sqlite3
@@ -467,4 +466,4 @@ class DatabaseSchemaMixin:
             conn.close()
 
     async def init_schema(self) -> None:
-        await asyncio.to_thread(self._init_schema_sync)
+        await self._in_thread(self._init_schema_sync)

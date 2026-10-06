@@ -1,7 +1,6 @@
 """Persistencia mínima de tareas y eventos por conversación."""
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from typing import Any
@@ -54,7 +53,7 @@ class DatabaseConversationTasksMixin:
             finally:
                 conn.close()
 
-        return await asyncio.to_thread(work)
+        return await self._in_thread(work)
 
     async def enqueue_conversation_event(
         self, conv_id: str, event_key: str, kind: str, payload: dict[str, Any],
@@ -104,7 +103,7 @@ class DatabaseConversationTasksMixin:
             finally:
                 conn.close()
 
-        return await asyncio.to_thread(work)
+        return await self._in_thread(work)
 
     async def claim_conversation_event(self, conv_id: str) -> dict[str, Any] | None:
         from .task_service import STOPPED
@@ -138,7 +137,7 @@ class DatabaseConversationTasksMixin:
             finally:
                 conn.close()
 
-        return await asyncio.to_thread(work)
+        return await self._in_thread(work)
 
     async def finish_conversation_event(
         self, event_id: int, *, state: str = "applied", error: str = "", commit_sha: str | None = None,
@@ -165,7 +164,7 @@ class DatabaseConversationTasksMixin:
             finally:
                 conn.close()
 
-        await asyncio.to_thread(work)
+        await self._in_thread(work)
 
     async def list_conversation_events(
         self, conv_id: str, *, states: list[str] | tuple[str, ...] | None = None, limit: int = 100,
