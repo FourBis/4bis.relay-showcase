@@ -1,7 +1,6 @@
 """Primer Admin e inicio de sesión local con identidad verificada por GitHub."""
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
@@ -187,7 +186,7 @@ async def callback(request):
         async with db._upsert_lock:
             if user_accounts.provider_config("github") != cfg:
                 raise AccountError("La configuración cambió. Inicia sesión nuevamente.")
-            await asyncio.to_thread(
+            await db._in_thread(
                 _finish_login, db, subject, address.lower(), login, pending["bootstrap"], session)
             identity.load_roles(await db.list_users())
     except AccountError as exc:

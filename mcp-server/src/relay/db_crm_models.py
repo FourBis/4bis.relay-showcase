@@ -1,7 +1,6 @@
 """Repositorios de CRM, modelos y usuarios."""
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from typing import Optional
@@ -305,7 +304,7 @@ class DatabaseCrmModelsMixin:
                        for r in manageable_roles)):
             raise ValueError("manageable_roles inválido")
 
-        await asyncio.to_thread(
+        await self._in_thread(
             self._set_user_role_sync, email, role, display_name, enabled,
             manageable_roles, project_slugs)
 
@@ -377,7 +376,7 @@ class DatabaseCrmModelsMixin:
         email = email.strip().lower()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
             raise ValueError("email inválido")
-        return await asyncio.to_thread(self._delete_user_sync, email)
+        return await self._in_thread(self._delete_user_sync, email)
 
     def _delete_user_sync(self, email: str) -> bool:
         conn = self._connect()
