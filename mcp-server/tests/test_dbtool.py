@@ -588,41 +588,25 @@ class EndpointsTests(unittest.IsolatedAsyncioTestCase):
 
 
 async def _tools_del_agente(proj, db):
-    """Nombres de tools con los que se construye el Agent."""
+    """Nombres de tools que recibió el modelo."""
     from unittest.mock import patch
 
-    from pydantic_ai.models.test import TestModel
-
-    from relay import experts
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
 
     await db.create_conversation(project_slug=proj["slug"], conversation_id="v1")
-    capturado = {}
-    _RealAgent = expert_runner.Agent
+    nombres = set()
 
-    class _SpyAgent:
-        def __init__(self, *a, **kw):
-            capturado["kw"] = kw
-            self._inner = _RealAgent(*a, **kw)
+    def responder(messages, info):
+        nombres.update(tool.name for tool in info.function_tools)
+        return ModelResponse(parts=[TextPart("ok")])
 
-        def __getattr__(self, n):
-            return getattr(self._inner, n)
-
-    with patch.object(expert_runner, "Agent", _SpyAgent), \
-         patch.object(expert_models, "build_model",
-                      lambda s: TestModel(call_tools=[])), \
+    with patch.object(expert_models, "build_model",
+                      lambda s: FunctionModel(responder)), \
          patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
         await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
             chat_id="c1", conversation_id="v1")
-
-    nombres = set()
-    for ts in capturado["kw"].get("toolsets") or []:
-        inner = getattr(ts, "wrapped", ts)
-        for t in getattr(inner, "tools", []) or []:
-            nombres.add(getattr(t, "name", None) or getattr(t, "__name__", ""))
-        d = getattr(inner, "_tools", None) or getattr(inner, "tools", None)
-        if isinstance(d, dict):
-            nombres |= set(d.keys())
     return nombres
 
 
