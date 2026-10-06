@@ -705,13 +705,11 @@ function elegir(g, id, silencioso = false) {
   if (t.detalle) filas.push(`<p>${escape(recortar(t.detalle, 400))}</p>`);
   if (t.sustituido) filas.push('<p class="muted">Tarea conservada como historial; sus subtareas cuentan en el avance.</p>');
   if (t.resultado) filas.push(`<p>${escape(recortar(t.resultado, 400))}</p>`);
-  // "Se acabó el presupuesto" no es "hay un bug": el arreglo es subir
-  // un número o partir el trabajo, no debuggear. Van en párrafos
-  // separados para que la distinción se note sin leer el error entero.
   if (t.presupuesto_agotado && !t.sustituido) {
-    filas.push(`<p class="gres-presupuesto-aviso">Cortó por agotar el `
-      + `presupuesto (tool calls), no por un error del código. Subí el `
-      + `límite o partí la tarea.</p>`);
+    filas.push(`<p class="gres-presupuesto-aviso">Esta tarea alcanzó un `
+      + `límite de ejecución. Usa «Retomar» para continuar desde el avance `
+      + `guardado. Si está pausada, continúa primero desde sus controles. `
+      + `Revisa el alcance o los límites si el corte se repite.</p>`);
   }
   // El error del intento anterior sigue en la fila mientras el nodo
   // reintenta: mostrarlo es la diferencia entre "esto ya falló una vez y

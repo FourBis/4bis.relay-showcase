@@ -458,7 +458,8 @@ class TestRetomar(_Base):
                 {"id": f"{i}_a", "titulo": "A"},
                 {"id": f"{i}_b", "titulo": "B", "deps": [f"{i}_a"]}],
                 project_slug="demo", conversation_id=conv_id)
-            await self.db.update_task(f"{i}_a", estado="fallado", error="budget_exceeded")
+            await self.db.update_task(f"{i}_a", estado="fallado",
+                                      error="el nodo terminó en 'budget_exceeded'")
             await self.db.set_task_graph_state(graph_id, "cancelado")
             before = await self.db.get_task_graph(graph_id)
 
@@ -476,6 +477,8 @@ class TestRetomar(_Base):
     async def test_resume_de_grafo_legacy_sin_permiso_es_403(self) -> None:
         await self.db.create_task_graph("g_legacy", "x", tareas=[
             {"id": "legacy_a", "titulo": "A"}], project_slug="demo")
+        await self.db.update_task("legacy_a", estado="fallado",
+                                  error="el nodo terminó en 'budget_exceeded'")
         await self.db.set_task_graph_state("g_legacy", "cancelado")
         before = await self.db.get_task_graph("g_legacy")
 

@@ -170,9 +170,13 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
     from . import experts
 
     async def ejecutar(tarea: dict) -> dict:
+        from .orchestrator_recovery import graph_resume_context
+        history, resume_context = await graph_resume_context(db, tarea)
         reservados = await db.files_claimed_by_others(tarea["id"])
         prompt = _prompt_de_tarea(grafo_row, tarea,
                                   await db.list_tasks(tarea["graph_id"]))
+        if resume_context:
+            prompt += "\n\n## Resultado del intento anterior\n" + resume_context
         chat_id = ""
         if hasattr(db, "create_chat"):
             chat_id = await db.create_chat(
@@ -203,6 +207,7 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
         try:
             res = await experts.run_expert(
                 proyecto, prompt, db=db, model_override=modelo,
+                message_history_json=history,
                 chat_id=chat_id,
                 conversation_id=grafo_row.get("conversation_id") or "",
                 on_progress=on_progress,
@@ -312,7 +317,8 @@ async def _cerrar_chat(db, chat_id: str, status: str, error: str = "",
             author=row.get("author") or "", model=r.get("model") or "",
             status=status, duration_ms=r.get("duration_ms") or 0,
             error=error or None, events=r.get("progress_events") or [])
-        if status == "cancelled" and r.get("messages_json"):
+        if r.get("messages_json") and (
+                status == "cancelled" or r.get("phase_at_end") in G.FASES_INCOMPLETAS):
             # Historial del nodo, no del hilo compartido: conservarlo en
             # chat_outputs sin sobrescribir la conversación del grafo.
             artifact["messages_json"] = r["messages_json"]
