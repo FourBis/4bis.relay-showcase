@@ -96,13 +96,23 @@ ID y payload para reintentar; cambiar el payload con el mismo ID devuelve `409`.
 Usa un ID nuevo, como un UUID, para cada pedido nuevo.
 
 Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
-Consulta `/experts/status/{chat_id}` mientras el relay conserva el progreso en
-memoria. Tras un reinicio puede devolver `404`; consulta entonces `/chats/{id}`
-para el registro y `/chats/{id}/md` para la exportación Markdown. Los eventos
-gestionados conservan su estado en la base de datos. El Markdown puede seguir
-pendiente de exportación; no repitas el pedido solo por eso. Las respuestas de
-error incluyen un campo `error`; revisa el estado y el resultado antes de dar
-una acción por completada.
+Conserva el `conversation_id` devuelto y consulta
+`/experts/status/{chat_id}` mientras el relay conserva el progreso en memoria.
+Ese identificador se garantiza al crear o pasar una conversación; un run directo
+sin conversación puede no devolverlo.
+Si ese estado volátil devuelve `404`, `/chats/{id}` solo aporta metadatos y
+estado; recupera el contenido mediante
+`GET /conversations/{conversation_id}/messages`. `/chats/{id}/md` puede devolver
+`404` mientras `md_path` esté vacío y la exportación Markdown siga pendiente;
+no relances el pedido solo por ese `404`.
+
+La respuesta general `truncated` indica que se alcanzó el límite de turnos;
+`messages[].truncated` indica que se recortó ese turno. Puedes ajustar
+`content_cap` (predeterminado 4000, máximo 100000 caracteres por turno) y
+`max_turns` (predeterminado 200, máximo 2000) en la consulta. Los eventos
+gestionados conservan su estado en la base de datos. Las respuestas de error
+incluyen un campo `error`; revisa el estado y el resultado antes de dar una
+acción por completada.
 
 La cancelación espera el cierre del worker y su persistencia. Un `409` no
 confirma cancelación: revisa el estado y el resultado antes de reintentar. Si el

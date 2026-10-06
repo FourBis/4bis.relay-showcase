@@ -1,6 +1,6 @@
 # Validación de la versión de portafolio
 
-Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 de octubre de 2026. Relay se presenta como proyecto
+Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 y 6 de octubre de 2026. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.
@@ -33,8 +33,9 @@ privado ni publiques una rama de preparación que todavía lo conserve.
 - Protección compartida de Host/Origin contra DNS rebinding y peticiones web
   cruzadas. Los hosts públicos requieren identidad Access verificada; abrir la
   pantalla principal mediante un enlace sigue permitido.
-- La comprobación del peer local cubre cualquier bind e IPv4/IPv6. El acceso
-  local sigue siendo de propietario, con las limitaciones de [SECURITY.md](../SECURITY.md).
+- La comprobación del peer local cubre cualquier bind e IPv4/IPv6. Las instalaciones
+  anteriores sin login nativo conservan el acceso local de propietario. Con el
+  alta GitHub habilitada se exige sesión y permisos; consulta [SECURITY.md](../SECURITY.md).
 - Restablecer una configuración numérica vacía vuelve al default del esquema.
   Corregido el HTTP 500 al resetear el timeout; se rechazan cuerpos inválidos y
   números no finitos sin modificar el valor anterior.
@@ -298,3 +299,17 @@ El PR #9 de reanudación de grafos permanece separado. Se conservan la lista
 de proyectos tomada al arrancar por el watcher CBM y el contrato externo del
 digest CRM como decisiones pendientes. Los cambios se prepararon localmente;
 no se publicaron ramas ni PR, no se desplegó ni se cambió la protección de ramas.
+
+### Alta inicial y recuperación para agentes — 6 de octubre de 2026
+
+El [alta inicial con GitHub](SETUP.md#crear-el-primer-admin-con-github) permite
+configurar la OAuth App de una instalación vacía y crear su primer Admin.
+El recorrido pasó en Chrome aislado con el proveedor simulado; OAuth real y
+despliegue siguen pendientes. La demo estática de Pages no ejecuta ese servidor.
+
+La recuperación HTTP para clientes agentes se comprueba con sesiones personales
+Admin y Dev: una respuesta guardada se puede leer desde la conversación aunque
+el progreso volátil se haya perdido y la exportación Markdown esté pendiente.
+Cerrar sesión revoca esa lectura. Las **43 pruebas de autenticación** pasaron
+con SQLite temporal, OAuth y ejecución simulados; esta comprobación no equivale
+a ejecutar un agente con credenciales reales ni a reiniciar el servidor.
