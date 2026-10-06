@@ -191,7 +191,7 @@ async def memoria(args: dict, ctx: CommandContext) -> str:
     query = args.get("query", "") or ""
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
-        return f"proyecto {target!r} no existe o está deshabilitado"
+        raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
     hits = await ctx.db.search_memories(project["slug"], query, limit=5)
     from .memory import format_memory_hits
     text = format_memory_hits(hits)
@@ -206,7 +206,7 @@ async def fact(args: dict, ctx: CommandContext) -> str:
     target = args["target"]
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
-        return f"proyecto {target!r} no existe o está deshabilitado"
+        raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
     facts = await ctx.db.list_facts(project["slug"], limit=50)
     if not facts:
         return f"Sin hechos registrados para {project['slug']}."
@@ -264,11 +264,11 @@ async def compactar(args: dict, ctx: CommandContext) -> str:
         return f"Hilo {conv['id'][:8]}… sin historial que compactar."
     runs = await ctx.db.list_chats(status="running", limit=50)
     if any(c.get("conversation_id") == conv["id"] for c in runs):
-        return ("Hay un run en curso en este hilo — espera a que termine "
+        raise RuntimeError("Hay un run en curso en este hilo — espera a que termine "
                 "(o `cancel`) y compacta después.")
     out = await compact_live_conversation(ctx.db, conv)
     if not out["ok"]:
-        return f"No pude compactar: {out['error']}"
+        raise RuntimeError(f"No pude compactar: {out['error']}")
     before = out.get("before")
     antes = (f"{before['base_tokens'] / 1000:.0f}k tokens ({before['pct']}%)"
              if before else f"{out['chars_before']} chars")
@@ -317,7 +317,7 @@ async def build(args: dict, ctx: CommandContext) -> str:
         return f"build OK ({slug})"
     errors = sorted({l.strip() for l in out.splitlines() if _ERROR_LINE_RE.search(l)})
     body = "\n".join(errors[:20]) or out[-2000:]
-    return f"build FALLÓ ({slug}, exit {code}):\n{body}"
+    raise RuntimeError(f"build FALLÓ ({slug}, exit {code}):\n{body}")
 
 
 async def test(args: dict, ctx: CommandContext) -> str:
@@ -326,15 +326,14 @@ async def test(args: dict, ctx: CommandContext) -> str:
     code, out = await _run_dotnet("test", repo_path)
     summary = [l.strip() for l in out.splitlines() if _TEST_SUMMARY_RE.search(l)]
     body = "\n".join(summary[-15:]) or out[-2000:]
-    prefix = "tests OK" if code == 0 else f"tests FALLARON (exit {code})"
-    return f"{prefix} ({slug}):\n{body}"
+    if code != 0:
+        raise RuntimeError(f"tests FALLARON (exit {code}) ({slug}):\n{body}")
+    return f"tests OK ({slug}):\n{body}"
 
 
 async def build_test(args: dict, ctx: CommandContext) -> str:
     """build y después test. Si build falla, NO corre tests (regla del skill)."""
     result = await build(args, ctx)
-    if "FALLÓ" in result:
-        return result
     return result + "\n" + await test(args, ctx)
 
 
