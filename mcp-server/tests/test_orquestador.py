@@ -1049,7 +1049,8 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
         assert chat_id
         run.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(run, 3)
+            # Margen de CI para persistir el cierre; no es una prueba de latencia.
+            await asyncio.wait_for(run, 15)
     finally:
         run.cancel()
         await asyncio.gather(run, return_exceptions=True)
