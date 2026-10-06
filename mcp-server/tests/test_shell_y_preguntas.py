@@ -752,14 +752,24 @@ async def test_ask_human_registra_y_manda_terminar(db):
 
 def _nombres_de_tools(kw) -> set:
     nombres = set()
-    for ts in kw.get("toolsets") or []:
-        inner = getattr(ts, "wrapped", ts)
-        for t in getattr(inner, "tools", []) or []:
-            nombres.add(getattr(t, "name", None) or getattr(t, "__name__", ""))
-        # FunctionToolset guarda las tools en un dict
-        d = getattr(inner, "_tools", None) or getattr(inner, "tools", None)
-        if isinstance(d, dict):
-            nombres |= set(d.keys())
+
+    def recorrer(toolset):
+        wrapped = getattr(toolset, "wrapped", None)
+        if wrapped is not None:
+            recorrer(wrapped)
+        for child in getattr(toolset, "toolsets", []) or []:
+            recorrer(child)
+        tools = getattr(toolset, "_tools", None) or getattr(toolset, "tools", None)
+        if isinstance(tools, dict):
+            nombres.update(tools)
+        elif tools:
+            nombres.update(
+                getattr(tool, "name", None) or getattr(tool, "__name__", "")
+                for tool in tools
+            )
+
+    for toolset in kw.get("toolsets") or []:
+        recorrer(toolset)
     return nombres
 
 
@@ -1136,6 +1146,18 @@ def test_la_ruta_windows_sobrevive_al_ruteo_a_bash():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="ruteo de Windows")
+@pytest.mark.parametrize("folder", [
+    r"C:\repo\new-chat", r"C:\repo\Test-Run", "C:/repo/new-chat",
+    r".\new-chat", "./Test-Run", r"C:\work folder\new-chat",
+])
+def test_nombre_de_carpeta_no_es_un_cmdlet(folder):
+    cmd = f'cd "{folder}" && git ls-files | head -3'
+    assert shell_syntax.build_argv(cmd)[1] == "sh"
+    # Un cmdlet real posterior a esa misma ruta mantiene PowerShell.
+    assert shell_syntax.build_argv(f'cd "{folder}"; Get-Date')[1] == "powershell"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ruteo de Windows")
 def test_no_toca_backslashes_que_no_son_ruta():
     r"""Solo se convierte lo que arranca en `X:\`; el resto queda igual.
 
@@ -1160,6 +1182,8 @@ async def test_el_comando_con_ruta_windows_corre(tmp_path):
     """
     # Un repo propio evita depender del propietario del checkout de la suite.
     import subprocess
+    tmp_path = tmp_path / "new-chat"
+    tmp_path.mkdir()
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     (tmp_path / "archivo.txt").write_text("demo\n", encoding="utf-8")
     subprocess.run(["git", "add", "archivo.txt"], cwd=tmp_path, check=True, capture_output=True)
