@@ -16,6 +16,7 @@ estarían testeando una función que podría no hacer nada.
 """
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -29,7 +30,9 @@ from relay import config as relay_config  # noqa: E402
 from relay import tracing  # noqa: E402
 
 _VARS = ("FOURBIS_TRACING", "FOURBIS_TRACING_CONTENT", "LOGFIRE_TOKEN",
-         "OTEL_EXPORTER_OTLP_ENDPOINT", "FOURBIS_ENV")
+         "OTEL_EXPORTER_OTLP_ENDPOINT", "FOURBIS_ENV") + tuple(
+    name for signal in ("TRACES", "METRICS", "LOGS")
+    for name in (f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT", f"OTEL_{signal}_EXPORTER"))
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +50,8 @@ def _entorno_limpio(monkeypatch):
     from pydantic_ai import Agent
     previo = Agent._instrument_default
     for var in _VARS:
+        # Registrar también las ausentes: setup_tracing escribe el entorno.
+        monkeypatch.setenv(var, os.environ.get(var, ""))
         monkeypatch.delenv(var, raising=False)
     relay_config.set_runtime_config({})
     yield
@@ -65,10 +70,7 @@ def test_apagado_por_default():
 def test_prendido_con_el_flag(monkeypatch):
     monkeypatch.setenv("FOURBIS_TRACING", "1")
     relay_config.set_runtime_config({"FOURBIS_TRACING": "1"})
-    try:
-        assert tracing.enabled() is True
-    finally:
-        relay_config.set_runtime_config({})
+    assert tracing.enabled() is True
 
 
 def test_flag_lee_truthy_y_respeta_el_default(monkeypatch):
@@ -122,6 +124,7 @@ def _contenido_con(monkeypatch, _capturado=None, _runtime=None, **env) -> bool:
 def test_contenido_local_requiere_opt_in(monkeypatch):
     """El default apagado del panel también protege las trazas locales."""
     assert _contenido_con(monkeypatch) is False
+    assert _contenido_con(monkeypatch, FOURBIS_TRACING_CONTENT="") is False
     assert _contenido_con(monkeypatch, FOURBIS_TRACING_CONTENT="1") is True
 
 
@@ -131,6 +134,9 @@ def test_contenido_con_collector_propio_requiere_opt_in(monkeypatch):
         monkeypatch,
         LOGFIRE_TOKEN="pylf_v1_xx",
         OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is False
+    assert _contenido_con(
+        monkeypatch, OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318",
+        FOURBIS_TRACING_CONTENT="1") is True
 
 
 def test_contenido_NO_va_al_cloud_por_default(monkeypatch):
@@ -172,6 +178,36 @@ def test_token_con_otlp_no_activa_logfire_cloud(monkeypatch):
         OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318") is False
     assert capturado["send_to_logfire"] is False
     assert capturado["token"] == "synthetic-explicit-token"
+
+
+@pytest.mark.parametrize("collector", ["", "http://127.0.0.1:4318"])
+def test_destino_otlp_usa_config_y_no_el_entorno(monkeypatch, collector):
+    """Un endpoint por señal tampoco puede desviar el collector elegido."""
+    relay_config.set_runtime_config({"FOURBIS_TRACING": "1",
+                                    "OTEL_EXPORTER_OTLP_ENDPOINT": collector})
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://ambient.invalid")
+    for signal in ("TRACES", "METRICS", "LOGS"):
+        monkeypatch.setenv(f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT",
+                           f"https://ambient.invalid/{signal.lower()}")
+        monkeypatch.setenv(f"OTEL_{signal}_EXPORTER", "otlp")
+    captured = {}
+    fake_logfire = types.ModuleType("logfire")
+
+    def configure(**kwargs):
+        captured.update(kwargs)
+        captured["env"] = dict(os.environ)
+
+    fake_logfire.configure = configure
+    monkeypatch.setitem(sys.modules, "logfire", fake_logfire)
+    from pydantic_ai import Agent
+    monkeypatch.setattr(Agent, "instrument_all", lambda *_a, **_k: None)
+    assert tracing.setup_tracing() is True
+    assert captured["send_to_logfire"] is False
+    assert captured["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == collector
+    for signal in ("TRACES", "METRICS", "LOGS"):
+        assert f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT" not in captured["env"]
+        assert captured["env"][f"OTEL_{signal}_EXPORTER"] == (
+            "otlp" if collector else "none")
 
 
 # --- 3. humo: la cadena real escribe un span -------------------------
