@@ -398,3 +398,10 @@ def test_el_mismo_grafo_se_dibuja_siempre_igual():
 def test_un_grafo_con_ciclo_no_tiene_capas():
     with pytest.raises(grafo.GrafoInvalido):
         grafo.capas([n("a", "b"), n("b", "a")])
+
+
+def test_estado_visible_distingue_verificacion_pendiente_de_cierre():
+    nodes = [n("done", estado=HECHO)]
+    assert grafo.estado_visible(nodes, "activo") == "verificacion_pendiente"
+    assert grafo.estado_visible(nodes, "hecho") == "hecho"
+    assert grafo.estado_visible(nodes, "cancelado") == "cancelado"

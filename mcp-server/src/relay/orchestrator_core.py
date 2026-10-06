@@ -88,7 +88,6 @@ async def correr_grafo(
             prog = G.progreso(_nodos(g))
             terminal = prog["estado"] in ("hecho", "fallado")
             if terminal and g.get("estado") != "cancelado":
-                await db.set_task_graph_state(graph_id, prog["estado"])
                 if verificar is not None:
                     # Veredicto y corrección se guardan juntos antes de continuar.
                     if await _verificar_al_cerrar(db, graph_id, g, prog, verificar,
@@ -96,6 +95,8 @@ async def correr_grafo(
                         if on_cambio:
                             await _seguro(on_cambio, await db.get_task_graph(graph_id))
                         continue
+                else:
+                    await db.set_task_graph_state(graph_id, prog["estado"])
             break
     finally:
         # Salir por excepción, por MAX_VUELTAS o por cancelación no puede

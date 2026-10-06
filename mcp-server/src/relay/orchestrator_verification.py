@@ -216,11 +216,9 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
 
     NUNCA lanza por un fallo del verificador o de persistencia.
 
-    El grafo ya terminó su trabajo: que esta etapa falle es una falla de
-    TELEMETRÍA, no del trabajo. Mismo criterio que el `try/except` que
-    envuelve a `sanar` en el boot del server — se registra que falló y el
-    grafo cierra como habría cerrado. Por eso el estado ya está fijado
-    antes de llegar acá.
+    Un error del verificador se registra sin invalidar los nodos terminados.
+    Una interrupción antes de guardar el resultado deja el grafo activo para
+    que Retomar recupere la verificación sin repetir esos nodos.
     """
     payload: dict = {"at": _ahora(), "estado_grafo": prog.get("estado") or "",
                      "verdict": "", "feedback": "", "modelo": "", "error": ""}
@@ -280,6 +278,10 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
         if continued is None:
             await db.set_task_graph_verificacion(
                 graph_id, json.dumps(payload, ensure_ascii=False))
+            await db.run(
+                "UPDATE task_graphs SET estado=?, updated_at=? "
+                "WHERE id=? AND estado <> 'cancelado'",
+                (prog["estado"], _ahora(), graph_id))
         return bool(continued)
     except Exception:  # noqa: BLE001 — ídem: no puede voltear el cierre
         logger.exception("grafo %s: no pude guardar el veredicto y su corrección", graph_id)

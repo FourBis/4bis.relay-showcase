@@ -156,9 +156,15 @@ envía el `resume_prompt` recibido como siguiente turno; responder por sí solo
 no reactiva una tarea bloqueada. Las preguntas vinculadas a nodos mantienen
 su flujo de respuesta y reanudación del grafo.
 
-Reanudar un grafo sin nodos listos o interrumpidos responde 409 y conserva
-su estado y resultados. El error distingue un plan terminado, una decisión
-humana pendiente y un fallo que necesita corrección; no inicia un worker vacío.
+Si el proceso se interrumpe durante la verificación final, el grafo conserva
+`estado: activo` y muestra `estado_visible: verificacion_pendiente`, aunque
+sus nodos estén terminados. **Retomar** (`POST /graphs/{id}/resume`) vuelve a
+verificar sin repetir esos nodos; el arranque por sí solo no lo relanza.
+Una tarea pausada o cancelada sigue protegida por sus controles habituales.
+
+Sin nodos listos, ejecuciones interrumpidas ni verificación pendiente,
+reanudar responde 409 y conserva estado y resultados. El error distingue un
+plan terminado, una decisión humana pendiente y un fallo que necesita corrección.
 
 Cancelar un grafo existente responde 200 con `estado: cancelado`, incluso si
 nadie lo ejecuta tras un reinicio o se repite la petición. No borra sus nodos

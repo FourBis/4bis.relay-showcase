@@ -12,15 +12,21 @@ import { readFileSync } from "node:fs";
 const src = readFileSync(
   new URL("../admin_static/static/chat-grafo.js", import.meta.url), "utf8")
   .replace(/^import .*$/gm, "")
+  .replace(/let estado = null;[^\n]*/, (line) =>
+    `${line}\nexport function __testSetEstado(value) { estado = value; }`)
+  .replace("function pintar(g) {", "export function pintar(g) {")
   .replace(/^/, "const escape = (s) => String(s ?? '').replace(/[&<>]/g,"
          + " (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));\n"
-         + "const $ = () => null; const apiRoot = async () => ({});\n"
+         + "const document = {querySelectorAll: () => []};\n"
+         + "const $ = (id) => globalThis.__chatGrafoDom?.get(id) || null;\n"
+         + "const apiRoot = async () => ({});\n"
+         + "const setInterval = () => 1; const clearInterval = () => {};\n"
          + "const toast = () => {}; const confirmModal = async () => false;\n");
 
 const mod = await import(
   "data:text/javascript;base64," + Buffer.from(src).toString("base64"));
 const { svgDelGrafo, resumenTexto, envolver, cronometro,
-        arranqueMasViejo } = mod;
+        arranqueMasViejo, pintar } = mod;
 
 // ---- helpers ----
 
@@ -285,5 +291,30 @@ function xs(svg) {
 assert.equal(resumenTexto({ total: 5, hechos: 2, corriendo: 1 }),
              "2/5 hechas · 1 corriendo");
 assert.equal(resumenTexto({ total: 5, hechos: 2 }), "2/5 hechas");
+
+// Un grafo con tareas terminadas puede seguir activo si quedó pendiente
+// la verificación: esa diferencia habilita el control de recuperación.
+{
+  const dom = new Map();
+  const element = () => ({ hidden: false, textContent: "", className: "",
+    dataset: {}, style: {}, innerHTML: "" });
+  for (const id of ["#chat-grafo", "#chat-grafo-estado", "#chat-grafo-seguir"])
+    dom.set(id, element());
+  globalThis.__chatGrafoDom = dom;
+  const pintarCaso = (g) => {
+    mod.__testSetEstado({ graphId: g.id, vista: "grafo", zoom: 0, sel: null });
+    pintar(g);
+    return { badge: dom.get("#chat-grafo-estado").textContent,
+      resumeHidden: dom.get("#chat-grafo-seguir").hidden };
+  };
+  const pending = { id: "g", estado: "activo", estado_visible: "verificacion_pendiente",
+    progreso: { estado: "hecho", total: 1, hechos: 1 }, corriendo: false, tasks: [] };
+  assert.deepEqual(pintarCaso(pending),
+    { badge: "verificación pendiente", resumeHidden: false });
+  assert.equal(pintarCaso({ ...pending, corriendo: true }).resumeHidden, true);
+  assert.equal(pintarCaso({ ...pending, estado: "hecho", estado_visible: "hecho" }).resumeHidden, true);
+  assert.equal(pintarCaso({ ...pending, sintetico: true }).resumeHidden, true);
+  delete globalThis.__chatGrafoDom;
+}
 
 console.log("chat-grafo: ok");

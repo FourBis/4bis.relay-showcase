@@ -391,3 +391,90 @@ async def test_interrupcion_no_persiste_veredicto_sin_su_correccion(db, monkeypa
     persisted = await db.get_task_graph("g")
     assert persisted["verificacion_json"] is None
     assert len(persisted["tasks"]) == 1
+
+
+async def test_interrupcion_del_verificador_conserva_el_grafo_recuperable(db):
+    runs = []
+    checks = 0
+
+    async def execute(task):
+        runs.append(task["id"])
+        return {"ok": True}
+
+    async def verify(**_):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise asyncio.CancelledError
+        return verdict() if checks == 2 else {"verdict": "complete"}
+
+    with pytest.raises(asyncio.CancelledError):
+        await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    persisted = await db.get_task_graph("g")
+    assert persisted["estado"] == "activo"
+    assert persisted["verificacion_json"] is None
+    assert persisted["tasks"][0]["estado"] == grafo.HECHO
+
+    result = await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    assert result["estado"] == (await db.get_task_graph("g"))["estado"] == "hecho"
+    assert runs.count("original") == 1
+    assert len(runs) == 2
+
+
+async def test_veredicto_tardio_no_sobrescribe_cancelacion_del_grafo(db):
+    async def execute(_):
+        return {"ok": True}
+
+    async def verify(**_):
+        await db.set_task_graph_state("g", "cancelado")
+        return {"verdict": "complete"}
+
+    await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    assert (await db.get_task_graph("g"))["estado"] == "cancelado"
+
+
+async def test_resume_http_repite_verificacion_interrumpida_sin_repetir_nodos(monkeypatch):
+    from pathlib import Path
+    from unittest.mock import patch
+    monkeypatch.syspath_prepend(str(Path(__file__).parent))
+    from test_disparador import _Base
+
+    case = _Base()
+    await case.asyncSetUp()
+    try:
+        await case.db.create_task_graph("verify-http", "Verificar", tareas=[
+            {"id": "only-http", "titulo": "Trabajo"}], project_slug="demo")
+        executed, completed = [], []
+        checks = 0
+
+        async def execute(task):
+            executed.append(task["id"])
+            return {"ok": True}
+
+        async def verify(**_):
+            nonlocal checks
+            checks += 1
+            if checks == 1:
+                raise asyncio.CancelledError
+            return {"verdict": "complete"}
+
+        with pytest.raises(asyncio.CancelledError):
+            await orquestador.correr_grafo(case.db, "verify-http", ejecutar=execute,
+                                          verificar=verify)
+
+        async def launch(db, project, graph_id, **_):
+            result = await orquestador.correr_grafo(
+                db, graph_id, ejecutar=execute, verificar=verify)
+            completed.append(result)
+            return result
+
+        with patch.object(orquestador, "lanzar", launch):
+            response = await case.client.post("/graphs/verify-http/resume")
+            assert response.status == 202
+            await case._esperar(lambda: completed)
+            assert (await case.client.post("/graphs/verify-http/resume")).status == 409
+        assert executed == ["only-http"]
+        assert checks == 2
+        assert (await case.db.get_task_graph("verify-http"))["estado"] == "hecho"
+    finally:
+        await case.asyncTearDown()

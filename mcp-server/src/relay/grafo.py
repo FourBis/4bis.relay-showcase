@@ -406,6 +406,8 @@ def estado_visible(nodos: list[Nodo], crudo: str = "") -> str:
     if crudo == "cancelado":
         return crudo
     base = estado_del_grafo(nodos)
+    if nodos and base == "hecho" and crudo == "activo":
+        return "verificacion_pendiente"
     if (base == "activo"
             and any(n.estado == ESPERANDO for n in nodos)
             and not any(n.estado == CORRIENDO for n in nodos)):

@@ -175,7 +175,8 @@ async function refrescar() {
   // primera condición el panel se congelaba justo ahí — el caso que
   // reportó el humano el 30/8: "el proceso siguiente lo hizo bien pero
   // en la UI se refleja mal".
-  if (r.grafo.progreso?.estado === "activo" || r.grafo.corriendo === true) {
+  if (r.grafo.progreso?.estado === "activo" || r.grafo.corriendo === true
+      || r.grafo.estado_visible === "verificacion_pendiente") {
     programar(propio);
   }
 }
@@ -472,12 +473,14 @@ function pintar(g) {
   const evis = g.estado_visible || p.estado;
   const est = $("#chat-grafo-estado");
   if (est) {
-    est.textContent = evis === "esperando_humano" ? "esperando humano"
+    est.textContent = evis === "verificacion_pendiente" ? "verificación pendiente"
+      : evis === "esperando_humano" ? "esperando humano"
       : (evis || "—");
     est.className = "badge " + (
       evis === "hecho" ? "ok" :
       evis === "fallado" ? "err" :
-      (evis === "activo" || evis === "esperando_humano") ? "warn" : "dim");
+      (evis === "activo" || evis === "esperando_humano"
+        || evis === "verificacion_pendiente") ? "warn" : "dim");
   }
   // Verde lo que salió bien, rojo lo que falló o quedó bloqueado.
   const total = p.total || 0;
@@ -516,7 +519,7 @@ function pintar(g) {
   // desde la base los dos se ven igual. En un grafo sintético esos
   // botones no existen: no hay fila en la DB a la que pegarle.
   const vivo = g.corriendo === true;
-  const terminado = p.estado === "hecho";
+  const terminado = p.estado === "hecho" && evis !== "verificacion_pendiente";
   const parar = $("#chat-grafo-parar");
   if (parar) parar.hidden = sintetico || !vivo;
   const seguir = $("#chat-grafo-seguir");
