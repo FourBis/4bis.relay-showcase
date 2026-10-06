@@ -70,6 +70,7 @@ jobs:
           mcp-server/tests/test_tool_timeout.py
           mcp-server/tests/test_db.py
           mcp-server/tests/test_dbtool.py
+          mcp-server/tests/test_crm_digest.py
           mcp-server/tests/test_ui_contrato_experts_run.py
           -q
       - name: Check focused orchestrator autosplit and cancellation
