@@ -2143,13 +2143,19 @@ async function openNewChatDraft() {
   const sel = $("#chat-draft-project");
   if (!sel) { toast("UI de chats no montada (refresca)", "err"); return; }
   const generation = ++chatSelectionGeneration;
-  if (sel.options.length === 0) {
+  try {
     const { projects } = await api("projects");
     if (generation !== chatSelectionGeneration) return;
     sel.innerHTML = projects.filter((p) => p.enabled)
       .map((p) => `<option value="${escape(p.slug)}">${escape(p.slug)}</option>`).join("");
+  } catch (e) {
+    if (generation === chatSelectionGeneration) {
+      toast(`No se pudieron cargar los proyectos: ${e.message}. Vuelve a intentarlo.`, "err");
+    }
+    return;
   }
-  sel.value = $("#chat-project-filter")?.value || sel.options[0]?.value || "";
+  sel.value = $("#chat-project-filter")?.value.trim() || "";
+  if (!sel.value) sel.value = sel.options[0]?.value || "";
   if (!sel.value) { toast("No hay proyectos habilitados", "warn"); return; }
 
   activeChat = {
