@@ -11,13 +11,13 @@ import pytest
 from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import account_oauth, admin_observability, admin_users, identity, native_auth, user_accounts, task_service
+from relay import account_oauth, admin_observability, admin_users, finalization, identity, native_auth, user_accounts, task_service
 from relay.app_state import BG_TASKS_KEY, DB_KEY, NOTIFY_KEY, PROGRESS_KEY, RUNNING_KEY, SKILLS_KEY
 from relay.db import Database
 from relay.server_common import browser_guard, localhost_guard
-from relay.server_conversation_routes import conversations_create
+from relay.server_conversation_routes import conversations_create, conversations_get_messages
 from relay.server_expert_routes import experts_run, experts_cancel, experts_status
-from relay.server_projects import chats_get
+from relay.server_projects import chats_get, chats_get_md
 
 
 @pytest.fixture
@@ -43,10 +43,12 @@ async def auth(tmp_path, monkeypatch):
     app.router.add_get("/admin/api/me", admin_users.api_me)
     app.router.add_get("/admin/api/users", admin_users.api_users_list)
     app.router.add_post("/conversations", conversations_create)
+    app.router.add_get("/conversations/{id}/messages", conversations_get_messages)
     app.router.add_post("/experts/run", experts_run)
     app.router.add_post("/experts/cancel/{chat_id}", experts_cancel)
     app.router.add_get("/experts/status/{chat_id}", experts_status)
     app.router.add_get("/chats/{id}", chats_get)
+    app.router.add_get("/chats/{id}/md", chats_get_md)
     async with TestClient(TestServer(app), cookie_jar=CookieJar(unsafe=True)) as client:
         yield client, db
 
@@ -148,6 +150,62 @@ async def test_personal_session_sets_conversation_requester_not_author(auth, mon
     conversation = await db.get_conversation((await response.json())["id"])
     assert conversation["requested_by"] == "personal@example.test"
     assert conversation["author"] == "spoof@example.test"
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+async def test_agent_reads_durable_result_while_markdown_export_is_pending(
+        auth, monkeypatch, tmp_path, role):
+    client, db = auth
+    await configure(client)
+    await login(client, monkeypatch, email="personal@example.test")
+    if role == "member":
+        await db.set_user_role("backup@example.test", "owner")
+        await db.set_user_role("personal@example.test", role)
+        identity.load_roles(await db.list_users())
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    monkeypatch.setattr("relay.server_conversation_routes.git_flow.is_git_repo",
+                        AsyncMock(return_value=False))
+    monkeypatch.setattr("relay.server_expert_routes._run_expert_bg", AsyncMock())
+
+    created = await client.post("/conversations", json={
+        "project": "demo", "author": "spoof@example.test"})
+    assert created.status == 201, await created.text()
+    conversation_id = (await created.json())["id"]
+    conversation = await db.get_conversation(conversation_id)
+    assert conversation["requested_by"] == "personal@example.test"
+    assert conversation["author"] == "spoof@example.test"
+
+    run = await client.post("/experts/run", json={
+        "target": "demo", "conversation": conversation_id,
+        "user": "consulta recuperable", "source": "api",
+        "author": "spoof@example.test"})
+    assert run.status == 202, await run.text()
+    result_ref = await run.json()
+    assert result_ref["conversation_id"] == conversation_id
+
+    artifact = {"target": "demo", "user": "consulta recuperable",
+                "content": "resultado durable", "error": ""}
+    monkeypatch.setattr(finalization, "export", AsyncMock(return_value=None))
+    await finalization.finish(
+        db, result_ref["id"], artifact=artifact, status="ok",
+        model="test", phase_at_end="finished")
+
+    client.server.app[PROGRESS_KEY].clear()
+    metadata = await (await client.get(f"/chats/{result_ref['id']}")).json()
+    assert metadata["status"] == "ok" and not metadata.get("md_path")
+    assert (await client.get(f"/chats/{result_ref['id']}/md")).status == 404
+
+    response = await client.get(f"/conversations/{conversation_id}/messages")
+    assert response.status == 200, await response.text()
+    messages = (await response.json())["messages"]
+    assistant = next(message for message in messages
+                     if message["role"] == "assistant")
+    assert assistant["content"] == "resultado durable"
+    assert assistant["truncated"] is False
+
+    await client.post("/admin/api/auth/logout", json={})
+    assert (await client.get(
+        f"/conversations/{conversation_id}/messages")).status == 403
 
 
 @pytest.mark.parametrize("role", ["owner", "member"])
