@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
-import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -161,7 +161,13 @@ def test_render_block_format() -> None:
 # ---------- SkillCache (TTL) ----------
 
 
-async def test_cache_refreshes_after_ttl(tmp_path: Path) -> None:
+async def test_cache_refreshes_after_ttl(tmp_path: Path, monkeypatch) -> None:
+    from relay import skills_index, skills_store
+
+    now = [100.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    monkeypatch.setattr(skills_store, "time", clock)
+    monkeypatch.setattr(skills_index, "time", clock)
     cache = SkillCache(skills_dir=tmp_path, ttl_s=0.05)
     # primera vez: vacío (dir no existe)
     assert await cache.get_block() == ""
@@ -176,8 +182,8 @@ async def test_cache_refreshes_after_ttl(tmp_path: Path) -> None:
     # dentro del TTL: cache todavía vacía
     assert await cache.get_block() == ""
 
-    # esperamos a que expire
-    await asyncio.sleep(0.06)
+    # avanzamos el reloj más allá del TTL
+    now[0] += 0.051
     block = await cache.get_block()
     assert "**tdd**" in block
 
