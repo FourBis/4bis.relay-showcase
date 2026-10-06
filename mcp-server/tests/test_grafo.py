@@ -201,7 +201,7 @@ def test_progreso_cuenta_bloqueados_aparte_de_fallados():
     assert p["fallados"] == 1
     assert p["bloqueados"] == 1
     assert p["hechos"] == 1
-    assert p["porcentaje"] == 100      # los tres cerrados
+    assert p["porcentaje"] == 33       # solo uno terminó satisfactoriamente
 
 
 @pytest.mark.parametrize("estado_hijo,estado_grafo,porcentaje,fallados", [
@@ -209,8 +209,8 @@ def test_progreso_cuenta_bloqueados_aparte_de_fallados():
     (PENDIENTE, "activo", 50, 0),
     (CORRIENDO, "activo", 50, 0),
     (grafo.ESPERANDO, "activo", 50, 0),
-    (FALLADO, "fallado", 100, 1),
-    (BLOQUEADO, "fallado", 100, 0),
+    (FALLADO, "fallado", 50, 1),
+    (BLOQUEADO, "fallado", 50, 0),
 ])
 def test_split_cuenta_los_hijos_sin_convertir_el_padre_en_exito(
         estado_hijo, estado_grafo, porcentaje, fallados):

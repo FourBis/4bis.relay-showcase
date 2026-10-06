@@ -86,6 +86,8 @@ jobs:
           mcp-server/tests/test_disparador.py
           mcp-server/tests/test_graph_cancel.py
           mcp-server/tests/test_graph_budget_resume.py
+          mcp-server/tests/test_graph_verification_recovery.py
+          mcp-server/tests/test_grafo.py
           mcp-server/tests/test_graphs_create_dup_guard.py
           mcp-server/tests/test_planificador.py
           -q
