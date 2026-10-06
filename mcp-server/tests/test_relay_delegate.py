@@ -124,7 +124,7 @@ def test_transient_poll_timeout_does_not_resubmit(client, monkeypatch, tmp_path)
     ("ok", "", {}, 1),
     ("ok", "   ", {}, 1),
     ("ok", "Solo resumen", {"verifier_verdict": "needs_more"}, 1),
-    ("ok", "Solo resumen", {"phase_at_end": "no_final_text"}, 1),
+    ("ok", "Solo resumen", {"verifier_verdict": "needs_human"}, 1),
     ("running", "Parcial", {}, 2),
     ("cancelled", "Parcial", {}, 1),
     ("ok", "Entrega concreta", {}, 0),
@@ -136,6 +136,58 @@ def test_resume_requires_finished_nonempty_result(client, monkeypatch, tmp_path,
     monkeypatch.setattr(client, "_req", request)
     assert client.delegate(chat_id="existing-run") == expected
     assert all(call.args[0] == "GET" for call in request.call_args_list)
+
+
+def test_top_level_no_final_text_rejects_success_with_nonempty_response(
+        client, monkeypatch, tmp_path, capsys):
+    chat = result(tmp_path, answer="Entrega recuperada", status="ok")
+    chat["phase_at_end"] = "no_final_text"
+    request = Mock(side_effect=[{"finished": True}, chat])
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate(chat_id="existing-run") == 1
+    assert "Entrega recuperada" in capsys.readouterr().out
+
+
+def test_off_plan_verdict_is_not_success(client, monkeypatch, tmp_path):
+    request = Mock(side_effect=[{"finished": True}, result(
+        tmp_path, stages={"verifier_verdict": "off_plan"})])
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate(chat_id="existing-run") == 1
+
+
+def test_queued_resume_stays_active_without_resubmitting(
+        client, monkeypatch, tmp_path, capsys):
+    request = Mock(return_value=result(tmp_path, status="queued"))
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate(chat_id="existing-run", timeout=0) == 2
+    assert "--resume existing-run" in capsys.readouterr().err
+    assert all(call.args[0] == "GET" for call in request.call_args_list)
+
+
+def test_enabled_command_post_result_prints_text_without_polling(
+        client, monkeypatch, capsys):
+    request = Mock(return_value={"command": "echo", "text": "comando listo"})
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate("demo", "tarea") == 0
+    assert "comando listo" in capsys.readouterr().out
+    assert request.call_count == 1
+
+
+@pytest.mark.parametrize("response", [{"unexpected": "shape"}, [], None,
+                                      {"id": ""}, {"id": 42}, {"id": None}])
+def test_malformed_post_result_without_id_fails_cleanly_without_polling(
+        client, monkeypatch, capsys, response):
+    request = Mock(return_value=response)
+    monkeypatch.setattr(client, "_req", request)
+
+    assert client.delegate("demo", "tarea") == 2
+    output = capsys.readouterr()
+    assert "Traceback" not in output.err
+    assert request.call_count == 1
 
 
 @pytest.mark.parametrize("http_status,polls,expected", [(404, 1, 0), (503, 2, 0), (403, 1, 2)])

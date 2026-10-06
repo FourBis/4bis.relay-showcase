@@ -211,8 +211,10 @@ async def _evidencia_de_los_nodos(db, g: dict) -> str:
 
 
 async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
-                               verificar) -> dict:
-    """Corre la verificación del grafo y la guarda. NUNCA lanza.
+                               verificar, *, allow_continue: bool = True) -> bool:
+    """Guarda la verificación con su corrección; indica si puede continuar.
+
+    NUNCA lanza por un fallo del verificador o de persistencia.
 
     El grafo ya terminó su trabajo: que esta etapa falle es una falla de
     TELEMETRÍA, no del trabajo. Mismo criterio que el `try/except` que
@@ -225,8 +227,7 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
     try:
         previous = json.loads(g.get("verificacion_json") or "{}")
         if isinstance(previous.get("recovery"), dict):
-            # Conservarlo incluso si el proceso cae entre verificar y decidir
-            # la siguiente corrección: un reinicio no reinicia el progreso.
+            # Conservar el progreso acreditado entre pasadas y reinicios.
             payload["recovery"] = previous["recovery"]
     except (TypeError, ValueError, AttributeError):
         pass
@@ -272,12 +273,17 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
                          "el grafo cierra igual", graph_id, e)
         payload["error"] = f"{type(e).__name__}: {e}"[:200]
     try:
-        await db.set_task_graph_verificacion(
-            graph_id, json.dumps(payload, ensure_ascii=False))
+        from .orchestrator_recovery import continue_verification
+
+        continued = await continue_verification(
+            db, graph_id, g, payload, allow_continue=allow_continue)
+        if continued is None:
+            await db.set_task_graph_verificacion(
+                graph_id, json.dumps(payload, ensure_ascii=False))
+        return bool(continued)
     except Exception:  # noqa: BLE001 — ídem: no puede voltear el cierre
-        logger.exception("grafo %s: no pude guardar el veredicto", graph_id)
-        payload["error"] = "No se pudo persistir la verificación; no se inicia corrección."
-    return payload
+        logger.exception("grafo %s: no pude guardar el veredicto y su corrección", graph_id)
+        return False
 
 
 async def _seguro(fn, *a):

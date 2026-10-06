@@ -5,8 +5,10 @@ import { test } from 'node:test';
 
 const source = readFileSync(new URL('../admin_static/static/tab-chats.js', import.meta.url), 'utf8');
 const openDraft = source.match(/async function openNewChatDraft\([^]*?\n}/)[0];
+const sendMessage = source.match(/async function sendCurrentMessage\([^]*?\n}/)[0];
+const createDraft = source.match(/async function createDraftConversation\([^]*?\n}/)[0];
 
-function harness(responses, filter = '') {
+function harness(responses, filter = '', apiRoot = async () => ({})) {
   let options = [], selected = '', calls = 0, opened = 0;
   const ui = new Map();
   const node = (id) => {
@@ -27,11 +29,26 @@ function harness(responses, filter = '') {
     $: (id) => id === '#chat-project-filter' ? { value: filter } : node(id),
     api: async () => { const value = responses[calls++]; if (value instanceof Error) throw value; return value; },
     escape: (s) => s, getEmbeddedConversation: () => '', toast: (message) => node('#toast').textContent = message,
+    apiRoot,
     setTaskWorkspaceContext() {}, showMainView: () => { opened++; }, renderConvList() {}, detachGrafo() {},
-    renderDraftMode() {}, setBusy() {},
+    renderDraftMode() {}, setBusy() {}, matchCommand: () => null, renderSuggestions() {},
+    renderAttachTray() {}, appendOptimisticUser() {}, pokeGrafo: async () => {}, pollChat: async () => {},
+    renderHeader() {}, loadChats() {}, newRequestId: () => 'fake-request-id',
   };
-  runInNewContext(`let chatSelectionGeneration = 0, activeChat, taskPanel; ${openDraft}; this.open = openNewChatDraft; this.state = () => activeChat`, context);
+  runInNewContext(`let chatSelectionGeneration = 0, chatDraftGeneration = 0, activeChat, taskPanel;
+    let pendingAttachments = [], chosenModel = '', chosenStageModels = {};
+    ${openDraft}; ${createDraft}; ${sendMessage};
+    this.open = openNewChatDraft; this.send = sendCurrentMessage;
+    this.state = () => activeChat; this.generation = () => chatSelectionGeneration;
+    this.setBusyState = (busy) => { if (activeChat) activeChat.busy = busy; }`, context);
+  context.setBusy = (busy) => context.setBusyState(busy);
   return { context, select, get calls() { return calls; }, get opened() { return opened; }, node };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((yes) => { resolve = yes; });
+  return { promise, resolve };
 }
 
 const catalog = (slug, enabled = true) => ({ projects: [{ slug, enabled }] });
@@ -61,6 +78,63 @@ test('error de catálogo muestra aviso sin abrir borrador ni rechazar', async ()
   await assert.doesNotReject(h.context.open());
   assert.match(h.node('#toast').textContent, /sin conexión/);
   assert.equal(h.opened, 0); assert.equal(h.context.state(), undefined);
+});
+
+test('fallar al consultar catálogo conserva la generación de selección actual', async () => {
+  const h = harness([new Error('sin conexión')]);
+  const generation = h.context.generation();
+  await h.context.open();
+  assert.equal(h.context.generation(), generation);
+});
+
+test('el envío invalida la apertura beta pendiente y termina en la conversación alfa', async () => {
+  const creation = deferred(), catalogLoad = deferred(), runBodies = [];
+  const h = harness([catalog('alfa'), catalogLoad.promise], '', async (path, options) => {
+    if (path === '/conversations' && options.method === 'POST') {
+      return creation.promise;
+    }
+    if (path === '/experts/run') { runBodies.push(JSON.parse(options.body)); return { id: 'fake-run' }; }
+    return {};
+  });
+  await h.context.open();
+  const opening = h.context.open();
+  h.node('#chat-panel-input').value = 'mensaje del borrador alfa';
+  const sending = h.context.send();
+  await Promise.resolve();
+  catalogLoad.resolve(catalog('beta'));
+  await opening;
+  assert.equal(h.context.state().projectSlug, 'alfa');
+  assert.equal(h.context.state().draft, true);
+  creation.resolve({ id: 'fake-conversation' });
+  await sending;
+  assert.equal(h.context.state().projectSlug, 'alfa');
+  assert.equal(h.context.state().convId, 'fake-conversation');
+  assert.equal(h.context.state().draft, false);
+  assert.equal(h.context.state().pendingUserText, 'mensaje del borrador alfa');
+  assert.equal(runBodies[0].target, 'alfa');
+  assert.equal(runBodies[0].conversation, 'fake-conversation');
+  assert.equal(runBodies[0].user, 'mensaje del borrador alfa');
+});
+
+test('Nuevo durante el POST de creación espera y conserva el borrador enviado', async () => {
+  const creation = deferred();
+  const h = harness([catalog('alfa')], '', async (path, options) => {
+    if (path === '/conversations' && options.method === 'POST') return creation.promise;
+    if (path === '/experts/run') return { id: 'fake-run' };
+    return {};
+  });
+  await h.context.open();
+  h.node('#chat-panel-input').value = 'mensaje alfa';
+  const sending = h.context.send();
+  await Promise.resolve();
+  await h.context.open();
+  assert.equal(h.calls, 1);
+  assert.equal(h.context.state().projectSlug, 'alfa');
+  creation.resolve({ id: 'fake-conversation' });
+  await sending;
+  assert.equal(h.context.state().projectSlug, 'alfa');
+  assert.equal(h.context.state().convId, 'fake-conversation');
+  assert.equal(h.context.state().pendingUserText, 'mensaje alfa');
 });
 
 for (const fails of [false, true]) test(`una respuesta anterior${fails ? ' fallida' : ''} no pisa el borrador nuevo`, async () => {

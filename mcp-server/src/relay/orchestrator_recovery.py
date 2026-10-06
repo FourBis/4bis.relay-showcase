@@ -91,8 +91,10 @@ def _criteria(steps: list[dict], *, done: bool) -> set[str]:
 
 
 async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
-                                *, allow_continue: bool = True) -> bool:
+                                *, allow_continue: bool = True) -> bool | None:
     """Una tarea nueva, sin repetir las anteriores ni reinterpretar sus efectos.
+
+    Devuelve None si no aplica; si persiste, indica si la tarea puede continuar.
 
     Solo se corrige un grafo cuyos nodos cerraron bien. Los fallos de ejecución,
     permisos, cancelación o una pregunta siguen su circuito de recuperación.
@@ -101,10 +103,10 @@ async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
     """
     if (graph.get("estado") == "cancelado" or verdict.get("error")
             or verdict.get("verdict") != "needs_more"):
-        return False
+        return None
     nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in graph["tasks"]]
     if G.estado_del_grafo(nodes) != "hecho":
-        return False
+        return None
 
     correction = verdict.get("plan_correction")
     valid = isinstance(correction, dict)

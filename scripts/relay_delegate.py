@@ -112,6 +112,12 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
               " (¿está corriendo start.ps1?)", file=sys.stderr)
         return 2
 
+    if isinstance(run, dict) and run.get("command") and isinstance(run.get("text"), str):
+        print(run["text"])
+        return 0
+    if not isinstance(run, dict) or not isinstance(run.get("id"), str) or not run["id"]:
+        print("respuesta de Relay sin identificador válido; no se reintenta el envío", file=sys.stderr)
+        return 2
     chat_id = run["id"]
     resume = f"--resume {chat_id}" + (f" --max-tools {max_tools}" if max_tools is not None else "")
     print(f"[delegado a relay] chat_id={chat_id} target={target} "
@@ -158,7 +164,7 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
     except (urllib.error.URLError, TimeoutError):
         print(f"no pude recuperar el resultado; usar {resume}", file=sys.stderr)
         return 2
-    if chat.get("status") == "running":
+    if chat.get("status") in ("queued", "running"):
         print(f"run sigue activo; usar {resume}. No se relanzo.", file=sys.stderr)
         return 2
     if chat.get("status") == "error":
@@ -178,8 +184,8 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
           f"model={chat.get('model')} status={chat.get('status')} "
           f"chat_id={chat_id}", file=sys.stderr)
     stages = chat.get("stages") or {}
-    incomplete = stages.get("verifier_verdict") in ("needs_more", "needs_human") \
-        or stages.get("phase_at_end") == "no_final_text"
+    incomplete = stages.get("verifier_verdict") in ("needs_more", "needs_human", "off_plan") \
+        or chat.get("phase_at_end") == "no_final_text"
     return 0 if chat.get("status") == "ok" and answer and not incomplete else 1
 
 

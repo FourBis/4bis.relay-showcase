@@ -191,7 +191,7 @@ async def test_las_correcciones_comparten_el_cortafuegos_del_grafo(db, monkeypat
     assert "límite global" in graph["tasks"][-1]["error"]
 
 
-async def test_reiniciar_entre_veredicto_y_correccion_conserva_el_freno(db):
+async def test_releer_verificacion_atomica_conserva_el_freno(db):
     from relay.orchestrator_recovery import continue_verification
 
     await db.update_task("original", estado=grafo.HECHO)
@@ -202,14 +202,17 @@ async def test_reiniciar_entre_veredicto_y_correccion_conserva_el_freno(db):
     async def verify(**_):
         return verdict()
 
-    await orquestador._verificar_al_cerrar(
+    assert not await orquestador._verificar_al_cerrar(
         db, "g", await db.get_task_graph("g"), {"estado": "hecho"}, verify)
     # Una nueva lectura desde disco representa un proceso que perdió su estado RAM.
     graph = await db.get_task_graph("g")
     saved = json.loads(graph["verificacion_json"])
     assert saved["recovery"] == checkpoint
+    assert len(graph["tasks"]) == 2
+    assert graph["tasks"][-1]["estado"] == grafo.FALLADO
+    assert "sin avance" in graph["tasks"][-1]["error"]
     assert not await continue_verification(db, "g", graph, saved)
-    assert (await db.get_task_graph("g"))["tasks"][-1]["estado"] == grafo.FALLADO
+    assert await db.get_task_graph("g") == graph
 
 
 @pytest.mark.parametrize("state,task_state,response,error", [
@@ -246,7 +249,7 @@ async def test_sin_veredicto_persistido_no_inicia_correccion(db, monkeypatch):
     async def unavailable(*_):
         raise OSError("disk failure")
 
-    monkeypatch.setattr(db, "set_task_graph_verificacion", unavailable)
+    monkeypatch.setattr(db, "run_tx", unavailable)
     await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
     assert runs == ["original"]
     graph = await db.get_task_graph("g")
@@ -299,7 +302,8 @@ async def test_detener_durante_verificacion_conserva_correccion_sin_ejecutarla(d
         assert len(runs) == 2
 
 
-async def test_pausa_espera_inicio_bajo_lock_y_no_lanza_el_siguiente_nodo(db, monkeypatch):
+@pytest.mark.parametrize("tope", [1, 2])
+async def test_pausa_espera_inicio_bajo_lock_y_no_lanza_el_siguiente_nodo(db, monkeypatch, tope):
     from relay import task_service
 
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": "."})
@@ -332,7 +336,7 @@ async def test_pausa_espera_inicio_bajo_lock_y_no_lanza_el_siguiente_nodo(db, mo
         async with task_service.control_lock(db, "conversation"):
             await db.update_conversation_task("conversation", state="paused")
 
-    runner = asyncio.create_task(orquestador.correr_grafo(db, "g", ejecutar=execute))
+    runner = asyncio.create_task(orquestador.correr_grafo(db, "g", ejecutar=execute, tope=tope))
     pauser = None
     try:
         await asyncio.wait_for(claim_started.wait(), 3)
@@ -363,3 +367,27 @@ async def test_pausa_espera_inicio_bajo_lock_y_no_lanza_el_siguiente_nodo(db, mo
     assert result["estado"] == "activo"
     assert runs == ["original"]
     assert [task["estado"] for task in graph["tasks"]] == [grafo.HECHO, grafo.PENDIENTE]
+
+
+async def test_interrupcion_no_persiste_veredicto_sin_su_correccion(db, monkeypatch):
+    import relay.orchestrator_recovery as recovery
+
+    async def execute(task):
+        return {"ok": True}
+
+    async def verify(**_):
+        return verdict()
+
+    # Simula la caída antes de entrar a la transacción que materializa la corrección.
+    async def interrupted(*_, **__):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(recovery, "continue_verification", interrupted)
+    import relay.orchestrator_core as core
+    if hasattr(core, "continue_verification"):
+        monkeypatch.setattr(core, "continue_verification", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    persisted = await db.get_task_graph("g")
+    assert persisted["verificacion_json"] is None
+    assert len(persisted["tasks"]) == 1

@@ -11,7 +11,6 @@ from typing import Any, Awaitable, Callable, Optional
 from . import config
 from . import grafo as G
 from .orchestrator_verification import _ahora, _seguro, _verificar_al_cerrar
-from .orchestrator_recovery import continue_verification
 
 logger = logging.getLogger("relay.orquestador")
 
@@ -91,11 +90,9 @@ async def correr_grafo(
             if terminal and g.get("estado") != "cancelado":
                 await db.set_task_graph_state(graph_id, prog["estado"])
                 if verificar is not None:
-                    verdict = await _verificar_al_cerrar(db, graph_id, g, prog, verificar)
-                    # Un cierre rechazado sigue en el mismo scheduler, con las
-                    # mismas reservas/permisos y sin relanzar tareas ya hechas.
-                    if await continue_verification(db, graph_id, g, verdict,
-                                                   allow_continue=vueltas < MAX_VUELTAS):
+                    # Veredicto y corrección se guardan juntos antes de continuar.
+                    if await _verificar_al_cerrar(db, graph_id, g, prog, verificar,
+                                                  allow_continue=vueltas < MAX_VUELTAS):
                         if on_cambio:
                             await _seguro(on_cambio, await db.get_task_graph(graph_id))
                         continue
@@ -148,11 +145,11 @@ async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
         cid = g.get("conversation_id")
         # Serializar sólo el inicio con Pausar/Cancelar; los nodos ya lanzados
         # terminan fuera del lock. La corrección pendiente queda para Retomar.
-        async with control_lock(db, cid) if cid else contextlib.nullcontext():
-            stopped = cid and (await db.get_conversation_task(cid)).get("state") in STOPPED
-            candidatos = [] if stopped else G.elegibles(nodos, tope=tope, en_curso=corriendo)
-            # Lanzar lo que se pueda sin pisar archivos ni pasar el tope.
-            for cand in candidatos:
+        candidatos = G.elegibles(nodos, tope=tope, en_curso=corriendo)
+        for cand in candidatos:
+            async with control_lock(db, cid) if cid else contextlib.nullcontext():
+                if cid and (await db.get_conversation_task(cid)).get("state") in STOPPED:
+                    break
                 fila = next(t for t in g["tasks"] if t["id"] == cand.id)
                 # `corriendo` PRIMERO y la reserva después. Al revés queda una
                 # ventana en la que la reserva existe pero la tarea todavía
