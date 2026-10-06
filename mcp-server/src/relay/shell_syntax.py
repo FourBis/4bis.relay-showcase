@@ -13,7 +13,10 @@ _PS_VERBOS = (
     "Out|Read|Remove|Rename|Resolve|Restart|Select|Set|Sort|Split|Start|"
     "Stop|Tee|Test|Wait|Where|Write"
 )
-_PS_RE = re.compile(r"\b(?:" + _PS_VERBOS + r")-[A-Za-z]\w+", re.I)
+# ponytail: detectar palabras, no componentes de rutas; para sintaxis ambigua
+# el caller puede elegir shell_kind explícito en lugar de ampliar el parser.
+_PS_RE = re.compile(
+    r"(?<![\w./\\-])(?:" + _PS_VERBOS + r")-[A-Za-z]\w+(?![\w./\\-])", re.I)
 #: Lo que delata PowerShell sin ser un cmdlet.
 _PS_OTRAS = ("-erroraction", "$env:", "$psversiontable", ".ps1", "|%", "| %")
 
