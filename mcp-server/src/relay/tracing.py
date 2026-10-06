@@ -48,6 +48,7 @@ Instalar: pip install logfire      (o: pip install -e "mcp-server[tracing]")
 from __future__ import annotations
 
 import logging
+import os
 
 logger = logging.getLogger("relay.tracing")
 
@@ -97,6 +98,12 @@ def setup_tracing() -> bool:
     incluir_contenido = _flag("FOURBIS_TRACING_CONTENT", default=False)
 
     try:
+        # ponytail: el SDK es global y se configura al arrancar; cambiar el
+        # destino en caliente requeriría reiniciar sus exporters.
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = otlp
+        for signal in ("TRACES", "METRICS", "LOGS"):
+            os.environ.pop(f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT", None)
+            os.environ[f"OTEL_{signal}_EXPORTER"] = "otlp" if otlp else "none"
         logfire.configure(
             service_name=SERVICE_NAME,
             environment=config.get("FOURBIS_ENV"),
