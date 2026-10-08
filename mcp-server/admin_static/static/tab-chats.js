@@ -47,6 +47,7 @@ let modelCatalog = [];
 let chosenModel = globalThis.localStorage?.getItem("chat.model") || "";
 let chatObjectBackWired = false;
 let chatSelectionGeneration = 0;
+let chatDraftGeneration = 0;
 let taskPanel = null;
 
 function newRequestId() {
@@ -1835,6 +1836,7 @@ async function sendCurrentMessage() {
   }
   // Un adjunto sin texto es un mensaje válido ("mirá esta captura").
   if (!text && !pendingAttachments.length) return;
+  ++chatDraftGeneration; // Enviar invalida una apertura de borrador todavía pendiente.
   if (activeChat.busy) { await steerCurrentRun(text); return; }
   inp.value = "";
   renderSuggestions([]);   // pertenecían al turno anterior
@@ -2142,16 +2144,30 @@ async function openNewChatDraft() {
   }
   const sel = $("#chat-draft-project");
   if (!sel) { toast("UI de chats no montada (refresca)", "err"); return; }
-  const generation = ++chatSelectionGeneration;
-  if (sel.options.length === 0) {
+  if (activeChat?.draft && activeChat.busy) {
+    toast("Espera a que se cree la conversación.", "info");
+    return;
+  }
+  const generation = chatSelectionGeneration;
+  const draftGeneration = ++chatDraftGeneration;
+  const current = () => generation === chatSelectionGeneration
+    && draftGeneration === chatDraftGeneration;
+  try {
     const { projects } = await api("projects");
-    if (generation !== chatSelectionGeneration) return;
+    if (!current()) return;
     sel.innerHTML = projects.filter((p) => p.enabled)
       .map((p) => `<option value="${escape(p.slug)}">${escape(p.slug)}</option>`).join("");
+  } catch (e) {
+    if (current()) {
+      toast(`No se pudieron cargar los proyectos: ${e.message}. Vuelve a intentarlo.`, "err");
+    }
+    return;
   }
-  sel.value = $("#chat-project-filter")?.value || sel.options[0]?.value || "";
+  sel.value = $("#chat-project-filter")?.value.trim() || "";
+  if (!sel.value) sel.value = sel.options[0]?.value || "";
   if (!sel.value) { toast("No hay proyectos habilitados", "warn"); return; }
 
+  ++chatSelectionGeneration;
   activeChat = {
     convId: null, projectSlug: sel.value, currentChatId: null,
     busy: false, readOnly: false, draft: true, mode: "change",

@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -19,6 +19,7 @@ from relay.commands import CommandContext, CommandRegistry, UnknownCommand  # no
 from relay.db import Database  # noqa: E402
 from relay.server import DB_KEY, create_app  # noqa: E402
 from relay.sessions import SessionRegistry  # noqa: E402
+from relay import commands  # noqa: E402
 
 SEED_COMMANDS = [
     {"name": "sesiones", "description": "lista sesiones",
@@ -62,6 +63,97 @@ async def test_dispatch_ok_y_log(db):
     assert "demo" in text
     logs = await db.run("SELECT * FROM command_logs")
     assert len(logs) == 1 and logs[0]["status"] == "ok"
+
+
+@pytest.mark.parametrize("name,results,verbs,success,diagnostic", [
+    ("build", [(1, "error CS1000: build diagnóstico")], ["build"], False, "build FALLÓ"),
+    ("test", [(1, "Failed! - Failed: 1")], ["test"], False, "tests FALLARON"),
+    ("build_test", [(1, "error CS1000: build diagnóstico")], ["build"], False, "build FALLÓ"),
+    ("build_test", [(0, "build ok"), (1, "Failed! - Failed: 1")],
+     ["build", "test"], False, "tests FALLARON"),
+    ("build", [(0, "")], ["build"], True, "build OK"),
+    ("test", [(0, "Passed! - Failed: 0")], ["test"], True, "tests OK"),
+    ("build_test", [(0, ""), (0, "Passed! - Failed: 0")],
+     ["build", "test"], True, "tests OK"),
+])
+async def test_dotnet_commands_log_real_success_and_raise_on_nonzero(
+        db, name, results, verbs, success, diagnostic):
+    await db.upsert_command({
+        "name": name, "description": name,
+        "handler": f"relay.commands.{name}", "args_schema": None})
+    registry = CommandRegistry(db)
+    await registry.load_from_db()
+    ctx = CommandContext(db=db, sessions=SessionRegistry(),
+                         source="test", author="tester")
+    run_dotnet = AsyncMock(side_effect=results)
+
+    with patch("relay.commands._run_dotnet", run_dotnet):
+        if success:
+            response = await registry.dispatch(name, {"project": "demo"}, ctx)
+        else:
+            with pytest.raises(RuntimeError) as error:
+                await registry.dispatch(name, {"project": "demo"}, ctx)
+            response = str(error.value)
+
+    assert [call.args[0] for call in run_dotnet.call_args_list] == verbs
+    assert diagnostic in response
+    logs = await db.run(
+        "SELECT status, response FROM command_logs WHERE command_name=?", (name,))
+    assert len(logs) == 1
+    assert logs[0]["status"] == ("ok" if success else "error")
+    assert diagnostic in logs[0]["response"]
+
+
+@pytest.mark.parametrize("name", ["memoria", "fact"])
+async def test_project_queries_reject_missing_project(db, name):
+    handler = getattr(commands, name)
+    ctx = CommandContext(db=db, sessions=SessionRegistry())
+    with pytest.raises(ValueError, match="missing"):
+        await handler({"target": "missing"}, ctx)
+
+
+async def test_project_queries_keep_valid_empty_results(db):
+    ctx = CommandContext(db=db, sessions=SessionRegistry())
+    assert "Sin memoria previa" in await commands.memoria({"target": "demo"}, ctx)
+    assert "Sin hechos registrados" in await commands.fact({"target": "demo"}, ctx)
+
+
+async def test_compact_failure_is_an_error(db, monkeypatch):
+    conversation = {"id": "conversation-1", "messages_json": "[{}]"}
+    monkeypatch.setattr(commands, "_open_conversation",
+                        AsyncMock(return_value=conversation))
+    compact = AsyncMock(return_value={"ok": False, "error": "compactación fallida"})
+    with patch("relay.server.compact_live_conversation", compact):
+        with pytest.raises(RuntimeError, match="compactación fallida"):
+            await commands.compactar(
+                {"target": "demo"}, CommandContext(db=db, sessions=SessionRegistry()))
+    compact.assert_awaited_once_with(db, conversation)
+
+
+async def test_compact_active_run_is_an_error_and_skips_compaction(db, monkeypatch):
+    conversation = {"id": "conversation-1", "messages_json": "[{}]"}
+    monkeypatch.setattr(commands, "_open_conversation",
+                        AsyncMock(return_value=conversation))
+    monkeypatch.setattr(db, "list_chats", AsyncMock(return_value=[
+        {"conversation_id": "conversation-1"}]))
+    compact = AsyncMock()
+    with patch("relay.server.compact_live_conversation", compact):
+        with pytest.raises(RuntimeError, match="run en curso"):
+            await commands.compactar(
+                {"target": "demo"}, CommandContext(db=db, sessions=SessionRegistry()))
+    compact.assert_not_awaited()
+
+
+async def test_compact_without_history_stays_a_valid_noop(db, monkeypatch):
+    conversation = {"id": "conversation-1", "messages_json": ""}
+    monkeypatch.setattr(commands, "_open_conversation",
+                        AsyncMock(return_value=conversation))
+    compact = AsyncMock()
+    with patch("relay.server.compact_live_conversation", compact):
+        result = await commands.compactar(
+            {"target": "demo"}, CommandContext(db=db, sessions=SessionRegistry()))
+    assert "sin historial que compactar" in result
+    compact.assert_not_awaited()
 
 
 async def test_ayuda_sale_de_la_db(db):
@@ -201,7 +293,26 @@ async def test_bang_en_el_chat_corre_el_comando(env):
     body = await r.json()
     assert body["command"] == "proyectos"
     assert "demo" in body["text"]
+    assert body["ok"] is True
     assert "id" not in body                      # no se creó chat
+
+
+@pytest.mark.parametrize("error", [ValueError("argumento inválido"),
+                                    RuntimeError("fallo del comando")])
+async def test_bang_comando_error_reporta_ok_false(env, monkeypatch, error):
+    cli = env
+
+    async def fail_dispatch(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(CommandRegistry, "dispatch", fail_dispatch)
+    r = await cli.post("/experts/run", json={
+        "target": "demo", "user": "!proyectos", "source": "ui"})
+    assert r.status == 200
+    body = await r.json()
+    assert body["command"] == "proyectos"
+    assert body["ok"] is False
+    assert "falló" in body["text"]
 
 
 async def test_bang_desconocido_sigue_al_experto(env):
