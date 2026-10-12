@@ -1,13 +1,13 @@
 # Setup local
 
-Esta guía cubre el arranque local en Windows con PowerShell. Python 3.11 o posterior es requisito; la portabilidad a otros sistemas no está validada.
+Esta guía cubre el arranque local en Windows con PowerShell. Se recomienda Python 3.15; la compatibilidad mínima sigue siendo 3.11 y la portabilidad a otros sistemas no está validada.
 
 ## 1. Crear el entorno
 
 Desde la raíz del repositorio:
 
 ```powershell
-python -m venv .\mcp-server\.venv
+py -3.15 -m venv .\mcp-server\.venv
 & ".\mcp-server\.venv\Scripts\Activate.ps1"
 python -m pip install --upgrade pip
 python -m pip install -e '.\mcp-server[dev]'
