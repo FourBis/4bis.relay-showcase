@@ -120,7 +120,7 @@ async def test_revoked_actor_and_read_only_project_never_sync(workflow, monkeypa
     monkeypatch.setattr(issue_sync, "refresh", refresh)
     await task_service.poll_issue_sync(db, await db.get_project("demo"), cid)
     refresh.assert_not_awaited()
-    assert "acceso" in (await db.get_conversation_task(cid))["issue_sync_error"]
+    assert "acceso" in (await issue_sync.snapshot(db, cid))["error"]
     await db.update_conversation_task(cid, issue_sync_next_poll_at=0)
     await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True,
                              "issue_sync_policy": {"enabled": True}}})
