@@ -57,6 +57,9 @@ async def run_expert_staged(
     el verificador tienen su propio interruptor,
     `defaults_json.documenter=False` y `defaults_json.verifier=False`.
 
+    `existing_plan` reutiliza un plan ya autorizado sin consultar al
+    planificador. Conserva los límites y reintentos configurados.
+
     Costo: hasta TRES turnos extra por run. Con un modelo económico son
     ~1-3s cada uno, menos del 10% en runs de 30s+. Pero si las
     variables FOURBIS_*_MODEL quedan vacías, estas etapas corren con el
@@ -73,6 +76,7 @@ async def run_expert_staged(
             and not project.get("_task_id"):
         project = await resolved_project(db, project, kwargs["conversation_id"])
     defaults = project.get("defaults_json") or {}
+    existing_plan = kwargs.pop("existing_plan", None)
     kwargs.setdefault("image_artifacts", {})
     limite_pedido = min(kwargs.get("deadline_pedido") or float("inf"),
         time.monotonic() + float(defaults.get("request_timeout") or config.expert_request_timeout_s()))
@@ -115,17 +119,20 @@ async def run_expert_staged(
     es_continuacion = is_followup and expert_planning._es_continuacion(user)
     stage_errors: dict[str, str] = {}
     planner_toolsets: list[Any] = []
-    if defaults.get("planner_reasoning", True) and not es_continuacion:
-        planner_toolsets = await expert_planning._reasoning_toolset(
-            kwargs.get("db"), project, kwargs.get("mcp_pool"))
-    plan, planner_usage, planner_err = await expert_stages._run_planner(
-        user=user, project=project, model_spec=planner_spec,
-        ponytail=ponytail, on_progress=on_progress,
-        is_followup=is_followup, es_continuacion=es_continuacion,
-        history_recap=expert_planning._history_recap(history_json),
-        toolsets=planner_toolsets,
-        deadline=limite_pedido,
-    )
+    if existing_plan is not None:
+        plan, planner_usage, planner_err = str(existing_plan), {}, ""
+    else:
+        if defaults.get("planner_reasoning", True) and not es_continuacion:
+            planner_toolsets = await expert_planning._reasoning_toolset(
+                kwargs.get("db"), project, kwargs.get("mcp_pool"))
+        plan, planner_usage, planner_err = await expert_stages._run_planner(
+            user=user, project=project, model_spec=planner_spec,
+            ponytail=ponytail, on_progress=on_progress,
+            is_followup=is_followup, es_continuacion=es_continuacion,
+            history_recap=expert_planning._history_recap(history_json),
+            toolsets=planner_toolsets,
+            deadline=limite_pedido,
+        )
     if planner_err:
         stage_errors["planner"] = planner_err
     if (_db := kwargs.get("db")) is not None and kwargs.get("chat_id") \
@@ -136,7 +143,8 @@ async def run_expert_staged(
                 ensure_ascii=False))
         except Exception as _e:  # noqa: BLE001
             logger.debug("no pude adelantar el plan a la DB: %r", _e)
-    signal = expert_planning._plan_signal(plan)
+    signal = ("existing" if existing_plan is not None
+              else expert_planning._plan_signal(plan))
     trivial = signal == "trivial"
 
     if not signal and plan.strip() and not expert_planning._plan_utilizable(plan):

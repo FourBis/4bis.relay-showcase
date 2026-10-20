@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from .pr_text import neutralize_gh_pr_create_body
+
 logger = logging.getLogger("relay.git_flow")
 
 _GIT_NETWORK = frozenset({"fetch", "push", "pull", "clone", "ls-remote", "submodule"})
@@ -93,6 +95,8 @@ async def _exec(repo: str, program: str, *args: str,
                 timeout: float = GH_TIMEOUT_S) -> tuple[int, str]:
     """Como _git pero para cualquier programa (p.ej. `gh`). Sin shell: cada
     arg va literal, así el título/body del PR no necesitan escaping."""
+    if program == "gh" and args[:2] == ("pr", "create"):
+        args = neutralize_gh_pr_create_body(args)
     try:
         env = None
         if program == "gh":

@@ -1068,7 +1068,7 @@ const FLAG_GRUPOS = [
   ["Tools", ["native_files", "native_shell", "sql_tools"]],
   ["Permisos de archivo", ["read_only", "sandbox", "rutas_extra",
                            "rutas_vedadas"]],
-  ["Etapas del runner", ["three_stage", "verifier", "documenter"]],
+  ["Etapas del runner", ["three_stage", "verifier", "graph_verifier", "documenter"]],
   // Cada etapa con su modelo. El planificador y el documentador son
   // turnos cortos: correrlos con el modelo pesado del ejecutor era tirar
   // tokens, y hasta ahora solo se podía cambiar por SQL.

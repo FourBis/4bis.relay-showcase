@@ -178,6 +178,8 @@ _PROJECT_FLAGS: dict = {
     "three_stage": ("bool", True,
                     "Runner por etapas (planner → executor → verifier)"),
     "verifier": ("bool", True, "Etapa de verificación"),
+    "graph_verifier": ("bool", True,
+                       "Verificar los criterios de cada nodo del grafo antes de aceptarlo"),
     "documenter": ("bool", True, "Etapa de documentación"),
     "inject_skills": ("bool", True, "Inyectar skills en el prompt"),
     # 2026-08-20. Apagado por default porque cuesta tokens en CADA

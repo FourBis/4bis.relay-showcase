@@ -14,10 +14,23 @@ _RESUME_NOTICE = (
     "trabajo ya terminado ni efectos externos; si un efecto previo es incierto, "
     "pide la decisión correspondiente.\n\n"
 )
+_OFF_PLAN_NOTICE = (
+    "## Continuación autorizada tras un desvío del plan\n"
+    "Retoma solo los criterios pendientes y corrige el desvío señalado por el "
+    "verificador. Inspecciona los archivos y resultados existentes; conserva "
+    "lo terminado y no repitas efectos externos. Si un efecto previo es incierto, "
+    "pide la decisión correspondiente.\n\n"
+)
+
+
+def _off_plan_failure(error: str) -> bool:
+    """Reconoce el desvío del supervisor y el de la verificación final del nodo."""
+    return (error == "el nodo terminó en 'off_plan'"
+            or error.startswith("el verificador del nodo terminó en 'off_plan':"))
 
 
 async def prepare_graph_resume(db, graph: dict) -> list[str]:
-    """La acción de retomar concede otro intento a los cortes por presupuesto.
+    """Retomar concede otro intento a cortes por presupuesto o desvíos del plan.
 
     Conserva fallos funcionales, preguntas y padres sustituidos. El scheduler
     normal no llama a este helper: no se trata de un reintento automático.
@@ -26,7 +39,8 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
     replaced = G.sustituidos(nodes)
     retry = {t["id"] for t in graph["tasks"]
              if t["id"] not in replaced and t["estado"] == G.FALLADO
-             and G.es_error_de_presupuesto(t.get("error") or "")}
+             and (G.es_error_de_presupuesto(t.get("error") or "")
+                  or _off_plan_failure(t.get("error") or ""))}
     if not retry:
         return []
     states = {n.id: G.PENDIENTE if n.id in retry else n.estado for n in nodes}
@@ -48,7 +62,11 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
         task = by_id[tid]
         detail = task.get("detalle") or ""
         if tid in retry:
-            detail = _RESUME_NOTICE + detail.removeprefix(_RESUME_NOTICE)
+            for notice in (_RESUME_NOTICE, _OFF_PLAN_NOTICE):
+                detail = detail.removeprefix(notice)
+            notice = (_OFF_PLAN_NOTICE if _off_plan_failure(task.get("error") or "")
+                      else _RESUME_NOTICE)
+            detail = notice + detail
         statements.append((
             "UPDATE tasks SET estado=?, error='', ended_at=NULL, detalle=?, "
             "max_intentos=MAX(max_intentos, intentos+1) WHERE id=? AND estado=?",
@@ -63,7 +81,7 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
 
 async def graph_resume_context(db, task: dict) -> tuple[str, str]:
     """Lee el historial anterior antes de asignar el chat del nuevo intento."""
-    if not (task.get("detalle") or "").startswith(_RESUME_NOTICE) or not task.get("chat_id"):
+    if not (task.get("detalle") or "").startswith((_RESUME_NOTICE, _OFF_PLAN_NOTICE)) or not task.get("chat_id"):
         return "", ""
     rows = await db.run("SELECT payload FROM chat_outputs WHERE chat_id=?", (task["chat_id"],))
     history, context = "", ""
@@ -82,6 +100,14 @@ async def graph_resume_context(db, task: dict) -> tuple[str, str]:
         context = ("El intento anterior no conserva un historial de herramientas "
                    "reutilizable. Inspecciona los archivos y vuelve a comprobar "
                    "el estado antes de actuar.\n" + context)
+    previous = await db.get_chat(task["chat_id"])
+    try:
+        stages = json.loads((previous or {}).get("stages_json") or "{}")
+        feedback = str(stages.get("verifier_feedback") or "")[:2000]
+    except (ValueError, TypeError, AttributeError):
+        feedback = ""
+    if feedback:
+        context += "\n\n## Corrección del verificador del intento anterior\n" + feedback
     return history, context
 
 

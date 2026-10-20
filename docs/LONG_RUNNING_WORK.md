@@ -52,9 +52,18 @@ pruebas reproducibles están en `mcp-server/tests/test_orquestador.py`:
 python -m pytest mcp-server/tests/test_orquestador.py -k "split or subdiv or fan_out or flag_apagado or subtarea" -q
 ```
 
-## Retomar un corte de presupuesto
+## Aceptar un nodo y retomar un trabajo interrumpido
 
-Tras un corte por `budget_exceeded` o `budget_split`, **Retomar** concede un
+Cada nodo reutiliza el plan del grafo y pasa por el verificador antes de
+contar como terminado. Solo `complete` acredita sus criterios; un veredicto
+incompleto o ausente conserva el diagnóstico y la evidencia. Una pregunta
+humana pausa el nodo. `defaults_json.graph_verifier=false` conserva el
+ejecutor de un solo turno para los proyectos que lo requieran. Puedes cambiarlo
+en **Flags del proyecto → Etapas del runner → graph_verifier**. Este cambio
+mantiene los límites de ejecución y las rondas configuradas.
+
+Tras un corte por `budget_exceeded`, `budget_split` o un desvío `off_plan`
+del nodo, **Retomar** concede un
 nuevo intento explícito y recupera el historial del nodo antes de abrir otro
 chat. Los nodos terminados y los padres ya sustituidos se conservan. Si el
 historial falta o es inválido, el siguiente intento recibe la instrucción de
@@ -62,6 +71,11 @@ inspeccionar los archivos y comprobar el estado antes de actuar. Las preguntas,
 los fallos funcionales y un veredicto global `off_plan` mantienen sus propios
 controles. El historial orienta la continuación; un efecto externo incierto
 requiere revisión antes de repetirlo.
+
+Al retomar un desvío del nodo también se recupera el feedback persistido
+del verificador. El scheduler no concede ese nuevo intento automáticamente.
+Las pruebas de aceptación usan respuestas simuladas en
+`mcp-server/tests/test_graph_node_acceptance.py`.
 
 La persistencia, la reanudación HTTP y el orden de ejecución se comprueban en
 `mcp-server/tests/test_graph_budget_resume.py` con base temporal y ejecutor
