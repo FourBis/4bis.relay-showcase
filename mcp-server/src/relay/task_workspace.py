@@ -173,6 +173,8 @@ async def _initialize_task(
 ) -> dict:
     """Crea una sola vez el workspace de ``conv_id`` y persiste su estado."""
     existing = await db.get_conversation_task(conv_id)
+    if existing.get("mode") == "external_pr":
+        raise TaskWorkspaceError("Un PR externo solo registra evidencia y revisión; no crea un workspace.")
     upgrading = promote and existing.get("mode") == "read_only" and not read_only
     if upgrading:
         _safe_task_paths(db, project, conv_id, existing)
@@ -291,6 +293,8 @@ async def inspect_workspace(
     task = await db.get_conversation_task(conv_id)
     if not task:
         return {"state": "missing", "error": "conversación sin task_json"}
+    if task.get("mode") == "external_pr":
+        return task
     if task.get("creation_failed") and not task.get("mode"):
         # Falló antes de reservar rama/path: el diagnóstico se conserva,
         # pero `initialize_task` puede reintentar con una política explícita.
@@ -359,6 +363,8 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
     task = await db.get_conversation_task(conv_id)
     if not task:
         return dict(project)
+    if task.get("mode") == "external_pr":
+        raise TaskWorkspaceError("Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.")
     task = await inspect_workspace(db, project, conv_id)
     if task.get("workspace_state") != "ok" or task.get("workspace_error"):
         raise TaskWorkspaceError(

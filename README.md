@@ -153,6 +153,10 @@ Más controles y comportamiento en la [guía del workspace](docs/UI_WORKSPACE.md
 
 ## Una tarea con su propia rama, diff y pull request
 
+En **Chat → Registrar PR externo** puedes vincular una tarea con un PR creado con otra herramienta. Relay separa responsable humano, autor verificado, evidencia declarada, checks y revisión independiente por commit. Un head nuevo vuelve histórica la evidencia anterior; el estado de Relay no bloquea merges en GitHub. Consulta [el recorrido de PR externos](docs/EXTERNAL_PRS.md).
+
+Una tarea de Relay y un PR externo también pueden compartir una issue verificada. El vínculo no declara resolución completa ni activa movimientos: la [sincronización de issue y Projects](docs/ISSUE_SYNC.md) exige una política explícita por proyecto, inicialmente deshabilitada. La demo pública recrea ambos recorridos con datos ficticios, sin solicitudes remotas.
+
 Una conversación de **Cambio con PR** puede mantener su rama y worktree entre mensajes. El pedido, el código, la verificación y la PR comparten una identidad de tarea.
 
 ```mermaid
@@ -194,7 +198,7 @@ flowchart LR
     Revision --> Docs["Documentación y continuidad"]
 ```
 
-**Gestión** muestra tableros de GitHub Projects, su trabajo asociado y proyectos pendientes de vincular. La vista del tablero es de consulta; mover tarjetas se hace en GitHub. El contexto comercial puede ayudar a priorizar una conversación técnica sin volver a reconstruir a qué cliente o proyecto pertenece.
+**Gestión** muestra tableros de GitHub Projects, su trabajo asociado y proyectos pendientes de vincular. La vista del tablero es de consulta; los movimientos manuales se hacen en GitHub. Por separado, una tarea puede sincronizar el estado de su issue y su campo de Projects solo con una política revisada y habilitada. El contexto comercial puede ayudar a priorizar una conversación técnica sin volver a reconstruir a qué cliente o proyecto pertenece.
 
 La integración actual lee empresas, oportunidades y contactos del CRM y conserva vínculos locales. Convertir una oportunidad en una tarea sigue siendo una decisión explícita. La salud de clientes se construye con señales disponibles de seguimiento y trabajo; no demuestra facturación, aceptación ni satisfacción.
 

@@ -302,6 +302,8 @@ async def api_search(request: web.Request) -> web.Response:
         limit = 8
     db = request.app[DB_KEY]
     data = await db.global_search(q, limit=limit)
+    from .external_pr_access import visible_records
+    data["conversations"] = await visible_records(request, db, data["conversations"])
     return web.json_response(data)
 
 _LOG_BUFFER: collections.deque = collections.deque(maxlen=2000)

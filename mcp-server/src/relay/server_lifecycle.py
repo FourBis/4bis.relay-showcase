@@ -278,6 +278,8 @@ async def _on_startup(app: web.Application) -> None:
     app[EXPORT_RETRY_KEY] = asyncio.create_task(_export_retry_loop(app))
     await task_service.recover(db)
     app[task_service.TASK_RUNNERS_KEY] = {}
+    app[task_service.ISSUE_SYNC_RUNNERS_KEY] = {}
+    app[task_service.ISSUE_SYNC_LIMIT_KEY] = asyncio.Semaphore(2)
     app[task_service.TASK_LOOP_KEY] = asyncio.create_task(task_service.loop(app))
     # Opción A: auto-reindex incremental de cbm por file-watcher.
     # Degrada solo (flag off / sin cbm / sin watchdog → no-op con log).

@@ -79,6 +79,24 @@ jobs:
           mcp-server/tests/test_relay_delegate.py
           mcp-server/tests/test_commands.py
           -q
+      - name: Check offline demo states
+        shell: pwsh
+        run: node site/external-demo.test.mjs
+      - name: Check external PR evidence and opt-in issue synchronization
+        shell: pwsh
+        run: >-
+          python -m pytest
+          mcp-server/tests/test_external_pr.py
+          mcp-server/tests/test_external_pr_policy.py
+          mcp-server/tests/test_external_pr_review_regressions.py
+          mcp-server/tests/test_external_pr_safety.py
+          mcp-server/tests/test_external_pr_postmerge.py
+          mcp-server/tests/test_issue_links.py
+          mcp-server/tests/test_issue_sync.py
+          mcp-server/tests/test_issue_sync_github.py
+          mcp-server/tests/test_issue_workflow_integration.py
+          mcp-server/tests/test_github_panel.py
+          -q
       - name: Check focused orchestrator autosplit and cancellation
         shell: pwsh
         run: >-

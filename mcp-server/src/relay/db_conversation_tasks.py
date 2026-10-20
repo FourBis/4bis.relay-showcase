@@ -68,6 +68,9 @@ class DatabaseConversationTasksMixin:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                mode = conn.execute("SELECT json_extract(task_json,'$.mode') FROM conversations WHERE id=?", (conv_id,)).fetchone()
+                if mode and mode[0] == "external_pr":
+                    raise ValueError("Un PR externo no ejecuta eventos de código")
                 existing = conn.execute(
                     "SELECT * FROM conversation_events WHERE conversation_id=? AND event_key=?",
                     (conv_id, event_key)).fetchone()
@@ -113,6 +116,9 @@ class DatabaseConversationTasksMixin:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute("SELECT task_json FROM conversations WHERE id=?", (conv_id,)).fetchone()
                 state = json.loads(row[0] or "{}") if row else {}
+                if isinstance(state, dict) and state.get("mode") == "external_pr":
+                    conn.rollback()
+                    return None
                 if isinstance(state, dict) and state.get("state") in STOPPED:
                     conn.rollback()
                     return None
@@ -208,4 +214,36 @@ class DatabaseConversationTasksMixin:
                 row["task_json"] = json.loads(row.get("task_json") or "{}")
             except json.JSONDecodeError:
                 row["task_json"] = {}
+        return rows
+
+    async def list_task_monitor_conversations(self, now: float) -> list[dict[str, Any]]:
+        """Code tasks plus due external issue sync, without external histories."""
+        rows = await self.run("""
+            WITH tasks AS (
+                SELECT id,project_slug,last_activity_at,
+                       CASE WHEN json_valid(task_json) THEN task_json ELSE '{}' END AS doc
+                FROM conversations WHERE COALESCE(task_json,'{}') <> '{}'
+            ), project_defaults AS (
+                SELECT slug,enabled,
+                       CASE WHEN json_valid(defaults_json) THEN defaults_json ELSE '{}' END AS doc
+                FROM projects
+            )
+            SELECT t.id,t.project_slug,
+                   CASE WHEN json_extract(t.doc,'$.mode')='external_pr' THEN json_object(
+                       'mode','external_pr','issue_link',json_extract(t.doc,'$.issue_link'),
+                       'issue_sync_next_poll_at',COALESCE(json_extract(t.doc,'$.issue_sync_next_poll_at'),0))
+                   ELSE t.doc END AS task_json
+            FROM tasks t JOIN project_defaults p ON p.slug=t.project_slug COLLATE NOCASE
+            WHERE p.enabled=1 AND t.doc <> '{}' AND (
+                COALESCE(json_extract(t.doc,'$.mode'),'') <> 'external_pr' OR (
+                    json_type(p.doc,'$.issue_sync_policy.enabled')='true'
+                    AND COALESCE(json_extract(p.doc,'$.read_only'),0)=0
+                    AND json_type(t.doc,'$.issue_link')='object'
+                    AND json_extract(t.doc,'$.issue_link') <> '{}'
+                    AND COALESCE(json_extract(t.doc,'$.issue_sync_next_poll_at'),0)<=?
+                )
+            ) ORDER BY t.last_activity_at DESC
+            """, (now,))
+        for row in rows:
+            row["task_json"] = json.loads(row["task_json"])
         return rows

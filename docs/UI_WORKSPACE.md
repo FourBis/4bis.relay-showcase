@@ -54,6 +54,14 @@ abiertas en un espacio compartido.
 
 ## Presentación
 
+**Chat → Registrar PR externo** abre un formulario del catálogo autorizado. Su
+vista sustituye el compositor por evidencia por commit, checks, revisión e
+historial; no ofrece ejecución ni diff de un workspace. Las tareas también
+permiten elegir una issue canónica, declarar resolución completa explícitamente
+y consultar la política y los errores de sincronización. Los formularios conservan
+lo escrito tras un fallo y los reintentos no duplican solicitudes en curso.
+Consulta [PR externos](EXTERNAL_PRS.md) e [Issues y Projects](ISSUE_SYNC.md).
+
 Superficies de trabajo sobrias, títulos con jerarquía, tablas sin tarjetas anidadas,
 formularios agrupados y controles secundarios contextuales. El contenido ocupa el
 espacio principal. No hay una nueva grilla de tarjetas de navegación.

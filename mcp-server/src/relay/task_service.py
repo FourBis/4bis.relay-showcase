@@ -16,6 +16,8 @@ from .app_state import (BG_TASKS_KEY, DB_KEY, GRAFOS_KEY, MCP_POOL_KEY,
 logger = logging.getLogger("relay.tasks")
 TASK_RUNNERS_KEY = web.AppKey("task_runners", dict)
 TASK_LOOP_KEY = web.AppKey("task_loop", asyncio.Task)
+ISSUE_SYNC_RUNNERS_KEY = web.AppKey("issue_sync_runners", dict)
+ISSUE_SYNC_LIMIT_KEY = web.AppKey("issue_sync_limit", asyncio.Semaphore)
 STOPPED = {"paused", "cancelled", "finished", "blocked", "cleaned"}
 
 
@@ -38,12 +40,14 @@ def visible_task(task, *, owner=False):
     if owner:
         return task
     fields = ("id", "mode", "state", "workspace_state", "branch", "pr_url",
-              "publish_allowed", "creation_failed", "pending_events", "uncertain_events")
+              "publish_allowed", "creation_failed", "pending_events", "uncertain_events",
+              "issue_number", "resolution_complete")
     result = {key: task[key] for key in fields if key in task}
     for key, allowed in {
         "validation": ("status", "head_sha"),
         "tracking": ("enabled", "iterations", "max_iterations", "tokens", "max_tokens", "expires_at"),
         "last_event": ("id", "state", "chat_id"),
+        "issue_link": ("repo", "repo_id", "number", "node_id", "url", "title", "state", "updated_at"),
     }.items():
         value = task.get(key)
         if isinstance(value, dict):
@@ -74,6 +78,7 @@ async def snapshot(db, conv_id):
     events = await db.list_conversation_events(conv_id, states=["pending", "processing", "uncertain"])
     latest = await db.run("SELECT id, state, chat_id FROM conversation_events WHERE conversation_id=? ORDER BY id DESC LIMIT 1", (conv_id,))
     return {**task, "id": conv_id, "pr_url": (conv or {}).get("pr_url"),
+            "issue_number": (conv or {}).get("issue_number"),
             "last_event": latest[0] if latest else None,
             "error": task.get("cancellation_error") or task.get("workspace_error") or task.get("error") or task.get("tracking_error") or task.get("tracking_stop") or "",
             "branch": (conv or {}).get("branch"),
@@ -83,9 +88,13 @@ async def snapshot(db, conv_id):
 
 async def recover(db):
     """Nunca reenvía una ejecución cuyo resultado no conocemos."""
+    from . import issue_sync
+    await issue_sync.recover(db)
     uncertain = set(await db.recover_conversation_events())
     for conv in await db.list_managed_conversations():
         task = await db.get_conversation_task(conv["id"])
+        if task.get("mode") == "external_pr":
+            continue
         if conv["id"] in uncertain:
             await db.update_conversation_task(
                 conv["id"], state="blocked", error="El proceso se interrumpió con efectos inciertos. "
@@ -100,6 +109,8 @@ async def recover(db):
 
 async def _poll_feedback_bound(db, project, conv_id):
     task = await db.get_conversation_task(conv_id)
+    if task.get("mode") == "external_pr":
+        return
     if task.get("state") in {"paused", "cancelled", "finished", "cleaned"} or not (task.get("tracking") or {}).get("enabled"):
         return
     tracking = task["tracking"]
@@ -157,7 +168,7 @@ async def _drain(app, conv_id):
     try:
         while True:
             state = await db.get_conversation_task(conv_id)
-            if not state or state.get("state") in STOPPED:
+            if not state or state.get("mode") == "external_pr" or state.get("state") in STOPPED:
                 return
             pending = await db.list_conversation_events(conv_id, states=["pending"], limit=1)
             if not pending:
@@ -184,7 +195,7 @@ async def _drain(app, conv_id):
 async def _consume(app, project, conv_id):
     db = app[DB_KEY]
     state = await db.get_conversation_task(conv_id)
-    if state.get("state") in STOPPED:
+    if state.get("mode") == "external_pr" or state.get("state") in STOPPED:
         return False
     event = await db.claim_conversation_event(conv_id)
     if not event:
@@ -303,15 +314,94 @@ async def _run_event(app, project, conv_id, event):
         await task_pr.set_phase(db, conv_id, "ready")
 
 
+async def poll_issue_sync(db, project, conv_id):
+    """Independent of code feedback; disabled policy never wakes a writer.
+
+    The durable due time bounds reads and failures. A fresh project/user check
+    runs again immediately before each external effect in issue_sync.
+    """
+    from . import identity, issue_sync, user_accounts
+
+    task = await db.get_conversation_task(conv_id)
+    policy = (project.get("defaults_json") or {}).get("issue_sync_policy") or {}
+    if (not isinstance(policy, dict) or policy.get("enabled") is not True
+            or not task.get("issue_link") or task.get("mode") not in {"write", "external_pr"}
+            or time.time() < task.get("issue_sync_next_poll_at", 0)):
+        return
+    conv = await db.get_conversation(conv_id)
+    who = (conv or {}).get("requested_by") or task.get("requested_by")
+
+    async def authorize():
+        current = await db.get_project(project["slug"])
+        if (not current or not current.get("enabled", True)
+                or (current.get("defaults_json") or {}).get("read_only")
+                or current.get("repo_path") != project.get("repo_path")):
+            raise RuntimeError("El proyecto ya no está autorizado para sincronizar")
+        if not who:
+            raise RuntimeError("Sin actor solicitante no se sincroniza GitHub")
+        if who != "owner":
+            user = next((u for u in await db.list_users() if u["email"] == who), None)
+            if not user or not identity.user_can_write_project(user, current["slug"]):
+                raise RuntimeError("La cuenta ya no tiene acceso de escritura al proyecto")
+        return current
+
+    # Reserve before IO so an outage or revoked permission cannot spin at 2s.
+    await db.update_conversation_task(conv_id, issue_sync_next_poll_at=time.time() + 60)
+    with user_accounts.bind_actor(db, who):
+        try:
+            current = await authorize()
+            await issue_sync.refresh(db, current, conv_id, who, authorize=authorize)
+            await db.update_conversation_task(conv_id, issue_sync_error="")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await db.update_conversation_task(conv_id, issue_sync_error=str(exc))
+
+
+def start_issue_sync(app, project, conv_id, state):
+    """External IO cannot hold up the code queue; keep at most two in flight."""
+    policy = (project.get("defaults_json") or {}).get("issue_sync_policy") or {}
+    if (not isinstance(policy, dict) or policy.get("enabled") is not True
+            or not state.get("issue_link") or state.get("mode") not in {"write", "external_pr"}
+            or time.time() < state.get("issue_sync_next_poll_at", 0)):
+        return None
+    runners = app.setdefault(ISSUE_SYNC_RUNNERS_KEY, {})
+    if conv_id in runners and not runners[conv_id].done():
+        return runners[conv_id]
+    limit = app.setdefault(ISSUE_SYNC_LIMIT_KEY, asyncio.Semaphore(2))
+
+    async def run():
+        async with limit:
+            await poll_issue_sync(app[DB_KEY], project, conv_id)
+
+    task = asyncio.create_task(run())
+    runners[conv_id] = task
+    pending = app.setdefault(BG_TASKS_KEY, set())
+    pending.add(task)
+
+    def done(completed):
+        if runners.get(conv_id) is completed:
+            runners.pop(conv_id, None)
+        pending.discard(completed)
+        if not completed.cancelled() and completed.exception() is not None:
+            logger.warning("No se pudo completar observación de issue %s", conv_id)
+
+    task.add_done_callback(done)
+    return task
+
+
 async def loop(app):
     db = app[DB_KEY]
     while True:
-        for conv in await db.list_managed_conversations():
+        for conv in await db.list_task_monitor_conversations(time.time()):
             try:
                 project = await db.get_project(conv["project_slug"])
                 if not project or not project.get("enabled"):
                     continue
-                task = await db.get_conversation_task(conv["id"])
+                task = conv["task_json"]
+                start_issue_sync(app, project, conv["id"], task)
+                if task.get("mode") == "external_pr":
+                    continue
                 # El monitor sólo lee GitHub; recibe feedback aun con escritor ocupado.
                 if task.get("workspace_path"):
                     project = {**project, "repo_path": task["workspace_path"]}

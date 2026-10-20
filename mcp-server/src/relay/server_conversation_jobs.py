@@ -76,7 +76,9 @@ async def _finalize_pr_bg_bound(db: Database, conv_id: str, project_slug: str,
                f"run{'' if uso['runs'] == 1 else 's'} — ") if uso["runs"] else ""
     body = ((summary or "").strip() or "Cambios de la conversación de 4bis.relay.") + (
         f"\n\n_Conversación `{conv_id[:8]}` — {trabajo}4bis.relay_")
-    # Referenciar un issue no acredita que esta conversación lo resuelva entero.
+    # A reference is not a complete-resolution declaration. The opt-in issue
+    # synchronizer closes only after it verifies all linked PRs and the human
+    # declaration; a legacy finalizer must not bypass those conditions.
     if issue_number:
         body += f"\n\nRelacionado con #{issue_number} (sin cierre automático)."
     body = neutralize_issue_closing_keywords(body)

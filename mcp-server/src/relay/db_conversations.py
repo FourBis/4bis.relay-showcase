@@ -77,6 +77,7 @@ class DatabaseConversationsMixin:
             "ON p.slug=c.project_slug COLLATE NOCASE WHERE c.status='open' "
             "AND COALESCE(json_extract(c.task_json, '$.workspace_path'), '') = '' "
             "AND COALESCE(json_extract(c.task_json, '$.creation_failed'), 0) = 0 "
+            "AND COALESCE(json_extract(c.task_json, '$.mode'), '') <> 'external_pr' "
             "ORDER BY c.started_at DESC")
         key = workspace_key(project)
         return next((r for r in rows if workspace_key(
@@ -91,7 +92,8 @@ class DatabaseConversationsMixin:
         mismo repo (un solo working tree → pelearían por la rama activa)."""
         rows = await self.run(
             "SELECT * FROM conversations WHERE project_slug=? COLLATE NOCASE "
-            "AND status='open' ORDER BY started_at DESC LIMIT 1",
+            "AND status='open' AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
+            "ORDER BY started_at DESC LIMIT 1",
             (project_slug,))
         return rows[0] if rows else None
 
@@ -312,6 +314,7 @@ class DatabaseConversationsMixin:
         return await self.run(
             "SELECT id, project_slug, messages_json FROM conversations "
             "WHERE status='open' AND last_activity_at < ? "
+            "AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
             "AND COALESCE(json_extract(task_json, '$.workspace_path'), '') = ''", (cutoff,))
 
     # ---- facts (ADR-026: hechos atómicos, append-only + supersede soft) ----

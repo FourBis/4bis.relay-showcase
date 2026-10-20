@@ -153,6 +153,10 @@ More controls and behavior are described in the [workspace guide](docs/UI_WORKSP
 
 ## A task with its own branch, diff, and pull request
 
+In **Chat → Registrar PR externo**, link a task to a PR created with another tool. Relay separates the responsible person, verified author, declared evidence, checks and independent review by commit. A new head makes previous evidence historical; Relay state does not block GitHub merges. See [the external PR workflow](docs/EXTERNAL_PRS.en.md).
+
+A Relay task and an external PR can also share a verified issue. Linking it neither declares complete resolution nor enables remote changes: [issue and Projects synchronization](docs/ISSUE_SYNC.en.md) requires an explicit per-project policy, disabled initially. The public demo recreates both workflows with fictional data and no remote requests.
+
 A **Change with PR** conversation can keep its branch and worktree between messages. The request, code, verification, and PR share a task identity.
 
 ```mermaid
@@ -194,7 +198,7 @@ flowchart LR
     Review --> Docs["Documentation and continuity"]
 ```
 
-**Management** shows GitHub Projects boards, their associated work, and projects awaiting a link. The board view is read-only; move cards in GitHub. Commercial context can help prioritize a technical conversation without reconstructing which client or project it belongs to.
+**Management** shows GitHub Projects boards, their associated work, and projects awaiting a link. The board view is read-only; manual card moves happen in GitHub. Separately, a task can synchronize its issue state and Projects field only with a reviewed, enabled policy. Commercial context can help prioritize a technical conversation without reconstructing which client or project it belongs to.
 
 The current integration reads companies, opportunities, and contacts from the CRM and stores links locally. Turning an opportunity into a task remains an explicit decision. Client health is built from available tracking and work signals; it does not prove billing, acceptance, or satisfaction.
 

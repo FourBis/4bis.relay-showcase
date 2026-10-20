@@ -12,11 +12,12 @@ from . import coordination
 from . import experts
 from . import finalization
 from . import git_flow
-from . import github as github_mod
 from . import identity
+from . import issue_links
 from . import persist
 from . import task_service, task_workspace
 from .db import Database
+from .user_accounts import AccountError
 from .server_conversation_helpers import _cap_text, _steps_from_progress
 @_require_auth
 @coordination.guard_workspace(DB_KEY)
@@ -72,6 +73,22 @@ async def conversations_create(request: web.Request) -> web.Response:
         publish_allowed = False
     if project["slug"].lower() == "notes":
         read_only, publish_allowed = True, False
+    issue_value = body.get("issue")
+    completion = body.get("resolution_complete")
+    async def authorize_issue():
+        current = await db.get_project(project["slug"])
+        if not identity.can_write_project(request, current):
+            raise web.HTTPForbidden(text='{"error":"Proyecto no autorizado para tu cuenta"}', content_type="application/json")
+        return current
+    if completion is not None and (type(completion) is not bool or issue_value is None):
+        return web.json_response({"error": "resolution_complete requiere issue y debe ser booleano"}, status=400)
+    if issue_value is not None and not identity.can_write_project(request, project):
+        return web.json_response({"error": "Proyecto no autorizado para tu cuenta"}, status=403)
+    if issue_value is not None:
+        try:
+            issue_links.reference(issue_value)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
     is_git = await git_flow.is_git_repo(project.get("repo_path") or "")
     if not is_git:
         read_only, publish_allowed = True, False
@@ -81,6 +98,14 @@ async def conversations_create(request: web.Request) -> web.Response:
     wanted_id = (str(uuid.uuid5(uuid.NAMESPACE_URL, f"relay:{project['slug']}:{request_id}"))
                  if request_id else None)
     if wanted_id and (previous := await db.get_conversation(wanted_id)):
+        if issue_value is not None:
+            try:
+                await issue_links.bind(db, project, wanted_id, issue_value, identity.requester(request),
+                                       resolution_complete=completion, authorize=authorize_issue)
+            except AccountError:
+                raise
+            except (ValueError, RuntimeError, OSError) as exc:
+                return web.json_response({"error": str(exc), "conversation_id": wanted_id}, status=422)
         return web.json_response({"id": wanted_id, "project_slug": project["slug"],
                                   "status": previous["status"], "branch": previous.get("branch")}, status=200)
     # Iter 10.0: bridge Discord↔UI. Si el bot C# crea una conversación
@@ -117,24 +142,20 @@ async def conversations_create(request: web.Request) -> web.Response:
              "branch": existing.get("branch")},
             status=409)
 
-    # Seguimiento por GitHub (fase 4): `issue: N` ata la conversación a un
-    # issue. Se valida ACÁ contra GitHub — una conversación atada a un
-    # issue inexistente después abre un PR con un `Closes #N` que no
-    # cierra nada, y eso se descubre tarde y a mano.
-    issue_number = body.get("issue")
-    if issue_number is not None:
-        if isinstance(issue_number, bool) or not isinstance(issue_number, int):
-            return web.json_response(
-                {"error": "issue debe ser un entero"}, status=400)
-        slug_gh = await github_mod.repo_slug(project["repo_path"] or "")
-        if not slug_gh:
-            return web.json_response(
-                {"error": "el repo no tiene remote de GitHub: no puedo atar "
-                          "la conversación a un issue"}, status=422)
-        if await github_mod.issue(slug_gh, issue_number) is None:
-            return web.json_response(
-                {"error": f"issue #{issue_number} no existe en {slug_gh} "
-                          f"(o `gh` no está autenticado)"}, status=404)
+    # Verificar la identidad del issue antes de crear conversación o workspace.
+    # El vínculo por sí solo no autoriza su cierre ni cambios de Projects.
+    issue_number, resolved_issue = None, None
+    if issue_value is not None:
+        try:
+            from .external_pr import actor_identity
+            await actor_identity(identity.requester(request))
+            resolved_issue = await issue_links.resolve(project, issue_value)
+            project = await issue_links.authorize_project(project, identity.requester(request), authorize_issue)
+            issue_number = resolved_issue["number"]
+        except AccountError:
+            raise
+        except (ValueError, RuntimeError, OSError) as exc:
+            return web.json_response({"error": str(exc)}, status=422)
 
     conv_id = await db.create_conversation(
         project_slug=project["slug"], discord_thread_id=thread_id,
@@ -151,8 +172,15 @@ async def conversations_create(request: web.Request) -> web.Response:
         except (RuntimeError, OSError) as exc:
             return web.json_response({"error": str(exc), "conversation_id": conv_id}, status=422)
     branch, base_branch = task.get("branch"), "develop" if not read_only else None
-    if issue_number is not None:
-        await db.set_conversation_issue(conv_id, issue_number)
+    if resolved_issue is not None:
+        try:
+            await issue_links.bind(db, project, conv_id, issue_value, identity.requester(request),
+                                   resolution_complete=completion, authorize=authorize_issue,
+                                   _resolved=resolved_issue)
+        except AccountError:
+            raise
+        except (ValueError, RuntimeError, OSError) as exc:
+            return web.json_response({"error": str(exc), "conversation_id": conv_id}, status=422)
     logger.info("conversación creada id=%s project=%s thread=%s branch=%s "
                 "discord_user=%s issue=%s",
                 conv_id[:8], project["slug"], thread_id, branch,
@@ -175,6 +203,8 @@ async def conversations_list(request: web.Request) -> web.Response:
         project_slug=request.query.get("project") or None,
         status=request.query.get("status") or None,
         limit=limit)
+    from .external_pr_access import visible_records
+    items = await visible_records(request, db, items)
     if identity.role_of(request) != identity.OWNER_ROLE:
         items = [{**item, "task_json": json.dumps(task_service.visible_task(item.get("task_json")))}
                  for item in items]

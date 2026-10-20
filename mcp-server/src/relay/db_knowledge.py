@@ -222,6 +222,8 @@ class DatabaseKnowledgeMixin:
                         "SELECT conversation_id, project_slug, summary, "
                         "bm25(memories_fts) AS rank FROM memories_fts "
                         "WHERE memories_fts MATCH ? AND project_slug=? "
+                        "AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id=memories_fts.conversation_id "
+                        "AND COALESCE(json_extract(c.task_json, '$.mode'), '') = 'external_pr') "
                         "ORDER BY rank LIMIT ?",
                         (match, project_slug, limit))
                 except sqlite3.OperationalError:
@@ -230,6 +232,7 @@ class DatabaseKnowledgeMixin:
             "SELECT id AS conversation_id, project_slug, summary "
             "FROM conversations WHERE project_slug=? COLLATE NOCASE "
             "AND summary IS NOT NULL AND summary != '' "
+            "AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
             "ORDER BY closed_at DESC LIMIT ?", (project_slug, limit))
         return rows
 

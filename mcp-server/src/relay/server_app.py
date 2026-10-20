@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 
 from aiohttp import web
 
-from . import identity, logctx, server_common, tracing, voice, voice_routes
+from . import external_pr_access, identity, logctx, server_common, tracing, voice, voice_routes
 from .db import read_system_config_sync
 from .server_common import (
     browser_guard,
@@ -48,6 +48,7 @@ from .server_questions import (
 )
 from .server_lifecycle import _on_cleanup, _on_startup
 from .server_task_routes import task_action, task_get
+from . import server_external_pr_routes, server_issue_routes, server_issue_policy_routes
 
 def create_app(bind_host: str = "127.0.0.1") -> web.Application:
 
@@ -147,7 +148,7 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
         # access_identity después, y solo sobre lo que ya pasó el guard.
         # require_role al final: necesita la identidad ya resuelta.
         middlewares=[browser_guard, localhost_guard, identity.access_identity,
-                     identity.require_role],
+                     identity.require_role, external_pr_access.guard],
     )
     # El host efectivo del bind se muestra en la configuración.
     # y el endpoint /admin/api/config lo reporta a la UI.
@@ -179,6 +180,14 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
     app.router.add_get("/conversations/{id}/pr", conversation_pr_status)
     app.router.add_get("/conversations/{id}/task", task_get)
     app.router.add_post("/conversations/{id}/task", task_action)
+    app.router.add_post("/projects/{slug}/external-pr", server_external_pr_routes.register)
+    app.router.add_post("/conversations/{id}/external-pr", server_external_pr_routes.action)
+    app.router.add_get("/projects/{slug}/issues", server_issue_routes.issues)
+    app.router.add_post("/conversations/{id}/issue", server_issue_routes.link)
+    app.router.add_get("/conversations/{id}/issue-sync", server_issue_routes.snapshot)
+    app.router.add_post("/conversations/{id}/issue-sync", server_issue_routes.refresh)
+    app.router.add_get("/projects/{slug}/issue-sync/discovery", server_issue_policy_routes.discovery)
+    app.router.add_post("/projects/{slug}/issue-sync/policy", server_issue_policy_routes.configure)
     # Iter 10.3: ver / borrar la rama local acumulada tras /cerrar.
     app.router.add_get("/conversations/{id}/diff", conversation_diff)
     app.router.add_post("/conversations/{id}/git/{action}",

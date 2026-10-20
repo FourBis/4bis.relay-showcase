@@ -59,12 +59,12 @@ test('cambiar de conversación reemplaza el grafo antes de esperar el proyecto',
   const context = {
     $: () => ({}), showMainView() {}, renderConvList() {},
     setTaskWorkspaceContext() {}, mountTaskPanel: () => ({ destroy() {} }), renderTaskMode() {},
-    attachGrafo: id => { graph = id; },
+    attachGrafo: id => { graph = id; }, conversationTaskMode: () => "write",
     renderHeader: () => { headerGraph = graph; },
     api: () => new Promise(resolve => { release = resolve; }),
     selectionIsCurrent: () => false,
   };
-  runInNewContext(`let chatSelectionGeneration = 1, activeChat, taskPanel;
+  runInNewContext(`let chatSelectionGeneration = 1, activeChat, taskPanel, draftIssuePicker;
     ${sourceFunction('tab-chats.js', 'openConversation')}; this.open = openConversation`, context);
   const pending = context.open({ id: 'nueva', project_slug: 'demo', status: 'open' }, 1);
   assert.equal(headerGraph, 'nueva', 'el encabezado nuevo nunca debe conservar el grafo anterior');

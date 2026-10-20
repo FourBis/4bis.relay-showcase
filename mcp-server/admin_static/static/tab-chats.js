@@ -15,7 +15,7 @@
 //   - viewChat               → tab-running.js (abre el .md raw).
 
 import { $, $$, on, api, apiRoot, escape, _dbg, openProjectInVSCode, gitWebUrl, fmtDuration } from "./api.js";
-import { toast, openModal, closeModal, confirmModal, alertModal, modalLoad, emptyState } from "./ui.js";
+import { toast, openModal, closeModal, confirmModal, alertModal, modalLoad, emptyState, formSection } from "./ui.js";
 import { chime, isMuted, toggleMute, pedirPermisoNotificaciones } from "./chime.js";
 // En UNA línea a propósito: chat-strip-junk.test.mjs carga este módulo
 // neutralizando los imports con un regex `^import .*$` por línea, y un
@@ -26,6 +26,8 @@ import { aplicarAnchosGuardados } from "./panel-resize.js";
 import { openConvDiff } from "./chat-diff.js";
 import { openChatObject } from "./chat-objects.js";
 import { mountTaskPanel } from "./chat-task.js";
+import { openExternalRegistration } from "./chat-external-pr.js";
+import { issuePickerHtml, mountIssuePicker, optionalIssuePayload } from "./chat-issue.js";
 import { setTaskWorkspaceContext, openConversationWindow } from "./workspace.js";
 import { announceEmbeddedChat, getEmbeddedConversation, isChatViewVisible } from "./chat-window.js";
 
@@ -49,6 +51,7 @@ let chatObjectBackWired = false;
 let chatSelectionGeneration = 0;
 let chatDraftGeneration = 0;
 let taskPanel = null;
+let draftIssuePicker = null;
 
 function newRequestId() {
   return globalThis.crypto?.randomUUID?.()
@@ -135,6 +138,7 @@ function renderConvList() {
     if (!term) return true;
     return (c.project_slug || "").toLowerCase().includes(term)
       || (c.summary || "").toLowerCase().includes(term)
+      || externalConversationTitle(c).toLowerCase().includes(term)
       || (c.id || "").toLowerCase().includes(term);
   });
   if (!filtered.length) {
@@ -160,7 +164,8 @@ function group(title, convs) {
       const active = activeChat && activeChat.convId === c.id ? " active" : "";
       const dot = c.status === "open" ? "open" : "closed";
       const when = shortWhen(c.last_activity_at);
-      const preview = c.summary
+      const externalTitle = externalConversationTitle(c);
+      const preview = externalTitle ? `PR externo · ${escape(externalTitle.slice(0, 80))}` : c.summary
         ? escape(c.summary.slice(0, 80))
         // Singular con 1: la sidebar lo muestra en cada fila, asi que
         // "1 mensajes" se ve todo el tiempo.
@@ -296,7 +301,9 @@ export async function selectConversation(convId) {
 
 async function openConversation(meta, generation) {
   if (generation !== chatSelectionGeneration) return;
-  const readOnly = meta.status !== "open";
+  const external = conversationTaskMode(meta) === "external_pr";
+  const readOnly = meta.status !== "open" || external;
+  draftIssuePicker?.destroy(); draftIssuePicker = null;
   activeChat = {
     convId: meta.id,
     projectSlug: meta.project_slug,
@@ -312,17 +319,20 @@ async function openConversation(meta, generation) {
   taskPanel?.destroy();
   taskPanel = mountTaskPanel({
     convId: meta.id,
+    projectSlug: meta.project_slug,
     onContinue: () => reopenConversation(meta.id),
     onTaskUpdate: (task, previous) => handleTaskUpdate(meta, task, previous, generation),
   });
   // Cambiar el plan antes de esperar metadatos: una respuesta lenta no debe
   // dejar el grafo de la conversación anterior bajo el nuevo encabezado.
-  attachGrafo(meta.id);
+  if (external) detachGrafo();
+  else attachGrafo(meta.id);
 
   showMainView("convo");
   renderConvList();  // refrescar highlight del sidebar
   $("#chat-draft-project").hidden = true;  // por si venías de un borrador
   renderHeader(meta, generation);
+  if (external) $("#chat-panel-title").textContent = `${meta.project_slug} · ${externalConversationTitle(meta)}`;
 
   // Summary arriba (solo cerradas / si existe).
   const summaryEl = $("#chat-summary");
@@ -338,10 +348,13 @@ async function openConversation(meta, generation) {
   // Input vs read-only.
   $("#chat-input-bar").hidden = readOnly;
   $("#chat-readonly-note").hidden = !readOnly;
+  $("#chat-readonly-note").textContent = external
+    ? "Declara evidencia y actualiza GitHub desde la tarea. El código y la revisión humana pueden hacerse fuera de Relay."
+    : "Conversación cerrada: solo lectura. Abre una nueva con Nuevo para seguir trabajando.";
 
   // Open in VS Code: siempre visible (si falla, el toast avisa).
   const vscodeBtn = $("#chat-panel-vscode");
-  vscodeBtn.hidden = false;
+  vscodeBtn.hidden = external;
   const ghLink = $("#chat-panel-gh-link");
   ghLink.hidden = true;
   try {
@@ -356,7 +369,9 @@ async function openConversation(meta, generation) {
   if (!selectionIsCurrent(generation, meta.id)) return;
 
   renderSuggestions([]);   // las del hilo anterior no valen para éste
-  await loadMessages(meta.id);
+  $("#chat-panel-messages").hidden = external;
+  if (external) $("#chat-panel-messages").innerHTML = "";
+  else await loadMessages(meta.id);
   if (!selectionIsCurrent(generation, meta.id)) return;
   setBusy(false);
   // Una ventana que termina de cargar no debe quitar el foco a otra.
@@ -381,14 +396,35 @@ async function openConversation(meta, generation) {
   if (!readOnly) refreshChatQuestions(meta.id, generation);
 }
 
+export function conversationTaskMode(meta) {
+  let task = meta.task_json;
+  if (typeof task === "string") {
+    try { task = JSON.parse(task); } catch (_) { task = null; }
+  }
+  return task?.mode || (meta.read_only ? "read_only" : "write");
+}
+
+export function externalConversationTitle(meta) {
+  let task = meta.task_json;
+  if (typeof task === "string") {
+    try { task = JSON.parse(task); } catch (_) { task = null; }
+  }
+  return task?.mode === "external_pr"
+    ? String(task.title || meta.title || task.external_pr?.title || "PR externo") : "";
+}
+
 function renderTaskMode(meta) {
   const el = $("#chat-task-mode");
   if (!el) return;
+  const taskMode = conversationTaskMode(meta);
+  if (taskMode === "external_pr") {
+    el.textContent = "PR externo"; el.hidden = false; return;
+  }
   let taskMeta = meta.task_json;
   if (typeof taskMeta === "string") {
     try { taskMeta = JSON.parse(taskMeta); } catch (_) { taskMeta = null; }
   }
-  const mode = (taskMeta?.mode || (meta.read_only ? "read_only" : "write")) === "read_only"
+  const mode = taskMode === "read_only"
     ? "Consulta" : "Cambio con PR";
   el.textContent = mode === "Consulta" || (taskMeta?.publish_allowed ?? meta.publish_allowed)
     ? mode : `${mode} · publicación apagada`;
@@ -406,6 +442,7 @@ function taskSnapshot(task) {
 
 async function handleTaskUpdate(meta, task, previous, generation) {
   if (!task || !selectionIsCurrent(generation, meta.id)) return;
+  if (task.mode === "external_pr") { renderTaskMode({...meta,task_json:task}); return; }
   const chat = activeChat;
   const mode = task.mode || "";
   chat.mode = mode === "read_only" ? "consultation" : "change";
@@ -487,7 +524,12 @@ function renderHeader(meta, generation = chatSelectionGeneration) {
   // cuando la conv está cerrada (en open la rama está checked-out y es
   // trabajo en curso). El detalle (merged/ahead/behind) lo trae el
   // endpoint /branch, que también es lo que decide el copy del confirm.
-  loadBranchBadge(meta, generation);
+  const external = conversationTaskMode(meta) === "external_pr";
+  if (!external) loadBranchBadge(meta, generation);
+  else {
+    $("#chat-panel-branch").hidden = true;
+    $("#chat-panel-delete-branch").hidden = true;
+  }
 
   // Tres estados, no dos: "vinculado" sin hilo DM significa que las
   // respuestas NO salen de esta pantalla. Antes se pintaba igual que un
@@ -500,7 +542,7 @@ function renderHeader(meta, generation = chatSelectionGeneration) {
         : `⚠️ @${who} sin hilo DM — las respuestas no salen de acá`;
 
   // Botones Discord + Cerrar solo para conversaciones abiertas.
-  const ro = meta.status !== "open";
+  const ro = meta.status !== "open" || external;
   // 📱 mientras no haya hilo DM: cubre las dos formas de no tenerlo —
   // sin vincular, o vinculado con el hilo roto (hereda el usuario).
   $("#chat-panel-follow-mobile").hidden = ro || hasThread;
@@ -517,6 +559,11 @@ function renderHeader(meta, generation = chatSelectionGeneration) {
   $("#chat-panel-extract-facts").hidden = ro || !meta.context;
   renderContextBadge(meta.context);
   renderUsageBadge(meta);
+  if (external) {
+    for (const id of ["#chat-panel-grafo", "#chat-panel-chime", "#chat-panel-context", "#chat-panel-diff", "#chat-panel-usage"])
+      $(id).hidden = true;
+    $("#chat-panel-meta").textContent = "Registro y revisión de PR externo";
+  }
 }
 
 // El chip ⏱: cuánto tiempo de TRABAJO lleva la conversación — la suma de
@@ -2220,11 +2267,13 @@ async function openNewChatDraft() {
     convId: null, projectSlug: sel.value, currentChatId: null,
     busy: false, readOnly: false, draft: true, mode: "change",
     publishAllowed: true,
+    issueInput: "",
   };
   setTaskWorkspaceContext({ conversationId: "", projectSlug: activeChat.projectSlug });
   sel.onchange = () => {
     if (!activeChat?.draft) return;
     activeChat.projectSlug = sel.value;
+    draftIssuePicker?.setProject(sel.value);
     setTaskWorkspaceContext({ conversationId: "", projectSlug: sel.value });
   };
 
@@ -2247,6 +2296,7 @@ async function openNewChatDraft() {
                     "#chat-panel-extract-facts",
                     "#chat-panel-diff"]) $(id).hidden = true;
   $("#chat-summary").hidden = true;
+  $("#chat-panel-messages").hidden = false;
   $("#chat-panel-messages").innerHTML =
     `<div id="chat-draft-mode" class="chat-task-mode-picker" role="group" aria-label="Tipo de conversación">
        <span class="label">Tipo</span>
@@ -2254,9 +2304,16 @@ async function openNewChatDraft() {
        <button type="button" class="btn btn-xs" data-chat-mode="consultation" aria-pressed="false">Consulta</button>
        <span class="text-xs text-zinc-400">Consulta no crea worktree ni publica.</span>
      </div>
+     ${formSection({title:"Issue del trabajo",body:issuePickerHtml({id:"chat-draft-issue"})})}
      <div class="chat-banner"><div class="chat-banner-title">💬 Nueva conversación</div>
      <div class="chat-banner-hint">Escribe abajo el primer mensaje (Ctrl+Enter envía).
      El tipo elegido se guarda con el hilo.</div></div>`;
+  draftIssuePicker?.destroy();
+  const draft = activeChat;
+  draftIssuePicker = mountIssuePicker($("#chat-panel-messages"), {
+    id:"chat-draft-issue",projectSlug:draft.projectSlug,
+    onChange:value => { if (activeChat === draft) draft.issueInput = value; },
+  });
   $("#chat-draft-mode")?.querySelectorAll("[data-chat-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       activeChat.mode = button.dataset.chatMode;
@@ -2291,9 +2348,11 @@ async function createDraftConversation(slug) {
         request_id: (activeChat.pendingConversationRequestId ||= newRequestId()),
         read_only: activeChat?.mode === "consultation",
         publish_allowed: activeChat?.mode === "change" && !!activeChat?.publishAllowed,
+        ...optionalIssuePayload(activeChat?.issueInput),
       }),
     });
     activeChat.pendingConversationRequestId = null;
+    draftIssuePicker?.destroy(); draftIssuePicker = null;
     return created.id;
   } catch (e) {
     toast(newChatErrorText(e, slug), "err", 9000);
@@ -2734,6 +2793,10 @@ export function initChats() {
   on("#chat-model", "change", onModelChange);
   wireModelPopover();
   on("#chat-new", "click", openNewChatDraft);
+  on("#chat-external-pr", "click", () => openExternalRegistration({
+    projectSlug: $("#chat-project-filter")?.value.trim() || "",
+    onRegistered: async (task) => { await loadChats(); await navigateConversation(task.id); },
+  }));
   on("#chat-refresh", "click", loadChats);
   on("#chat-quick-note", "click", openQuickNote);
   on("#chat-search", "input", renderConvList);
