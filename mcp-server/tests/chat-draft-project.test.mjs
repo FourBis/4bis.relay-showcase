@@ -7,6 +7,7 @@ const source = readFileSync(new URL('../admin_static/static/tab-chats.js', impor
 const openDraft = source.match(/async function openNewChatDraft\([^]*?\n}/)[0];
 const sendMessage = source.match(/async function sendCurrentMessage\([^]*?\n}/)[0];
 const createDraft = source.match(/async function createDraftConversation\([^]*?\n}/)[0];
+const newChatError = source.match(/function newChatErrorText\([^]*?\n}/)[0];
 
 function harness(responses, filter = '', apiRoot = async () => ({})) {
   let options = [], selected = '', calls = 0, opened = 0;
@@ -40,7 +41,7 @@ function harness(responses, filter = '', apiRoot = async () => ({})) {
   };
   runInNewContext(`let chatSelectionGeneration = 0, chatDraftGeneration = 0, activeChat, taskPanel, draftIssuePicker;
     let pendingAttachments = [], chosenModel = '', chosenStageModels = {};
-    ${openDraft}; ${createDraft}; ${sendMessage};
+    ${openDraft}; ${createDraft}; ${sendMessage}; ${newChatError};
     this.open = openNewChatDraft; this.send = sendCurrentMessage;
     this.state = () => activeChat; this.generation = () => chatSelectionGeneration;
     this.setIssue = value => { activeChat.issueInput = value; };
@@ -179,4 +180,42 @@ test('la issue opcional viaja con el borrador sin sustituir su objetivo', async 
   assert.equal(created.project,'demo');
   assert.equal(created.resolution_complete,undefined);
   assert.equal(JSON.parse(requests.find(row => row.path === '/experts/run').options.body).user,'Avance parcial del objetivo');
+});
+
+for (const cause of [
+  'fetch origin falló: HTTP 403 Forbidden',
+  'faltan develop local u origin/develop',
+  'el repo no tiene remote de GitHub: no puedo atar la conversación a un issue',
+  'no se pudo abrir la rama de trabajo: permiso denegado',
+  'working tree no encontrado',
+]) test(`crear conversación conserva la causa del 422: ${cause}`, async () => {
+  let runs = 0;
+  const h = harness([catalog('alfa')], '', async (path) => {
+    if (path === '/conversations') throw Object.assign(new Error(`422: ${cause}`), { status: 422 });
+    if (path === '/experts/run') runs++;
+    return {};
+  });
+  await h.context.open();
+  h.node('#chat-panel-input').value = 'borrador recuperable';
+  await h.context.send();
+  assert.equal(h.node('#toast').textContent, `error: 422: ${cause}`);
+  assert.equal(h.node('#chat-panel-input').value, 'borrador recuperable');
+  assert.equal(h.context.state().draft, true);
+  assert.equal(h.context.state().busy, false);
+  assert.equal(runs, 0);
+});
+
+for (const cause of [
+  'working tree sucio al crear la rama',
+  'hay cambios trackeados sin commitear, no puedo crear una rama',
+  'el checkout actual tiene cambios staged, tracked o untracked',
+]) test(`crear conversación reconoce cambios pendientes: ${cause}`, async () => {
+  const h = harness([catalog('alfa')], '', async () => {
+    throw Object.assign(new Error(`422: ${cause}`), { status: 422 });
+  });
+  await h.context.open();
+  h.node('#chat-panel-input').value = 'borrador';
+  await h.context.send();
+  assert.match(h.node('#toast').textContent, /cambios sin commitear/);
+  assert.equal(h.node('#chat-panel-input').value, 'borrador');
 });

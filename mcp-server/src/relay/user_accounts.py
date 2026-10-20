@@ -19,6 +19,8 @@ GOOGLE_SCOPES = frozenset({
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
 })
+TOKEN_REFRESH_MARGIN_SECONDS = 60
+
 PROVIDERS = {
     "github": {"label": "GitHub", "authorize": "https://github.com/login/oauth/authorize",
                "token": "https://github.com/login/oauth/access_token",
@@ -265,7 +267,7 @@ class AccountStore:
             data = self.decrypt(row["token_blob"])
             if data.get("provider") != provider or data.get("relay_email") != email:
                 raise AccountError("La conexión guardada no pertenece a este usuario.")
-            if row["expires_at"] and row["expires_at"] <= time.time() + 60:
+            if row["expires_at"] and row["expires_at"] <= time.time() + TOKEN_REFRESH_MARGIN_SECONDS:
                 if (not data.get("refresh_token") or (row["refresh_expires_at"]
                         and row["refresh_expires_at"] <= time.time())):
                     await self.invalidate(provider, email)

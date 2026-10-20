@@ -51,6 +51,10 @@ jobs:
           mcp-server/tests/test_task_persistence.py
           mcp-server/tests/test_task_workspace.py
           mcp-server/tests/test_task_pr.py
+          mcp-server/tests/test_pr_text.py
+          mcp-server/tests/test_git_flow.py
+          mcp-server/tests/test_github_panel.py
+          mcp-server/tests/test_project_flags.py
           mcp-server/tests/test_task_controls.py
           mcp-server/tests/test_task_continuity.py
           mcp-server/tests/test_task_callers.py
@@ -104,7 +108,10 @@ jobs:
           mcp-server/tests/test_disparador.py
           mcp-server/tests/test_graph_cancel.py
           mcp-server/tests/test_graph_budget_resume.py
+          mcp-server/tests/test_graph_node_acceptance.py
           mcp-server/tests/test_graph_verification_recovery.py
+          mcp-server/tests/test_three_stage.py
+          mcp-server/tests/test_orquestador_chat_id_early.py
           mcp-server/tests/test_grafo.py
           mcp-server/tests/test_graphs_create_dup_guard.py
           mcp-server/tests/test_planificador.py

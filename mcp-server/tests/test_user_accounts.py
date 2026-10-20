@@ -251,6 +251,74 @@ async def test_expired_without_refresh_and_changed_key_show_reconnect(accounts, 
     assert not status["connected"] and status["needs_reconnect"]
 
 
+@pytest.mark.parametrize("provider", ["github", "google"])
+@pytest.mark.parametrize("expires_in,refresh,refresh_ttl,connected", [
+    (None, "", None, True),
+    (61, "", None, True),
+    (60, "", None, False),
+    (30, "", None, False),
+    (-1, "", None, False),
+    (30, "refresh-fixture", None, True),
+    (-1, "refresh-fixture", 120, True),
+    (30, "refresh-fixture", 0, False),
+    (30, "refresh-fixture", -1, False),
+])
+async def test_connection_snapshot_matches_token_refresh_window(
+        accounts, monkeypatch, provider, expires_in, refresh, refresh_ttl, connected):
+    client, store = accounts
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    profile = ({"id": 123, "login": "user-123"} if provider == "github" else
+               {"sub": "google-123", "email": "alex@example.test", "email_verified": True})
+    await store.save(provider, "alex@example.test", profile, token(refresh_token=refresh))
+    await store.db.run(
+        "UPDATE user_accounts SET expires_at=?, refresh_expires_at=? WHERE provider=?",
+        (0 if expires_in is None else now + expires_in,
+         0 if refresh_ttl is None else now + refresh_ttl, provider))
+    before = await store.row(provider, "alex@example.test")
+    remote = AsyncMock(return_value=token("renewed-fixture"))
+    monkeypatch.setattr(user_accounts, "oauth_request", remote)
+
+    response = await client.get("/admin/api/account/connections")
+    assert response.status == 200
+    payload = await response.json()
+    status = next(item for item in payload["connections"] if item["provider"] == provider)
+    assert status["connected"] is connected
+    assert status["needs_reconnect"] is (not connected)
+    assert "chat_access" not in payload
+    remote.assert_not_awaited()
+    assert await store.row(provider, "alex@example.test") == before
+    with bind_actor(store.db, "alex@example.test"):
+        if connected:
+            assert (await require_account(provider))["access_token"]
+        else:
+            with pytest.raises(AccountError, match="venció"):
+                await require_account(provider)
+
+
+@pytest.mark.parametrize("provider", ["github", "google"])
+@pytest.mark.parametrize("access_token", [None, "", 123])
+async def test_connection_snapshot_rejects_unusable_access_token(accounts, monkeypatch, provider, access_token):
+    client, store = accounts
+    profile = ({"id": 123, "login": "user-123"} if provider == "github" else
+               {"sub": "google-123", "email": "alex@example.test", "email_verified": True})
+    await store.save(provider, "alex@example.test", profile, token())
+    data = store.decrypt((await store.row(provider, "alex@example.test"))["token_blob"])
+    if access_token is None:
+        data.pop("access_token")
+    else:
+        data["access_token"] = access_token
+    await store.db.run("UPDATE user_accounts SET token_blob=? WHERE provider=?",
+                       (store.encrypt(data), provider))
+    remote = AsyncMock()
+    monkeypatch.setattr(user_accounts, "oauth_request", remote)
+    response = await client.get("/admin/api/account/connections")
+    assert response.status == 200
+    status = next(item for item in (await response.json())["connections"] if item["provider"] == provider)
+    assert not status["connected"] and status["needs_reconnect"]
+    remote.assert_not_awaited()
+
+
 @pytest.mark.parametrize("ttl", [0, -1, True, "invalid"])
 async def test_invalid_expiry_never_saves_credentials(accounts, ttl):
     _, store = accounts
