@@ -174,4 +174,3 @@ const terminal = { finished: true };
 }
 
 console.log("chat-poll: estados transitorios y persistidos pasan");
-
