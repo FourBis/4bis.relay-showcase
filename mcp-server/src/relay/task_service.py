@@ -320,7 +320,7 @@ async def poll_issue_sync(db, project, conv_id):
     The durable due time bounds reads and failures. A fresh project/user check
     runs again immediately before each external effect in issue_sync.
     """
-    from . import identity, issue_sync, user_accounts
+    from . import identity, issue_sync, issue_sync_store, user_accounts
 
     task = await db.get_conversation_task(conv_id)
     policy = (project.get("defaults_json") or {}).get("issue_sync_policy") or {}
@@ -348,14 +348,22 @@ async def poll_issue_sync(db, project, conv_id):
     # Reserve before IO so an outage or revoked permission cannot spin at 2s.
     await db.update_conversation_task(conv_id, issue_sync_next_poll_at=time.time() + 60)
     with user_accounts.bind_actor(db, who):
+        baseline = await issue_sync_store.baseline(db, conv_id)
         try:
             current = await authorize()
-            await issue_sync.refresh(db, current, conv_id, who, authorize=authorize)
-            await db.update_conversation_task(conv_id, issue_sync_error="")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await db.update_conversation_task(conv_id, issue_sync_error=str(exc))
+            await issue_sync_store.amend(db, conv_id, baseline, error=str(exc))
+            return
+        try:
+            await issue_sync.refresh(db, current, conv_id, who, authorize=authorize)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Refresh records its own error only while it owns the baseline.
+            # A stale poll must not overwrite a newer result via task_json.
+            return
 
 
 def start_issue_sync(app, project, conv_id, state):

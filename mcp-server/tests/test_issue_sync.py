@@ -6,7 +6,7 @@ import copy
 
 import pytest
 
-from relay import github, issue_sync, issue_sync_store as store
+from relay import github, issue_sync, issue_sync_store as store, task_service
 from relay.db import Database
 
 
@@ -589,6 +589,214 @@ async def test_concurrent_workers_only_claim_one_issue_target(env):
     await asyncio.gather(refresh(), refresh(), refresh())
     assert fake.effects == [("project", "review")]
     assert (await issue_sync.snapshot(db, "task-1"))["status"] == "synced"
+
+
+@pytest.fixture
+def paused_action_read(monkeypatch):
+    def arm():
+        original = issue_sync._actions
+        observed, resume = asyncio.Event(), asyncio.Event()
+        pause_once = True
+
+        async def pause_after_read(*args):
+            nonlocal pause_once
+            pause = pause_once
+            pause_once = False
+            result = await original(*args)
+            if pause:
+                observed.set()
+                await resume.wait()
+            return result
+
+        monkeypatch.setattr(issue_sync, "_actions", pause_after_read)
+        return observed, resume
+    return arm
+
+
+@pytest.mark.parametrize("already_started", [False, True])
+async def test_stale_worker_observation_does_not_report_own_effect_as_manual_change(env, paused_action_read, already_started):
+    db, fake, create, refresh = env
+    await create()
+    if already_started:
+        assert (await refresh())["status"] == "synced"
+    observed, resume = paused_action_read()
+    fake.prs[pr()["url"]] = pr()
+    await db.set_conversation_pr("task-1", pr()["url"])
+    # A separate connection owner models another worker, not a shared lock.
+    other_db = Database(path=db.path)
+    async def authorize():
+        return await other_db.get_project("demo")
+    stale = asyncio.create_task(issue_sync.refresh(
+        other_db, await other_db.get_project("demo"), "task-1", "owner", authorize=authorize))
+    try:
+        await asyncio.wait_for(observed.wait(), timeout=10)
+        assert (await refresh())["status"] == "synced"
+    finally:
+        resume.set()
+        result = await asyncio.wait_for(stale, timeout=10)
+    assert result["status"] == "synced"
+    assert result["error"] == ""
+    assert fake.effects == ([("project", "started")] if already_started else []) + [("project", "review")]
+    assert (await issue_sync.snapshot(db, "task-1"))["status"] == "synced"
+
+
+async def test_stale_worker_preserves_new_manual_conflict(env, paused_action_read):
+    db, fake, create, refresh = env
+    await create(remote_pr=pr())
+    assert (await refresh())["status"] == "synced"
+    observed, resume = paused_action_read()
+    stale = asyncio.create_task(refresh())
+    try:
+        await asyncio.wait_for(observed.wait(), timeout=10)
+        fake.project_value = "manual-option"
+        assert (await refresh())["error"] == issue_sync.MANUAL_PROJECT_CONFLICT
+    finally:
+        resume.set()
+        result = await asyncio.wait_for(stale, timeout=10)
+    assert result["status"] == "error"
+    assert result["error"] == issue_sync.MANUAL_PROJECT_CONFLICT
+    assert fake.project_value == "manual-option"
+    assert fake.effects == [("project", "review")]
+    assert (await refresh())["error"] == issue_sync.MANUAL_PROJECT_CONFLICT
+
+
+@pytest.mark.parametrize("fail_old_worker", [False, True])
+@pytest.mark.parametrize("background", [False, True])
+async def test_old_worker_cannot_overwrite_new_transition_or_error(env, monkeypatch, fail_old_worker, background):
+    db, fake, create, refresh = env
+    await create(remote_pr=pr())
+    assert (await refresh())["status"] == "synced"
+    processed, resume = asyncio.Event(), asyncio.Event()
+    original = issue_sync._process
+    pause_once = True
+
+    async def pause_after_process(*args):
+        nonlocal pause_once
+        pause = pause_once
+        pause_once = False
+        await original(*args)
+        if pause:
+            processed.set()
+            await resume.wait()
+            if fail_old_worker:
+                raise OSError("fake stale read failure")
+
+    monkeypatch.setattr(issue_sync, "_process", pause_after_process)
+    stale = asyncio.create_task(task_service.poll_issue_sync(db, await db.get_project("demo"), "task-1")
+                                if background else refresh())
+    try:
+        await asyncio.wait_for(processed.wait(), timeout=10)
+        fake.prs[pr()["url"]] = pr(reviews=[{
+            "user": {"id": 12, "type": "User"}, "commit_id": SHA_A, "state": "CHANGES_REQUESTED"}])
+        assert (await refresh())["status"] == "synced"
+    finally:
+        resume.set()
+        if fail_old_worker and not background:
+            with pytest.raises(OSError, match="fake stale read failure"):
+                await asyncio.wait_for(stale, timeout=10)
+        else:
+            await asyncio.wait_for(stale, timeout=10)
+    result = await issue_sync.snapshot(db, "task-1")
+    assert result["status"] == "synced" and result["error"] == ""
+    assert result["observed"]["transition"] == "changes_requested"
+    assert result["observed"]["projects"][0]["option_id"] == "changes_requested"
+    assert not (await db.get_conversation_task("task-1")).get("issue_sync_error")
+    assert fake.effects == [("project", "review"), ("project", "changes_requested")]
+
+
+async def test_observation_contention_is_bounded_without_effects(env, monkeypatch):
+    db, fake, create, refresh = env
+    await create()
+    calls = 0
+    async def competing_observer(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return None
+    monkeypatch.setattr(store, "record", competing_observer)
+    result = await refresh()
+    assert calls == 3
+    assert result["status"] == "unobserved" and result["error"] == ""
+    assert result["events"] == [] and fake.effects == []
+
+
+async def test_old_background_authorization_error_cannot_overwrite_new_success(env, monkeypatch):
+    db, fake, create, refresh = env
+    await create(remote_pr=pr())
+    project = await db.get_project("demo")
+    authorizing, resume = asyncio.Event(), asyncio.Event()
+    original = db.get_project
+
+    async def paused_authorization(slug):
+        if asyncio.current_task() is stale:
+            authorizing.set()
+            await resume.wait()
+            return None
+        return await original(slug)
+
+    monkeypatch.setattr(db, "get_project", paused_authorization)
+    stale = asyncio.create_task(task_service.poll_issue_sync(db, project, "task-1"))
+    try:
+        await asyncio.wait_for(authorizing.wait(), timeout=10)
+        assert (await refresh())["status"] == "synced"
+    finally:
+        resume.set()
+        await asyncio.wait_for(stale, timeout=10)
+    result = await issue_sync.snapshot(db, "task-1")
+    assert result["status"] == "synced" and result["error"] == ""
+    assert not (await db.get_conversation_task("task-1")).get("issue_sync_error")
+    assert fake.effects == [("project", "review")]
+
+
+async def test_initial_read_failure_is_visible_without_creating_intent(env, monkeypatch):
+    from relay.user_accounts import AccountError
+    db, fake, create, refresh = env
+    await create()
+    async def unavailable(*args):
+        raise AccountError("fake reconnect required")
+    monkeypatch.setattr(issue_sync.remote, "read_issue", unavailable)
+    with pytest.raises(AccountError, match="fake reconnect required"):
+        await refresh()
+    result = await issue_sync.snapshot(db, "task-1")
+    assert result["status"] == "error" and result["error"] == "fake reconnect required"
+    assert result["events"] == [] and fake.effects == []
+
+
+async def test_cancellation_before_record_does_not_create_intent(env, paused_action_read):
+    db, fake, create, refresh = env
+    await create()
+    observed, resume = paused_action_read()
+    pending = asyncio.create_task(refresh())
+    try:
+        await asyncio.wait_for(observed.wait(), timeout=10)
+    finally:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        resume.set()
+    result = await issue_sync.snapshot(db, "task-1")
+    assert result["status"] == "unobserved" and result["events"] == []
+    assert fake.effects == []
+
+
+async def test_cancelled_applied_write_reconciles_without_repeating_effect(env, monkeypatch):
+    db, fake, create, refresh = env
+    await create(remote_pr=pr())
+    applied = asyncio.Event()
+    async def lost_response(*args, **kwargs):
+        await fake.write_project(*args, **kwargs)
+        applied.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(issue_sync.remote, "write_project", lost_response)
+    pending = asyncio.create_task(refresh())
+    try:
+        await asyncio.wait_for(applied.wait(), timeout=10)
+    finally:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    assert (await issue_sync.snapshot(db, "task-1"))["status"] == "uncertain"
+    assert (await refresh())["status"] == "synced"
+    assert fake.effects == [("project", "review")]
 
 
 async def test_recover_marks_inflight_intent_uncertain_without_effect(env):

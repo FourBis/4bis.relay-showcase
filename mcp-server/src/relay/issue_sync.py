@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 
 from . import github, issue_sync_github as remote, issue_sync_store as store
 from .user_accounts import AccountError, bind_actor
@@ -347,48 +348,60 @@ async def refresh(db, project, cid, who, authorize=None):
     link = copy.deepcopy(task.get("issue_link") or {})
     if not link:
         return await snapshot(db, cid)
+    baseline = None
     try:
         with bind_actor(db, who):
-            issue = await remote.read_issue(link)
-            url = conv.get("pr_url") or task.get("pr_url")
-            pr = await remote.read_pr(link, url) if url else None
-            raw_policy = _configured(project)
-            policy = await remote.validate_policy(project, raw_policy)
-            if policy["enabled"] and task.get("mode") != "read_only":
-                observed, actions, error = await _actions(db, link, task, policy, issue, pr)
-                previous, previous_error = await store.observation(db, cid)
-                previous_intent, _ = await store.intent(db, cid)
-                old_values = {(item["project_id"], item["field_id"]): item.get("option_id", item.get("value"))
-                              for item in previous.get("projects", [])} if previous_intent != "" else {}
-                for action in actions:
-                    mapping = action.get("mapping")
-                    key = (mapping["project_id"], mapping["field_id"]) if mapping else None
-                    if (key in old_values and old_values[key] != action["expected"]
-                            and action["expected"] != action["value"]):
-                        error = MANUAL_PROJECT_CONFLICT
-                        actions = []
-                        break
-                # Recording a new observation must not silently adopt a
-                # manually changed value as the baseline on the next poll.
-                # A new transition or explicitly authorized retry can replan.
-                if (previous_intent != "" and previous_error == MANUAL_PROJECT_CONFLICT
-                        and previous.get("transition") == observed["transition"]):
-                    error, actions = MANUAL_PROJECT_CONFLICT, []
+            for _ in range(3):
+                baseline = await store.baseline(db, cid)
+                previous = json.loads(baseline["observation"]) if baseline else {}
+                previous_error = baseline["error"] if baseline else ""
+                previous_intent = baseline["fingerprint"] if baseline else None
+                issue = await remote.read_issue(link)
+                url = conv.get("pr_url") or task.get("pr_url")
+                pr = await remote.read_pr(link, url) if url else None
+                raw_policy = _configured(project)
+                policy = await remote.validate_policy(project, raw_policy)
+                if policy["enabled"] and task.get("mode") != "read_only":
+                    observed, actions, error = await _actions(db, link, task, policy, issue, pr)
+                    old_values = {(item["project_id"], item["field_id"]): item.get("option_id", item.get("value"))
+                                  for item in previous.get("projects", [])} if previous_intent != "" else {}
+                    for action in actions:
+                        mapping = action.get("mapping")
+                        key = (mapping["project_id"], mapping["field_id"]) if mapping else None
+                        if (key in old_values and old_values[key] != action["expected"]
+                                and action["expected"] != action["value"]):
+                            error = MANUAL_PROJECT_CONFLICT
+                            actions = []
+                            break
+                    # Recording a new observation must not silently adopt a
+                    # manually changed value as the baseline on the next poll.
+                    # A new transition or explicitly authorized retry can replan.
+                    if (previous_intent != "" and previous_error == MANUAL_PROJECT_CONFLICT
+                            and previous.get("transition") == observed["transition"]):
+                        error, actions = MANUAL_PROJECT_CONFLICT, []
+                else:
+                    projects = []
+                    for mapping in policy["projects"]:
+                        existing = await remote.read_project_value(link, mapping)
+                        projects.append(_project_observation(mapping, existing))
+                    observed = {"at": store.now(), "issue": issue, "pr": pr, "projects": projects,
+                                "transition": _transition(task, pr), "resolution_complete": False}
+                    actions, error = [], ""
+                stable = {key: value for key, value in observed.items() if key != "at"}
+                # Include policy and human declaration, not our issue updated_at:
+                # writing a state must not enqueue an echo of that same effect.
+                stable["issue"] = _identity(link)
+                stable.pop("projects", None)
+                fingerprint = store.digest([stable, policy, _completion_declared(task)])
+                recorded = await store.record(db, cid, _issue_key(link), fingerprint, observed, actions, who,
+                                              store.digest(policy), error, expected_baseline=baseline)
+                if recorded is not None:
+                    baseline = recorded
+                    break
             else:
-                projects = []
-                for mapping in policy["projects"]:
-                    existing = await remote.read_project_value(link, mapping)
-                    projects.append(_project_observation(mapping, existing))
-                observed = {"at": store.now(), "issue": issue, "pr": pr, "projects": projects,
-                            "transition": _transition(task, pr), "resolution_complete": False}
-                actions, error = [], ""
-            stable = {key: value for key, value in observed.items() if key != "at"}
-            # Include policy and human declaration, not our issue updated_at:
-            # writing a state must not enqueue an echo of that same effect.
-            stable["issue"] = _identity(link)
-            stable.pop("projects", None)
-            fingerprint = store.digest([stable, policy, _completion_declared(task)])
-            await store.record(db, cid, _issue_key(link), fingerprint, observed, actions, who, store.digest(policy), error)
+                # Contention does not authorize stale writes. The next refresh
+                # can retry; retain the latest durable result and error.
+                return await snapshot(db, cid)
             if policy["enabled"] and task.get("mode") != "read_only":
                 await _process(db, cid, who, authorize)
                 # Report confirmed remote truth after effects. Preserve the
@@ -399,15 +412,13 @@ async def refresh(db, project, cid, who, authorize=None):
                     existing = await remote.read_project_value(link, mapping)
                     projects.append(_project_observation(mapping, existing))
                 observed["projects"], observed["at"] = projects, store.now()
-                await db.run("UPDATE issue_sync_streams SET observation=?,updated_at=? WHERE conversation_id=?",
-                             (store.encoded(observed), store.now(), cid))
+                await store.amend(db, cid, baseline, observation=observed)
             else:
                 await _reconcile_disabled(db, cid, who, authorize)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         await store.ensure_schema(db)
-        await db.run("UPDATE issue_sync_streams SET error=?,updated_at=? WHERE conversation_id=?", (str(exc), store.now(), cid))
+        await store.amend(db, cid, baseline, error=str(exc))
         raise
-    await db.update_conversation_task(cid, issue_sync_error=None)
     return await snapshot(db, cid)

@@ -67,11 +67,23 @@ async def transaction(db, operation):
     return await db._in_thread(work)
 
 
-async def record(db, cid, issue_key, fingerprint, observation, actions, actor, policy_digest, error=""):
+async def baseline(db, cid):
+    """Opaque stream version, captured before reading remote state."""
+    await ensure_schema(db)
+    rows = await db.run("SELECT * FROM issue_sync_streams WHERE conversation_id=?", (cid,))
+    return rows[0] if rows else None
+
+
+async def record(db, cid, issue_key, fingerprint, observation, actions, actor, policy_digest, error="", *, expected_baseline):
     await ensure_schema(db)
     stamp = now()
     def work(conn):
-        previous = conn.execute("SELECT fingerprint,sequence FROM issue_sync_streams WHERE conversation_id=?", (cid,)).fetchone()
+        previous = conn.execute("SELECT * FROM issue_sync_streams WHERE conversation_id=?", (cid,)).fetchone()
+        # A competing observer may have confirmed an effect or recorded a
+        # manual conflict since our remote reads. Reobserve instead of
+        # replacing its newer baseline/error with stale information.
+        if (dict(previous) if previous else None) != expected_baseline:
+            return None
         sequence = previous["sequence"] if previous else 0
         changed = not previous or previous["fingerprint"] != fingerprint
         if changed:
@@ -92,7 +104,32 @@ async def record(db, cid, issue_key, fingerprint, observation, actions, actor, p
                      "fingerprint=excluded.fingerprint,sequence=excluded.sequence,observation=excluded.observation,"
                      "error=excluded.error,updated_at=excluded.updated_at",
                      (cid, fingerprint, sequence, encoded(observation), error, stamp))
-        return sequence
+        conn.execute("UPDATE conversations SET task_json=json_patch(COALESCE(task_json,'{}'), ?) WHERE id=?",
+                     (encoded({"issue_sync_error": None}), cid))
+        return dict(conn.execute("SELECT * FROM issue_sync_streams WHERE conversation_id=?", (cid,)).fetchone())
+    return await transaction(db, work)
+
+
+async def amend(db, cid, expected_baseline, *, observation=None, error=None):
+    """Amend only the observation/error owned by this refresh."""
+    def work(conn):
+        current = conn.execute("SELECT * FROM issue_sync_streams WHERE conversation_id=?", (cid,)).fetchone()
+        if (dict(current) if current else None) != expected_baseline:
+            return False
+        if current is None:
+            if error is None:
+                return False
+            # An initial read/authorization failure has no intent or effects.
+            conn.execute("INSERT INTO issue_sync_streams "
+                         "(conversation_id,fingerprint,sequence,observation,error,updated_at) VALUES (?, '', 0, '{}', ?, ?)",
+                         (cid, error, now()))
+        else:
+            conn.execute("UPDATE issue_sync_streams SET observation=?,error=?,updated_at=? WHERE conversation_id=?",
+                         (encoded(observation) if observation is not None else current["observation"],
+                          error if error is not None else current["error"], now(), cid))
+        conn.execute("UPDATE conversations SET task_json=json_patch(COALESCE(task_json,'{}'), ?) WHERE id=?",
+                     (encoded({"issue_sync_error": None}), cid))
+        return True
     return await transaction(db, work)
 
 
