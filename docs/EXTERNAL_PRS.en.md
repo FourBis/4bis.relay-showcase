@@ -36,4 +36,3 @@ The optional issue is verified against its identity and repository and can be sh
 The public demo uses fictional people, repository, PRs and commits. Its controls only update a local scenario: no GitHub access, test execution or connected installation is implied. Local installations use the accounts and permissions you configure.
 
 Tests use synthetic data and simulated GitHub responses. They do not establish branch protection, required checks, permissions or real account changes.
-

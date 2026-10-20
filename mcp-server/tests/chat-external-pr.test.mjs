@@ -91,4 +91,3 @@ assert.equal(externalConversationTitle({task_json:{mode:"external_pr",title:"Obj
 assert.equal(externalConversationTitle({task_json:'{"mode":"external_pr","title":"Objetivo JSON"}'}),"Objetivo JSON");
 assert.equal(externalConversationTitle({task_json:{mode:"write",title:"Cambio"}}),"");
 console.log("ok - external conversation mode survives object and JSON metadata");
-

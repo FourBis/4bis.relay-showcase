@@ -47,4 +47,3 @@ La inspección de Projects tiene límites de 100 elementos por conexión consult
 La demo pública simula una issue compartida, evidencia por commit y una política inicialmente apagada. Sus IDs y personas son ficticios y no envía solicitudes remotas. Instalar el servidor tampoco configura una política productiva, credenciales, apps, webhooks, reglas ni tableros.
 
 Las pruebas usan GitHub simulado y bases temporales. Revisa la [seguridad](../SECURITY.md) y las cuentas personales antes de habilitar una política en tu instalación.
-

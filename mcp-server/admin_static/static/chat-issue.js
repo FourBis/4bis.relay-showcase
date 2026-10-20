@@ -225,4 +225,3 @@ export function mountIssuePanel(root, { convId, projectSlug, task, onSaved, onBu
   if (task.issue_link) load();
   return {destroy() { disposed = true; ++version; link?.removeEventListener("click", edit); refresh?.removeEventListener("click", apply); region?.removeEventListener("click", retry); }};
 }
-

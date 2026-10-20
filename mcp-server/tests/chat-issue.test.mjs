@@ -191,4 +191,3 @@ requests[1].resolve({enabled:true,status:"synced",events:[{state:"applied"}]});a
 assert.equal(history.open,true,"la sincronización no cierra el historial que la persona está leyendo");
 historyController.destroy();
 console.log("ok - common issue parsing, explicit completion, safe links, sync states, stale loads, retry and open history preservation");
-

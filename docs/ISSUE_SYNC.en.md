@@ -47,4 +47,3 @@ Projects inspection is limited to 100 elements per queried connection. More page
 The public demo simulates shared issues, commit evidence and an initially disabled policy. IDs and people are fictional; it makes no remote requests. Installing the server does not configure production policies, credentials, apps, webhooks, rules or boards.
 
 Tests use simulated GitHub and temporary databases. Review [security](../SECURITY.md) and personal accounts before enabling a policy in your installation.
-

@@ -36,4 +36,3 @@ La issue opcional se verifica por identidad y repositorio, y puede compartirse c
 La demo pública usa personas, repositorio, PR y commits ficticios. Sus botones solo cambian un escenario local; no consultan GitHub, no ejecutan pruebas y no representan una instalación conectada. La instalación local utiliza las cuentas y permisos que configures.
 
 Las pruebas de esta función usan datos sintéticos y GitHub simulado. No acreditan reglas de protección, required checks, permisos o movimientos en una cuenta real.
-

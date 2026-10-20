@@ -79,6 +79,9 @@ jobs:
           mcp-server/tests/test_relay_delegate.py
           mcp-server/tests/test_commands.py
           -q
+      - name: Check offline demo states
+        shell: pwsh
+        run: node site/external-demo.test.mjs
       - name: Check external PR evidence and opt-in issue synchronization
         shell: pwsh
         run: >-
