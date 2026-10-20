@@ -148,6 +148,10 @@ async def test_member_task_actions_are_project_scoped_and_never_publish(monkeypa
                         AsyncMock(return_value={"mode": "write", "state": "ready",
                                                 "workspace_path": "PRIVATE_WORKSPACE",
                                                 "origin_url": "PRIVATE_REPO",
+                                                "issue_link": {"number": 7, "title": "Synthetic issue",
+                                                               "url": "https://github.com/AuroraDemo/demo/issues/7",
+                                                               "private_diagnostic": "PRIVATE_ISSUE"},
+                                                "resolution_complete": False,
                                                 "error": "PRIVATE_ERROR"}))
     request = make_mocked_request("GET", "/tasks/task-a")
     request[identity.IDENTITY_KEY] = "sam@example.test"
@@ -155,10 +159,13 @@ async def test_member_task_actions_are_project_scoped_and_never_publish(monkeypa
                           "enabled": True, "project_slugs": ["aurora-demo"]}])
 
     allowed = await server_task_routes._task_snapshot(request, db, "conversation-a")
-    assert allowed["allowed_actions"] == ["continue", "pause", "cancel"]
+    assert allowed["allowed_actions"] == ["continue", "pause", "cancel", "link_issue", "issue_sync"]
     assert "publish" not in allowed["allowed_actions"]
     assert allowed["can_control"] is False
     assert "workspace_path" not in allowed and "origin_url" not in allowed
+    assert allowed["issue_link"]["number"] == 7
+    assert "private_diagnostic" not in allowed["issue_link"]
+    assert allowed["resolution_complete"] is False
     assert allowed["error"] == "La tarea requiere revisión del propietario."
 
     db.get_project.return_value = PROJECT_B
@@ -308,7 +315,7 @@ async def test_http_enable_write_requires_grant_and_member_cannot_publish_or_tra
         account_failure = await client.post(f"/conversations/{cid}/task", json={
             "action": "enable_write"})
         account_body = await account_failure.json()
-        assert account_failure.status == 422
+        assert account_failure.status == 409
         assert "Mi cuenta" in account_body["error"]
         assert account_body["connect_url"] == "/admin/#/account"
         initialize.side_effect = None

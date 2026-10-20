@@ -44,6 +44,26 @@
 .team-account .button,.team-permissions .button { margin-top:12px; }
 .team-state { margin-top:0; }
 .team-permissions .scene-note { margin-bottom:6px; }
+.scene-tabs { overflow-x:auto; }
+.scene-tabs button { flex-shrink:0; }
+.external-intro { max-width:800px; margin:8px 0 25px; }
+.external-intro .eyebrow { color:#85cfa6; margin-bottom:12px; }
+.external-intro>p:last-child { margin-top:16px; color:#b4c9bc; font-size:.9rem; }
+.external-layout { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.external-card { min-width:0; padding:22px; border:1px solid #3d5946; border-radius:8px; background:#121d16; }
+.external-card h4 { margin:0; font-size:1.2rem; line-height:1.4; font-weight:550; }
+.external-card>.button { margin-top:18px; }
+.external-facts { margin:20px 0; }
+.external-facts>div { border-top:1px solid #304437; padding:10px 0; }
+.external-facts dt { color:#9cb5a4; font-size:.74rem; }
+.external-facts dd { margin:3px 0 0; font-size:.85rem; overflow-wrap:anywhere; }
+.external-facts code,.external-reference code { color:#b3e3c6; font-size:.8rem; overflow-wrap:anywhere; }
+.external-reference { margin:15px 0 0; }
+.external-evidence { list-style:none; padding:0; margin:0; display:grid; gap:14px; }
+.external-evidence li { display:grid; justify-items:start; gap:7px; padding:12px; border:1px solid #304437; border-radius:5px; }
+.external-evidence strong { font-size:.84rem; }
+.external-evidence span { color:#b4c9bc; font-size:.77rem; }
+.external-merge-actions { display:flex; flex-wrap:wrap; gap:8px; }
 @media(max-width:760px) {
   .hero-task { padding:17px; }
   .hero-task>strong { margin-top:18px; }
@@ -52,4 +72,7 @@
   .team-table th,.team-table td { padding:7px 5px; overflow-wrap:anywhere; }
   .graph-wrap,.team-account,.team-permissions { padding:10px; }
   .task-children li { align-items:flex-start; }
+  .external-layout { grid-template-columns:1fr; }
+  .external-card { padding:16px; }
+  .scene-tabs button { flex:0 0 auto; }
 }

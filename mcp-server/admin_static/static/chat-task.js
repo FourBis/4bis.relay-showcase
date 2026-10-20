@@ -3,6 +3,8 @@
 import { apiRoot, escape } from "./api.js";
 import { toast, confirmModal } from "./ui.js";
 import { registerPoller } from "./pollers.js";
+import { externalPanelHtml, openExternalEvidence } from "./chat-external-pr.js";
+import { issuePanelHtml, mountIssuePanel } from "./chat-issue.js";
 
 const ACTIONS = {
   continue: "Continuar",
@@ -61,24 +63,24 @@ function taskAllows(task, action) {
 
 export function panelHtml(task) {
   if (!task) return `<div class="chat-task-empty">Sin tarea persistente para este hilo.</div>`;
+  if (task.mode === "external_pr") return externalPanelHtml(task) + issuePanelHtml(task);
   const tracking = task.tracking || {};
   const controlsLocked = ["cancelled", "cancelling", "finished", "cleaned"]
     .includes(task.state);
   const writeTask = task.mode === "write";
   const hasActionContract = Array.isArray(task.allowed_actions);
   const granted = (action) => taskAllows(task, action);
-  const authorized = granted;
-  const trackAllowed = authorized("track") && writeTask && !!task.pr_url && !!task.publish_allowed
+  const trackAllowed = granted("track") && writeTask && !!task.pr_url && !!task.publish_allowed
     && !controlsLocked && !["paused", "provisioning"].includes(task.state);
   const busy = ["running", "validating", "publishing", "provisioning", "cancelling"]
     .includes(task.state);
-  const actionAllowed = (action) => authorized(action)
+  const actionAllowed = (action) => granted(action)
     && (!controlsLocked || (task.state === "cancelled" && !!task.cancellation_error && action === "cancel"))
     && (action !== "publish" || (writeTask && !!task.publish_allowed
       && !["blocked", "paused", "provisioning"].includes(task.state)))
     && (action !== "continue" || !busy)
     && (action !== "pause" || task.state !== "paused");
-  const enableWrite = authorized("enable_write") && !writeTask && !busy && !controlsLocked;
+  const enableWrite = granted("enable_write") && !writeTask && !busy && !controlsLocked;
   const limits = tracking.enabled
     ? `<span class="badge warn">seguimiento activo · ${tracking.iterations || 0}/${tracking.max_iterations || 0} iteraciones</span>`
     : `<span class="badge dim">seguimiento apagado</span>`;
@@ -100,52 +102,109 @@ export function panelHtml(task) {
       ${writeTask && (!hasActionContract || granted("track")) ? `<label class="chat-task-track"><input type="checkbox" data-task-track ${trackAllowed ? "" : "disabled"}
         ${tracking.enabled ? "checked" : ""} aria-label="Activar seguimiento automático">
         Seguimiento automático <span class="text-xs text-zinc-500">3 iteraciones · 50K tokens · 60 min</span></label>` : ""}</div>
-    ${task.error ? `<p class="chat-task-error">${escape(task.error)}</p>` : ""}`;
+    ${task.error ? `<p class="chat-task-error">${escape(task.error)}</p>` : ""}${issuePanelHtml(task)}`;
 }
 
-export function mountTaskPanel({ convId, onContinue, onTaskUpdate } = {}) {
+export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate } = {}) {
   const panel = document.getElementById("chat-task-panel");
   if (!panel) return () => {};
   let current = null;
   let loading = false;
   let disposed = false;
   let unregister = null;
+  let externalActionPending = false;
+  let issueActionPending = false;
+  let mutationVersion = 0;
+  let issuePanel = null;
   const render = (task) => {
     const focused = document.activeElement;
     const focusKey = focused?.matches?.("[data-task-action]")
       ? `action:${focused.dataset.taskAction}`
-      : focused?.matches?.("[data-task-track]") ? "track" : "";
+      : focused?.matches?.("[data-task-track]") ? "track"
+        : focused?.matches?.("[data-issue-action]") ? `issue:${focused.dataset.issueAction}`
+        : focused?.matches?.("[data-external-action]") ? `external:${focused.dataset.externalAction}` : "";
+    const openSections = [...panel.querySelectorAll("details[open][data-external-section]")]
+      .map(section => section.dataset.externalSection);
+    const openIssueSections = [...panel.querySelectorAll("details[open][data-issue-section]")]
+      .map(section => section.dataset.issueSection);
     current = task;
     panel.hidden = !task;
+    panel.classList?.toggle("chat-external-panel", task?.mode === "external_pr");
     panel.innerHTML = panelHtml(task);
+    issuePanel?.destroy();
+    issuePanel = task ? mountIssuePanel(panel, {convId,projectSlug,task,onBusyChange:busy => {
+      issueActionPending = busy;
+      if (busy) ++mutationVersion;
+    },onSaved:async next => {
+      if (disposed) return;
+      ++mutationVersion;
+      if (next?.mode) render(next);
+      else { loading = false; await refresh(); }
+    }}) : null;
     panel.querySelectorAll("[data-task-action]").forEach((button) => {
       button.addEventListener("click", () => runAction(button.dataset.taskAction));
     });
     panel.querySelector("[data-task-track]")?.addEventListener("change", (event) =>
       runTracking(event.target.checked));
+    panel.querySelectorAll("[data-external-action]").forEach((button) => {
+      button.disabled = externalActionPending;
+      button.addEventListener("click", () => runExternalAction(button.dataset.externalAction));
+    });
+    panel.querySelectorAll("[data-external-section]").forEach(section => {
+      section.open = openSections.includes(section.dataset.externalSection);
+    });
+    panel.querySelectorAll("[data-issue-section]").forEach(section => {
+      section.open = openIssueSections.includes(section.dataset.issueSection);
+    });
     if (focusKey) {
       const target = focusKey === "track"
         ? panel.querySelector("[data-task-track]")
+        : focusKey.startsWith("issue:") ? panel.querySelector(`[data-issue-action="${focusKey.slice(6)}"]`)
+        : focusKey.startsWith("external:") ? panel.querySelector(`[data-external-action="${focusKey.slice(9)}"]`)
         : panel.querySelector(`[data-task-action="${focusKey.slice(7)}"]`);
       if (target && !target.disabled) target.focus();
       else panel.querySelector("button:not(:disabled)")?.focus();
     }
   };
   const refresh = async () => {
-    if (!convId || loading || disposed) return;
+    if (!convId || loading || disposed || externalActionPending || issueActionPending) return;
     loading = true;
+    const version = mutationVersion;
     try {
       const task = await apiRoot(`/conversations/${encodeURIComponent(convId)}/task`);
-      if (disposed) return;
+      if (disposed || version !== mutationVersion) return;
       const usable = task?.mode || task?.creation_failed ? task : null;
       const previous = current;
       render(usable);
       await onTaskUpdate?.(usable, previous);
     } catch (e) {
-      if (disposed) return;
+      if (disposed || version !== mutationVersion) return;
       panel.hidden = false;
       panel.innerHTML = `<div class="chat-task-error">No se pudo leer la tarea: ${escape(e.message)}</div>`;
     } finally { loading = false; }
+  };
+  const runExternalAction = async (action) => {
+    if (current?.mode !== "external_pr" || externalActionPending
+        || !current.allowed_actions?.includes(action === "evidence" ? "external_evidence" : "external_refresh")) return;
+    if (action === "evidence") {
+      return openExternalEvidence({convId, task:current, onSaved:(next) => {
+        if (!disposed) { ++mutationVersion; render(next); }
+      }});
+    }
+    if (action !== "refresh") return;
+    externalActionPending = true; ++mutationVersion; render(current);
+    try {
+      const next = await apiRoot(`/conversations/${encodeURIComponent(convId)}/external-pr`, {
+        method:"POST", body:{action:"refresh"},
+      });
+      if (!disposed) { render(next); toast("Estado de GitHub actualizado", "ok"); }
+    } catch (error) {
+      externalActionPending = false;
+      if (!disposed) { toast(`No se pudo verificar GitHub: ${error.message}`, "err"); await refresh(); }
+    } finally {
+      externalActionPending = false;
+      if (!disposed) render(current);
+    }
   };
   const runAction = async (action) => {
     if (!current || !taskAllows(current, action) || !ACTIONS[action]) return;
@@ -201,6 +260,7 @@ export function mountTaskPanel({ convId, onContinue, onTaskUpdate } = {}) {
   refresh();
   unregister = registerPoller(refresh, 10_000, { tabId: "chat" });
   return { refresh, destroy: () => {
-    disposed = true; unregister?.(); panel.hidden = true; panel.innerHTML = "";
+    disposed = true; unregister?.(); issuePanel?.destroy(); panel.hidden = true; panel.innerHTML = "";
+    panel.classList?.remove("chat-external-panel");
   } };
 }

@@ -12,6 +12,7 @@ from . import finalization
 from . import git_flow
 from . import memory
 from .db import Database
+from .pr_text import neutralize_issue_closing_keywords
 # ---------- conversaciones (ADR-025) + compactación (ADR-026) ----------
 
 SWEEP_INTERVAL_S = 1800.0  # cada 30 min el sweeper revisa auto-close
@@ -75,12 +76,12 @@ async def _finalize_pr_bg_bound(db: Database, conv_id: str, project_slug: str,
                f"run{'' if uso['runs'] == 1 else 's'} — ") if uso["runs"] else ""
     body = ((summary or "").strip() or "Cambios de la conversación de 4bis.relay.") + (
         f"\n\n_Conversación `{conv_id[:8]}` — {trabajo}4bis.relay_")
-    # Seguimiento por GitHub (fase 4): la keyword la interpreta GitHub al
-    # mergear — cierra el issue y el tablero lo mueve a Done sin que nadie
-    # actualice estado a mano. Va en el body base, no en el `body_builder`,
-    # porque ese es best-effort y puede no correr.
+    # A reference is not a complete-resolution declaration. The opt-in issue
+    # synchronizer closes only after it verifies all linked PRs and the human
+    # declaration; a legacy finalizer must not bypass those conditions.
     if issue_number:
-        body += f"\n\nCloses #{issue_number}"
+        body += f"\n\nRelacionado con #{issue_number} (sin cierre automático)."
+    body = neutralize_issue_closing_keywords(body)
 
     async def _build_body(stat: str, diff: str) -> tuple[str, bool]:
         """Verify (build+test) + descripción del diff → body del PR.
@@ -94,7 +95,8 @@ async def _finalize_pr_bg_bound(db: Database, conv_id: str, project_slug: str,
         job["state"] = "describing"
         described = await memory.describe_changes(diff, stat=stat)
         job["state"] = "opening"
-        return "\n\n".join([verify_md] + ([described] if described else [])), ok is False
+        generated = "\n\n".join([verify_md] + ([described] if described else []))
+        return neutralize_issue_closing_keywords(generated), ok is False
 
     try:
         outcome = await git_flow.finalize_conversation_pr(

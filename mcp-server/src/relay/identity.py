@@ -303,6 +303,13 @@ MEMBER_ALLOWED = frozenset({
     ("GET", "/conversations/{id}/diff"),
     ("GET", "/conversations/{id}/pr"),
     ("POST", "/conversations/{id}/task"),
+    ("POST", "/projects/{slug}/external-pr"),
+    ("POST", "/conversations/{id}/external-pr"),
+    ("GET", "/projects/{slug}/issues"),
+    ("POST", "/conversations/{id}/issue"),
+    ("GET", "/conversations/{id}/issue-sync"),
+    ("POST", "/conversations/{id}/issue-sync"),
+    ("GET", "/projects/{slug}/issue-sync/discovery"),
     # adjuntar una imagen al prompt y volver a verla
     ("POST", "/attachments"), ("GET", "/attachments/{attach_id}"),
 })

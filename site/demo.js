@@ -9,6 +9,36 @@ const initialChats = () => ({
   access: {name: null, draft: "", messages: [], open: false},
 });
 let chats = initialChats(), active = "docs", turns = 1, feedback = false, split = false, continued = false, published = false, githubConnected = false, writeEnabled = false, alexProjects = new Set(), renaming;
+// Pure state for the local external-PR scenario; no remote data or effects.
+function initialExternalDemo() {
+  return { registered:false, head:1, declaration:0, checks:0, approval:0,
+    policy:false, complete:false, firstMerged:false, secondMerged:false, issueClosed:false, lastAction:"" };
+}
+function externalDemoAssessment(state) {
+  if (!state.registered) return "unregistered";
+  if (state.firstMerged) return "merged";
+  if (state.declaration !== state.head || state.checks !== state.head) return "missing_evidence";
+  return state.approval === state.head ? "ready" : "review_pending";
+}
+function reduceExternalDemo(state, action, value) {
+  const next = { ...state, lastAction:action };
+  if (action === "register") next.registered = true;
+  if (!next.registered) return state;
+  if (action === "declare" && !next.firstMerged) next.declaration = next.head;
+  if (action === "check" && !next.firstMerged) next.checks = next.head;
+  if (action === "approve" && !next.firstMerged) next.approval = next.head;
+  if (action === "new_head" && !next.firstMerged) next.head++;
+  if (action === "policy") next.policy = value === true;
+  if (action === "complete") next.complete = value === true;
+  // A GitHub merge is independent from Relay's assessment, even in this example.
+  if (action === "merge_first") next.firstMerged = true;
+  if (action === "merge_second") next.secondMerged = true;
+  if (next.policy && next.complete && next.firstMerged && next.secondMerged) next.issueClosed = true;
+  // Disabling a policy or withdrawing a declaration never reopens a closed issue.
+  return next;
+}
+// End of the pure external-PR scenario state.
+let externalDemo = initialExternalDemo();
 const chatLabel = id => chats[id].name || (id === "docs" ? tr("Documentación", "Documentation") : tr("Revisar accesos", "Access review"));
 const windows = $("#chat-windows");
 const dialog = $("#rename-dialog");
@@ -134,6 +164,53 @@ function renderTask() {
   $("#publish-result").textContent = published ? tr("Admin Ana publicó la PR ficticia. Sigue sin merge ni integración.", "Admin Ana published the fictional PR. It remains unmerged and not integrated.") : "";
 }
 
+function renderExternalDemo() {
+  const state = externalDemo;
+  const head = state.head.toString(16).padStart(40, "0");
+  $("#external-head").textContent = head;
+  const labels = {
+    unregistered:tr("Sin registrar", "Not registered"),
+    missing_evidence:tr("Falta evidencia actual", "Current evidence missing"),
+    review_pending:tr("Revisión pendiente", "Review pending"),
+    ready:tr("Apto en esta simulación", "Ready in this simulation"),
+    merged:tr("Fusionado (simulación)", "Merged (simulation)"),
+  };
+  $("#external-assessment").textContent = labels[externalDemoAssessment(state)];
+  const evidenceState = value => !value ? tr("Sin evidencia", "No evidence")
+    : value === state.head ? tr("SHA actual · simulada", "Current SHA · simulated")
+      : tr("Histórica · otro SHA", "Historical · different SHA");
+  $("#external-declaration").textContent = evidenceState(state.declaration);
+  $("#external-checks").textContent = evidenceState(state.checks);
+  $("#external-review").textContent = evidenceState(state.approval);
+  $("#external-register").disabled = state.registered;
+  for (const [id, value] of [["declare", state.declaration], ["check", state.checks], ["approve", state.approval]]) {
+    $("#external-" + id).disabled = !state.registered || state.firstMerged || value === state.head;
+  }
+  $("#external-new-head").disabled = !state.registered || state.firstMerged;
+  $("#external-policy").disabled = !state.registered;
+  $("#external-complete").disabled = !state.registered;
+  $("#external-policy").checked = state.policy;
+  $("#external-complete").checked = state.complete;
+  $("#external-policy-state").textContent = state.policy
+    ? tr("Habilitada (simulación)", "Enabled (simulation)") : tr("Deshabilitada", "Disabled");
+  $("#external-project-state").textContent = !state.policy ? tr("Sin cambios", "Unchanged")
+    : !state.registered ? tr("Pendiente", "Pending")
+      : state.firstMerged ? tr("Integrado · opción ficticia", "Merged · fictional option")
+        : tr("En revisión · opción ficticia", "In review · fictional option");
+  const merged = tr("fusionado", "merged"), open = tr("abierto", "open");
+  $("#external-merge-state").textContent = `#34: ${state.firstMerged ? merged : open} · #35: ${state.secondMerged ? merged : open}`;
+  $("#external-issue-state").textContent = state.issueClosed ? tr("Cerrada (simulación)", "Closed (simulation)") : tr("Abierta", "Open");
+  $("#external-merge-first").disabled = !state.registered || state.firstMerged;
+  $("#external-merge-second").disabled = !state.registered || state.secondMerged;
+  $("#external-closure-reason").textContent = state.issueClosed
+    ? tr("Se verificaron ambas fusiones y la declaración humana con la política habilitada. No se reabre automáticamente.", "Both merges and the human declaration were verified with the policy enabled. It is never reopened automatically.")
+    : !state.policy ? tr("Política deshabilitada: vincular o fusionar no activa la sincronización.", "Policy disabled: linking or merging does not activate synchronization.")
+      : !state.complete ? tr("Avance parcial: falta declarar la resolución completa.", "Partial work: a complete-resolution declaration is missing.")
+        : tr("La issue permanece abierta hasta verificar el merge de todos los PR vinculados.", "The issue stays open until every linked PR has a verified merge.");
+  $("#external-result").textContent = state.lastAction
+    ? tr("Escenario ficticio actualizado. No se realizó ninguna operación remota. Reiniciar demo restaura todos los pasos.", "Fictional scenario updated. No remote operation took place. Reset demo restores every step.") : "";
+}
+
 function translate() {
   document.documentElement.lang = english ? "en" : "es";
   document.querySelectorAll("[data-en]").forEach(el => { el.textContent = el.dataset[english ? "en" : "es"]; });
@@ -145,7 +222,7 @@ function translate() {
   $("#language").textContent = english ? "ES" : "EN";
   $("#language").setAttribute("aria-label", english ? "Cambiar a español" : "Switch to English");
   document.title = tr("FourBis Relay — Tu equipo, tus repositorios y la IA", "FourBis Relay — Your team, repositories, and AI");
-  renderChats(); renderTask();
+  renderChats(); renderTask(); renderExternalDemo();
 }
 
 $("#language").addEventListener("click", () => {
@@ -195,9 +272,22 @@ $("#allow-write").addEventListener("click", () => { if (alexProjects.has("web") 
 $("#continue-task").addEventListener("click", () => { continued = true; renderTask(); });
 $("#publish-task").addEventListener("click", () => { published = true; renderTask(); });
 $("#feedback").addEventListener("click", () => { feedback = true; renderTask(); });
+for (const [id, action] of [["register", "register"], ["declare", "declare"], ["check", "check"], ["approve", "approve"], ["new-head", "new_head"], ["merge-first", "merge_first"], ["merge-second", "merge_second"]]) {
+  $("#external-" + id).addEventListener("click", () => {
+    externalDemo = reduceExternalDemo(externalDemo, action);
+    renderExternalDemo();
+  });
+}
+for (const action of ["policy", "complete"]) {
+  $("#external-" + action).addEventListener("change", event => {
+    externalDemo = reduceExternalDemo(externalDemo, action, event.target.checked);
+    renderExternalDemo();
+  });
+}
 $("#reset").addEventListener("click", () => {
   chats = initialChats(); active = "docs"; turns = 1; feedback = false; split = false; continued = false; published = false; githubConnected = false; writeEnabled = false; alexProjects = new Set();
   $("#edit-project-panel").hidden = true; for (const option of $("#project-picker").options) option.selected = false;
-  renderChats(); renderTask(); selectScene("chats");
+  externalDemo = initialExternalDemo();
+  renderChats(); renderTask(); renderExternalDemo(); selectScene("chats");
 });
 translate();

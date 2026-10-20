@@ -24,6 +24,15 @@ async def api_projects(request: web.Request) -> web.Response:
     """GET /admin/api/projects — lista con estado de index."""
     db = request.app[DB_KEY]
     projects = await db.list_projects(enabled_only=False)
+    if request.query.get("capability") == "external_pr":
+        eligible = []
+        for project in projects:
+            path = project.get("repo_path") or ""
+            if (identity.can_write_project(request, project) and path
+                    and _has_git(Path(path))
+                    and github_mod._parse_remote(_git_remote_url(path) or "")):
+                eligible.append({"slug": project["slug"], "name": project["name"]})
+        return web.json_response({"projects": eligible})
     if identity.role_of(request) == "finance":
         return web.json_response({"projects": [
             {"slug": p["slug"], "name": p["name"], "enabled": bool(p.get("enabled", 1))}
@@ -340,17 +349,46 @@ async def api_project_cbm(request: web.Request) -> web.Response:
         "note": note,
     })
 
+def _external_pr_policy(value):
+    """Small explicit per-risk policy; an empty mapping disables readiness."""
+    if not isinstance(value, dict) or set(value) - {"low", "medium", "high"}:
+        raise ValueError("external_pr_policy debe contener solo riesgos low, medium o high")
+    policy = {}
+    for risk, entry in value.items():
+        if not isinstance(entry, dict) or set(entry) != {"required_checks", "require_declaration"}:
+            raise ValueError(f"external_pr_policy.{risk} requiere required_checks y require_declaration, sin campos adicionales")
+        checks = entry["required_checks"]
+        if (not isinstance(checks, list) or not 1 <= len(checks) <= 20
+                or any(not isinstance(name, str) or not name.strip() or len(name) > 200 for name in checks)):
+            raise ValueError(f"external_pr_policy.{risk}.required_checks requiere de 1 a 20 nombres no vacíos de hasta 200 caracteres")
+        checks = [name.strip() for name in checks]
+        if len(set(checks)) != len(checks):
+            raise ValueError(f"external_pr_policy.{risk}.required_checks contiene nombres duplicados")
+        if type(entry["require_declaration"]) is not bool:
+            raise ValueError(f"external_pr_policy.{risk}.require_declaration debe ser booleano")
+        policy[risk] = {"required_checks": checks, "require_declaration": entry["require_declaration"]}
+    return policy
+
+
 async def api_projects_patch(request: web.Request) -> web.Response:
-    """PATCH /admin/api/projects/{slug} — edita nombre/desc/ruta."""
+    """PATCH /admin/api/projects/{slug}; the route remains Admin-only."""
     db = request.app[DB_KEY]
     slug = request.match_info["slug"]
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "json inválido"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Se requiere un objeto JSON"}, status=400)
     project = await db.get_project(slug)
     if not project:
         return web.json_response({"error": "not found"}, status=404)
+    if "external_pr_policy" in body:
+        try:
+            policy = _external_pr_policy(body["external_pr_policy"])
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=422)
+        project["defaults_json"] = {**(project.get("defaults_json") or {}), "external_pr_policy": policy}
     editable = {"name", "description", "repo_path", "system_prompt",
                 "enabled", "include_in_index", "night_mode_enabled",
                 "night_config", "discord_channel_id"}  # Iter 10.1

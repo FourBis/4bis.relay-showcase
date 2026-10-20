@@ -34,12 +34,16 @@ function harness(responses, filter = '', apiRoot = async () => ({})) {
     renderDraftMode() {}, setBusy() {}, matchCommand: () => null, renderSuggestions() {},
     renderAttachTray() {}, appendOptimisticUser() {}, pokeGrafo: async () => {}, pollChat: async () => {},
     renderHeader() {}, loadChats() {}, newRequestId: () => 'fake-request-id',
+    formSection: ({body}) => body, issuePickerHtml: () => '',
+    mountIssuePicker: () => ({destroy() {},setProject() {}}),
+    optionalIssuePayload: value => value ? {issue: Number(value)} : {},
   };
-  runInNewContext(`let chatSelectionGeneration = 0, chatDraftGeneration = 0, activeChat, taskPanel;
+  runInNewContext(`let chatSelectionGeneration = 0, chatDraftGeneration = 0, activeChat, taskPanel, draftIssuePicker;
     let pendingAttachments = [], chosenModel = '', chosenStageModels = {};
     ${openDraft}; ${createDraft}; ${sendMessage};
     this.open = openNewChatDraft; this.send = sendCurrentMessage;
     this.state = () => activeChat; this.generation = () => chatSelectionGeneration;
+    this.setIssue = value => { activeChat.issueInput = value; };
     this.setBusyState = (busy) => { if (activeChat) activeChat.busy = busy; }`, context);
   context.setBusy = (busy) => context.setBusyState(busy);
   return { context, select, get calls() { return calls; }, get opened() { return opened; }, node };
@@ -156,4 +160,23 @@ test('catálogo sin proyectos habilitados avisa y no abre borrador', async () =>
   await h.context.open();
   assert.equal(h.node('#toast').textContent, 'No hay proyectos habilitados');
   assert.equal(h.opened, 0); assert.equal(h.context.state(), undefined);
+});
+
+
+test('la issue opcional viaja con el borrador sin sustituir su objetivo', async () => {
+  const requests = [];
+  const h = harness([catalog('demo')], '', async (path, options) => {
+    requests.push({path,options});
+    if (path === '/conversations') return {id:'issue-conversation'};
+    return {chat_id:'run-1'};
+  });
+  await h.context.open();
+  h.context.setIssue('42');
+  h.node('#chat-panel-input').value = 'Avance parcial del objetivo';
+  await h.context.send();
+  const created = JSON.parse(requests.find(row => row.path === '/conversations').options.body);
+  assert.equal(created.issue,42);
+  assert.equal(created.project,'demo');
+  assert.equal(created.resolution_complete,undefined);
+  assert.equal(JSON.parse(requests.find(row => row.path === '/experts/run').options.body).user,'Avance parcial del objetivo');
 });

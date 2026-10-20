@@ -308,6 +308,30 @@ async def test_native_comments_in_shared_chat_use_current_actor(accounts, monkey
     assert len(seen) == 2
 
 
+async def test_model_pr_creation_neutralizes_closing_body_at_outbound_boundary(accounts, monkeypatch):
+    import httpx
+    from relay.account_tools import account_tools
+    from relay import github
+
+    _, store = accounts
+    await save_github(store)
+    monkeypatch.setattr(github, "repo_slug", AsyncMock(return_value="AuroraDemo/project"))
+    seen = []
+
+    async def respond(request):
+        seen.append(json.loads(request.content))
+        assert request.url.path == "/repos/AuroraDemo/project/pulls"
+        return httpx.Response(201, json={"number": 12})
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client_class(transport=httpx.MockTransport(respond)))
+    with bind_actor(store.db, "alex@example.test"):
+        tools = {tool.name: tool.function for tool in account_tools({"repo_path": "repo"})}
+        await tools["github_create_pr"]("A change", "Fixes #7\nRESOLVES Other/repo#9", "work")
+    assert seen == [{"title": "A change", "body": "Relacionado con #7\nRelacionado con Other/repo#9",
+                     "head": "work", "base": "develop", "draft": True}]
+
+
 async def test_oauth_transport_errors_do_not_expose_provider_body(accounts, monkeypatch):
     import httpx
     client_class = httpx.AsyncClient

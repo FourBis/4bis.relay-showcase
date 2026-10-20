@@ -17,6 +17,14 @@ from .user_accounts import AccountError
 
 
 async def _task_snapshot(request, db, cid):
+    task = await db.get_conversation_task(cid)
+    if isinstance(task, dict) and task.get("mode") == "external_pr":
+        from . import external_pr
+        conv = await db.get_conversation(cid)
+        project = await db.get_project(conv["project_slug"])
+        if not identity.can_write_project(request, project):
+            raise web.HTTPForbidden(text='{"error":"Proyecto no autorizado para tu cuenta"}', content_type="application/json")
+        return external_pr.snapshot(task, project)
     state = await task_service.snapshot(db, cid)
     if not state:
         return state
@@ -33,6 +41,8 @@ async def _task_snapshot(request, db, cid):
         actions = ["continue", "pause", "cancel"]
     if state.get("mode") == "read_only" and identity.can_write_project(request, project):
         actions.append("enable_write")
+    if state.get("mode") in {"write", "read_only"} and identity.can_write_project(request, project):
+        actions.extend(["link_issue", "issue_sync"])
     visible = task_service.visible_task(state, owner=owner)
     return {**visible, "allowed_actions": actions}
 
@@ -44,7 +54,7 @@ async def task_get(request):
     if not conv:
         return web.json_response({"error": "No existe la conversación"}, status=404)
     state = await db.get_conversation_task(cid)
-    if state:
+    if state and state.get("mode") != "external_pr":
         project = await db.get_project(conv["project_slug"])
         if project:
             try:
@@ -265,9 +275,8 @@ async def _apply_task_action(request):
             raise ValueError("Acción desconocida")
         return web.json_response(await _task_snapshot(request, db, cid))
     except AccountError as exc:
-        return web.json_response({"error": str(exc),
-                                  "connect_url": "/admin/#/account",
-                                  "conversation_id": cid}, status=422)
+        return web.json_response({"error": str(exc), "connect_url": "/admin/#/account",
+                                  "conversation_id": cid}, status=409)
     except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
         message = str(exc) if identity.role_of(request) == identity.OWNER_ROLE else (
             "No se pudo completar la acción. Revisa los permisos y el estado de la tarea.")

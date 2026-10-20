@@ -520,6 +520,10 @@ async def conversation_set_discord_user(request: web.Request) -> web.Response:
     """
     db: Database = request.app[DB_KEY]
     conv_id = request.match_info["id"]
+    if await db.get_conversation(conv_id):
+        if (await db.get_conversation_task(conv_id)).get("mode") == "external_pr":
+            return web.json_response({"error": "external_pr_read_only", "message":
+                "Un PR externo solo registra evidencia y revisión; no abre hilos de ejecución."}, status=409)
     try:
         body: dict = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):

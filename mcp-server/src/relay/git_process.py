@@ -96,6 +96,9 @@ async def _exec(repo: str, program: str, *args: str,
     try:
         env = None
         if program == "gh":
+            if args[:2] == ("pr", "create"):
+                from .pr_text import neutralize_gh_pr_create_body
+                args = neutralize_gh_pr_create_body(args)
             from .github_credentials import gh_env
             env = await gh_env()
         proc = await asyncio.create_subprocess_exec(

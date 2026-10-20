@@ -120,6 +120,9 @@ class BranchWorker:
         """Como _sh pero sin shell: cada arg va literal (create_subprocess_exec).
         Para `gh`, donde el título/body vienen del LLM: sin cmd.exe no hay
         que escapar comillas, %, &, ^ ni newlines (evita inyección/roturas)."""
+        if program == "gh" and args[:2] == ("pr", "create"):
+            from .pr_text import neutralize_gh_pr_create_body
+            args = neutralize_gh_pr_create_body(args)
         proc = await asyncio.create_subprocess_exec(
             program, *args, cwd=self.repo,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)

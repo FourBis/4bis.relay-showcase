@@ -217,8 +217,8 @@ def issue_block(data: dict) -> str:
     lines = [
         f"## Issue #{data.get('number')} — {data.get('title') or ''}".rstrip(),
         "",
-        "Esta conversación resuelve ese issue. El PR que abra `/cerrar` lo "
-        "va a cerrar automáticamente.",
+        "Esta conversación trabaja sobre ese issue. El vínculo no declara "
+        "resolución completa ni autoriza su cierre automático.",
     ]
     if labels:
         lines.append(f"Labels: {labels}")

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+globalThis.externalPanelHtml = () => "<div>PR externo</div>";
+globalThis.openExternalEvidence = async () => {};
+globalThis.issuePanelHtml = () => "";
+globalThis.mountIssuePanel = () => ({destroy() {}});
 const src = readFileSync(
   new URL("../admin_static/static/chat-task.js", import.meta.url), "utf8")
   .replace(/^import .*$/gm, "");

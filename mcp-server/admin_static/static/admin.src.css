@@ -2721,6 +2721,11 @@ dialog.workspace-launcher[open] {
 }
 
 .chat-task-panel { margin: .75rem 1rem 0; padding: .75rem; border-color: var(--ws-line, #27272a); }
+.chat-external-panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; }
+.chat-external-panel details { margin-top: .75rem; padding-top: .5rem; border-top: 1px solid var(--ws-line, #27272a); }
+.chat-external-panel summary { cursor: pointer; font-size: .8rem; color: var(--ws-text, #f4f4f5); }
+.chat-external-panel ul { padding-left: 1rem; list-style: disc; }
+.chat-external-panel li { margin-top: .4rem; }
 .chat-task-head, .chat-task-meta, .chat-task-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .chat-task-head { justify-content: space-between; color: var(--ws-text, #f4f4f5); }
 .chat-task-meta { margin-top: .35rem; color: var(--ws-muted, #a1a1aa); font-size: .72rem; }

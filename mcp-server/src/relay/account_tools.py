@@ -8,6 +8,7 @@ import httpx
 from pydantic_ai import Tool
 
 from . import github
+from .pr_text import neutralize_issue_closing_keywords
 from .user_accounts import AccountError, current_actor, require_account
 
 
@@ -16,6 +17,8 @@ async def github_request(method: str, repo_path: str, suffix: str, *, payload=No
     repo = await github.repo_slug(repo_path)
     if not repo or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
         raise AccountError("El proyecto no tiene un repositorio GitHub válido.")
+    if method == "POST" and suffix == "pulls" and isinstance(payload, dict):
+        payload = {**payload, "body": neutralize_issue_closing_keywords(payload.get("body") or "")}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             response = await client.request(method, f"https://api.github.com/repos/{repo}/{suffix}",

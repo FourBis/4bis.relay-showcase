@@ -205,6 +205,48 @@ Una respuesta válida incluye `text`, `sent`, `dry_run`, `channel`,
 bot, sin comprobar recepción o lectura por una persona. Este POST no acepta
 `request_id` ni garantiza deduplicación de reintentos.
 
+## PR externos e issues
+
+Estas rutas requieren una cuenta activa con permiso de escritura en el proyecto.
+Usan la conexión personal de GitHub existente. Registrar una PR no ejecuta código,
+crea un worktree ni concede publicación, merge o despliegue.
+
+| Método | Ruta | Contrato |
+|---|---|---|
+| GET | `/admin/api/projects?capability=external_pr` | Catálogo mínimo de proyectos elegibles: `slug` y `name`. |
+| POST | `/projects/{slug}/external-pr` | `{url,title,risk,actor_label?,issue?}`; `risk` es `low`, `medium` o `high`. |
+| POST | `/conversations/{id}/external-pr` | `{action:"refresh"}` o `{action:"evidence",request_id,head_sha,summary}`. |
+| GET | `/projects/{slug}/issues` | Lista de issues canónicos del repositorio autorizado. |
+| POST | `/conversations/{id}/issue` | `{issue,resolution_complete?}`; número entero o URL canónica de issue. |
+| GET | `/conversations/{id}/issue-sync` | Estado remoto observado, errores e historial de sincronización. |
+| POST | `/conversations/{id}/issue-sync` | `{action:"refresh"}` o `{action:"retry"}`; reconcilia incertidumbre antes de repetir efectos. |
+| GET | `/projects/{slug}/issue-sync/discovery` | Projects y campos existentes; `project_id` selecciona uno explícitamente. |
+| POST | `/projects/{slug}/issue-sync/policy` | Solo Admin: `{policy:{enabled,issue_states,projects}}`; valida IDs y opciones existentes. |
+
+`POST /conversations` también admite `issue` y `resolution_complete`: verifica
+identidad y acceso antes de crear una tarea. Una URL de PR no es una URL de issue.
+Las referencias que genera Relay no llevan instrucciones automáticas de cierre.
+
+La evidencia conserva el SHA completo y un `request_id` estable. Repetir el mismo
+payload devuelve su recibo; cambiarlo con el mismo ID se rechaza. Un head nuevo
+invalida la aptitud anterior y conserva el historial. Declaración, checks remotos
+y revisión humana independiente se presentan por separado. La política por riesgo
+se guarda con `PATCH /admin/api/projects/{slug}` y `external_pr_policy`; sin una
+política válida nunca se muestra aptitud.
+
+La sincronización empieza desactivada. La política se refiere a transiciones
+`started`, `review`, `changes_requested`, `merged` y `cancelled`, con estados de
+issue y IDs de Project, campo single-select y opciones existentes. Cerrar exige
+resolución completa declarada por una persona y merge verificado de todas las PR
+vinculadas. Publicar o cerrar una PR sin merge no acredita resolución. Relay no
+crea Projects, items, campos, permisos, webhooks ni reglas de rama.
+
+Errores de cuenta conservan `409` con `connect_url`. Datos inválidos devuelven
+`422`, falta de autorización `403` y fallos remotos `502`. Los registros externos
+sin acceso vigente se ocultan en listados, búsquedas y detalles.
+
+Consulta [PR externos](EXTERNAL_PRS.md) y [sincronización](ISSUE_SYNC.md).
+
 ## Acceso
 
 En instalaciones anteriores sin login nativo habilitado, las peticiones locales

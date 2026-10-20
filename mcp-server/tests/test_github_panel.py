@@ -17,13 +17,13 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import github, github_credentials
+from relay import external_pr, git_flow, github, github_credentials, issue_links, task_workspace
 from relay.db import Database
 from relay.server import DB_KEY, create_app
 
@@ -262,32 +262,48 @@ async def test_endpoint_proyecto_desconocido_404(cli):
 
 
 async def test_conversacion_con_issue_inexistente_no_se_crea(cli):
-    """Atar una conversación a un issue que no existe deja un PR con un
-    `Closes #N` que no cierra nada — y eso se descubre tarde. Se valida
-    contra GitHub ANTES de crear la rama."""
-    async def fake_slug(repo_path):
-        return "AuroraDemo/website-demo"
-
-    async def sin_issue(slug, number):
-        return None
-
-    with patch.object(github, "repo_slug", fake_slug), \
-            patch.object(github, "issue", sin_issue):
+    """Un issue sin identidad remota válida no crea tarea ni workspace."""
+    actor = AsyncMock(return_value={"relay_actor": "owner", "github_id": 123, "github_login": "human"})
+    resolve = AsyncMock(side_effect=ValueError("Issue #999 no existe en AuroraDemo/website-demo"))
+    workspace = AsyncMock(side_effect=AssertionError("No workspace for an invalid issue"))
+    with patch.object(external_pr, "actor_identity", actor), \
+            patch.object(issue_links, "resolve", resolve), \
+            patch.object(task_workspace, "initialize_task", workspace):
         r = await cli.post("/conversations",
                            json={"project": "demo", "issue": 999})
-    assert r.status == 404
+    assert r.status == 422
     assert "999" in (await r.json())["error"]
+    workspace.assert_not_awaited()
+    db: Database = cli.server.app[DB_KEY]
+    assert await db.run("SELECT id FROM conversations WHERE project_slug=?", ("demo",)) == []
+
+
+async def test_conversation_issue_account_error_preserves_reconnect(cli):
+    from relay.user_accounts import AccountError
+    workspace = AsyncMock()
+    with patch.object(external_pr, "actor_identity", AsyncMock(side_effect=AccountError("Reconecta GitHub"))), \
+            patch.object(task_workspace, "initialize_task", workspace):
+        response = await cli.post("/conversations", json={"project": "demo", "issue": 7})
+    assert response.status == 409
+    assert (await response.json())["connect_url"] == "/admin/#/account"
+    workspace.assert_not_awaited()
+    assert await cli.server.app[DB_KEY].run("SELECT id FROM conversations WHERE project_slug=?", ("demo",)) == []
 
 
 async def test_conversacion_con_issue_lo_guarda(cli):
-    async def fake_slug(repo_path):
-        return "AuroraDemo/website-demo"
+    canonical = {"repo": "AuroraDemo/website-demo", "repo_id": 42, "number": 42,
+                 "node_id": "I_demo42", "url": "https://github.com/AuroraDemo/website-demo/issues/42",
+                 "title": "Arreglar el login", "state": "OPEN", "updated_at": "2026-10-20T12:00:00Z"}
+    actor = AsyncMock(return_value={"relay_actor": "owner", "github_id": 123, "github_login": "human"})
 
-    async def fake_issue(slug, number):
-        return {"number": number, "title": "Arreglar el login", "body": "…"}
+    async def initialize(db, project, cid, *, read_only=False, **kwargs):
+        assert not read_only
+        return await db.update_conversation_task(cid, mode="write", state="ready", branch="codex/fake-issue")
 
-    with patch.object(github, "repo_slug", fake_slug), \
-            patch.object(github, "issue", fake_issue):
+    with patch.object(external_pr, "actor_identity", actor), \
+            patch.object(issue_links, "resolve", AsyncMock(return_value=canonical)), \
+            patch.object(git_flow, "is_git_repo", AsyncMock(return_value=True)), \
+            patch.object(task_workspace, "initialize_task", initialize):
         r = await cli.post("/conversations",
                            json={"project": "demo", "issue": 42})
     assert r.status == 201
@@ -296,12 +312,20 @@ async def test_conversacion_con_issue_lo_guarda(cli):
     db: Database = cli.server.app[DB_KEY]
     conv = await db.get_conversation(body["id"])
     assert conv["issue_number"] == 42
+    task = await db.get_conversation_task(body["id"])
+    assert task["mode"] == "write"
+    assert task["issue_link"] == canonical
+    assert task["resolution_complete"] is False
 
 
 async def test_issue_invalido_es_400(cli):
-    r = await cli.post("/conversations",
-                       json={"project": "demo", "issue": "cuarenta"})
+    remote = AsyncMock(side_effect=AssertionError("No GitHub for malformed issue input"))
+    with patch.object(external_pr, "actor_identity", remote), \
+            patch.object(issue_links, "resolve", remote):
+        r = await cli.post("/conversations",
+                           json={"project": "demo", "issue": "cuarenta"})
     assert r.status == 400
+    remote.assert_not_awaited()
 
 
 def test_issue_block_recorta_y_lista_labels():

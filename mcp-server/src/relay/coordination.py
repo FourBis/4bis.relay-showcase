@@ -178,6 +178,9 @@ def guard_workspace(db_key, *, source="body", enqueue=False):
                     conv_a or conv_b or "", str) else ""
                 if conv_id:
                     row = await db.get_conversation(conv_id)
+                elif enqueue and isinstance(slug, str) and isinstance(body.get("discord_thread_id"), str):
+                    row = await db.get_open_conversation_by_thread(slug, body["discord_thread_id"])
+                    conv_id = row["id"] if row else ""
             elif source == "workspace":
                 slug = request.match_info.get("slug")
                 conv_a = request.query.get("conversation")
@@ -211,6 +214,13 @@ def guard_workspace(db_key, *, source="body", enqueue=False):
             project = await db.get_project(slug.strip()) if isinstance(slug, str) else None
             if not project:
                 return await handler(request)
+            if conv_id and row:
+                task = await db.get_conversation_task(conv_id)
+                if isinstance(task, dict) and task.get("mode") == "external_pr":
+                    return web.json_response(
+                        {"error": "external_pr_read_only", "message":
+                         "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
+                         "conversation_id": conv_id}, status=409)
             if enqueue and conv_id and row:
                 task = await db.get_conversation_task(conv_id)
                 if task.get("mode"):
