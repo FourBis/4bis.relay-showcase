@@ -47,6 +47,7 @@ let modelCatalog = [];
 let chosenModel = globalThis.localStorage?.getItem("chat.model") || "";
 let chatObjectBackWired = false;
 let chatSelectionGeneration = 0;
+let chatDraftGeneration = 0;
 let taskPanel = null;
 
 function newRequestId() {
@@ -1506,32 +1507,80 @@ function appendLiveStep(step) {
   }
 }
 
+const TERMINAL_CHAT_STATUSES = new Set(["ok", "error", "cancelled"]);
+
+function isTerminalChatStatus(value) {
+  return TERMINAL_CHAT_STATUSES.has(String(value?.status || "").toLowerCase());
+}
+
+function isTerminalRunSnapshot(value) {
+  const status = String(value?.status || "").toLowerCase();
+  return !!value?.finished && (!status || TERMINAL_CHAT_STATUSES.has(status));
+}
+
+function showPollReconnect() {
+  const button = $("#chat-panel-busy");
+  if (button && !button.hidden) button.textContent = "↻ reconectando…";
+}
+
 async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
   const POLL_MS = 1500;
+  const RETRY_MAX_MS = 10_000;
+  let retryMs = POLL_MS;
   while (selectionIsCurrent(generation, convId)
       && activeChat.currentChatId === chatId) {
     if (!isChatViewVisible()) {
       await new Promise((r) => setTimeout(r, POLL_MS));
       continue;
     }
-    let finished = false, err = null;
+    let finished = false, err = null, waitMs = POLL_MS;
     try {
       const s = await apiRoot(`/experts/status/${encodeURIComponent(chatId)}`);
       // Un run en cola no terminó aunque un backend antiguo envíe
       // `finished` por defecto; conservar el polling evita un fin espurio.
-      finished = s.status !== "queued" && !!s.finished;
+      finished = isTerminalRunSnapshot(s);
+      retryMs = POLL_MS;
       if (s.error) err = s.error;
-      if (!selectionIsCurrent(generation, convId)) return;
+      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
       if (!finished) updateBusyStatus(s);
     } catch (e) {
-      _dbg("pollChat: status 404/error → asumo terminado", e.message);
-      finished = true;
+      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      _dbg("pollChat: status error", e.message);
+      if (e?.status === 404) {
+        // El progreso en memoria desaparece al terminar o reiniciar el
+        // relay; sólo la fila persistida puede confirmar el estado final.
+        try {
+          const persisted = await apiRoot(
+            `/chats/${encodeURIComponent(chatId)}/status`);
+          if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+          const chat = persisted?.chat || {};
+          finished = isTerminalChatStatus(chat);
+          retryMs = POLL_MS;
+          if (finished) {
+            err = chat.error || null;
+          } else if (persisted?.progress) {
+            updateBusyStatus({ ...persisted.progress, status: chat.status });
+          } else {
+            showPollReconnect();
+          }
+        } catch (persistedError) {
+          if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+          _dbg("pollChat: persisted status error", persistedError.message);
+          showPollReconnect();
+          waitMs = retryMs;
+          retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+        }
+      } else {
+        showPollReconnect();
+        waitMs = retryMs;
+        retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+      }
     }
     if (finished) {
-      if (!selectionIsCurrent(generation, convId)) return;
+      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
       setBusy(false);
       await loadMessages(convId);
-      if (!selectionIsCurrent(generation, convId)) return;
+      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
       refreshContextBadge(convId);  // el medidor sale del historial recién guardado
       loadChats();  // refrescar el sidebar (status / última actividad)
       loadSuggestions(chatId, 4, generation);  // reintenta sola en background
@@ -1539,7 +1588,7 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
       // dejó una decisión pendiente" no son la misma noticia, y la
       // segunda es la que deja el run parado sin que nadie se entere.
       const pendientes = await refreshChatQuestions(convId, generation).catch(() => 0);
-      if (!selectionIsCurrent(generation, convId)) return;
+      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
       // Un pedido grande no deja respuesta: deja un grafo corriendo. Sin
       // este poke el panel recién aparecería al reabrir la conversación.
       pokeGrafo().catch(() => {});
@@ -1551,7 +1600,7 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
             err || "");
       return;
     }
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    await new Promise((r) => setTimeout(r, waitMs));
   }
 }
 
@@ -1835,6 +1884,7 @@ async function sendCurrentMessage() {
   }
   // Un adjunto sin texto es un mensaje válido ("mirá esta captura").
   if (!text && !pendingAttachments.length) return;
+  ++chatDraftGeneration; // Enviar invalida una apertura de borrador todavía pendiente.
   if (activeChat.busy) { await steerCurrentRun(text); return; }
   inp.value = "";
   renderSuggestions([]);   // pertenecían al turno anterior
@@ -2142,16 +2192,30 @@ async function openNewChatDraft() {
   }
   const sel = $("#chat-draft-project");
   if (!sel) { toast("UI de chats no montada (refresca)", "err"); return; }
-  const generation = ++chatSelectionGeneration;
-  if (sel.options.length === 0) {
+  if (activeChat?.draft && activeChat.busy) {
+    toast("Espera a que se cree la conversación.", "info");
+    return;
+  }
+  const generation = chatSelectionGeneration;
+  const draftGeneration = ++chatDraftGeneration;
+  const current = () => generation === chatSelectionGeneration
+    && draftGeneration === chatDraftGeneration;
+  try {
     const { projects } = await api("projects");
-    if (generation !== chatSelectionGeneration) return;
+    if (!current()) return;
     sel.innerHTML = projects.filter((p) => p.enabled)
       .map((p) => `<option value="${escape(p.slug)}">${escape(p.slug)}</option>`).join("");
+  } catch (e) {
+    if (current()) {
+      toast(`No se pudieron cargar los proyectos: ${e.message}. Vuelve a intentarlo.`, "err");
+    }
+    return;
   }
-  sel.value = $("#chat-project-filter")?.value || sel.options[0]?.value || "";
+  sel.value = $("#chat-project-filter")?.value.trim() || "";
+  if (!sel.value) sel.value = sel.options[0]?.value || "";
   if (!sel.value) { toast("No hay proyectos habilitados", "warn"); return; }
 
+  ++chatSelectionGeneration;
   activeChat = {
     convId: null, projectSlug: sel.value, currentChatId: null,
     busy: false, readOnly: false, draft: true, mode: "change",
@@ -2239,7 +2303,8 @@ async function createDraftConversation(slug) {
 
 function newChatErrorText(e, slug) {
   const msg = e?.message || String(e);
-  if (e?.status === 422 || /working tree|sin commitear|rama de trabajo/i.test(msg)) {
+  // Un 422 también puede indicar permisos, configuración o un fallo de fetch.
+  if (/working tree sucio|cambios[^.\n]*sin commitear|checkout actual tiene cambios staged, tracked o untracked/i.test(msg)) {
     return `El repo ${slug} tiene cambios sin commitear, así que no puedo abrir `
       + `una rama de trabajo limpia. Haz commit o haz stash y reintenta.`;
   }

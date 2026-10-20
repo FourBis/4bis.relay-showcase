@@ -147,10 +147,10 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
     Tres decisiones que hacen que un nodo sea corto de verdad, que es de
     lo que depende todo lo demás:
 
-    1. **`run_expert` y no `run_expert_staged`.** El plan YA existe — es
-       el grafo. Pasar por el runner de etapas pagaría un turno de
-       planificación por nodo para re-derivar lo que el coordinador ya
-       decidió, más uno de verificación y otro de documentación.
+    1. El plan ya existe: es el grafo. El runner por etapas reutiliza
+       ese plan, omite planificación/documentación y exige `complete`
+       para aceptar el nodo. `graph_verifier=False` conserva el
+       ejecutor de un solo turno.
     2. **Sin historial del hilo.** El nodo recibe su objetivo y el
        resultado de sus dependencias, no la conversación entera. Es lo
        que lo hace barato y lo que evita que el contexto crezca turno a
@@ -168,6 +168,8 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
     24/8: veinte minutos de un nodo trabajando sin una sola señal.
     """
     from . import experts
+    verificar_nodo = (proyecto.get("defaults_json") or {}).get(
+        "graph_verifier", True)
 
     async def ejecutar(tarea: dict) -> dict:
         from .orchestrator_recovery import graph_resume_context
@@ -205,7 +207,17 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
         rescue: dict = {}
         started = asyncio.get_running_loop().time()
         try:
-            res = await experts.run_expert(
+            run = (experts.run_expert_staged if verificar_nodo
+                   else experts.run_expert)
+            stage_kwargs = (dict(
+                # Los resultados de dependencias y del intento anterior son
+                # contexto del pedido, no instrucciones de sistema del plan.
+                existing_plan=("1. Completa los criterios de este nodo:\n"
+                               f"{tarea.get('titulo') or tarea['id']}\n"
+                               f"{tarea.get('detalle') or ''}"),
+                three_stage=True, verifier=True, documenter=False,
+            ) if verificar_nodo else {})
+            res = await run(
                 proyecto, prompt, db=db, model_override=modelo,
                 message_history_json=history,
                 chat_id=chat_id,
@@ -213,7 +225,8 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
                 on_progress=on_progress,
                 steer=getattr(on_progress, "steer", None),
                 rescue=rescue,
-                archivos_reservados=reservados)
+                archivos_reservados=reservados,
+                **stage_kwargs)
         except asyncio.CancelledError:
             rescue.setdefault("duration_ms", int(
                 (asyncio.get_running_loop().time() - started) * 1000))
@@ -233,6 +246,9 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
         # que un nodo cortado a mitad quedaba `hecho` y el grafo cerraba
         # anunciando un trabajo que no se hizo.
         roto = fase in G.FASES_INCOMPLETAS
+        veredicto = res.get("verifier_verdict") or ""
+        falta_verificacion = (verificar_nodo and not res.get("question_id")
+                              and veredicto != "complete")
 
         subdivididas: list[str] = []
         if fase == "budget_split":
@@ -252,6 +268,9 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
                         "budget_split normal", tarea.get("id"), e)
 
         error = f"el nodo terminó en {fase!r}" if roto else ""
+        if falta_verificacion and not error:
+            error = (f"el verificador del nodo terminó en {veredicto!r}: "
+                     f"{(res.get('verifier_feedback') or 'sin veredicto válido')[:300]}")
         # Un nodo que abre una pregunta NO está roto, pero tampoco
         # terminó: `ok` se va a False por `question_id` y hasta hoy
         # `error` quedaba "". Resultado medido (barrido del 4/9): de 81
@@ -266,16 +285,18 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             error = (f"subdividido en {len(subdivididas)} subtareas: "
                      + ", ".join(subdivididas))
         salida = {
-            "ok": not roto and not res.get("question_id"),
+            "ok": not roto and not falta_verificacion and not res.get("question_id"),
             "resultado": (res.get("content") or "").strip(),
             "error": error,
             "chat_id": chat_id or res.get("chat_id") or "",
             "modelo": res.get("model") or modelo,
             "pregunta": res.get("question_id") or "",
+            "verifier_verdict": veredicto,
+            "verifier_feedback": res.get("verifier_feedback") or "",
         }
         if chat_id and hasattr(db, "finish_chat"):
-            # Status del chat: SOLO depende de `roto` (nodo realmente
-            # roto), no de `salida["ok"]`. `ok` mezcla dos preguntas
+            # El chat falla por una ejecución rota o una verificación
+            # incompleta, no por `salida["ok"]`. `ok` mezcla dos preguntas
             # distintas —¿el grafo sigue avanzando? y ¿esto salió bien?—
             # y para la primera un nodo que abrió una pregunta también
             # es `False` (correcto: no está `hecho`, el grafo lo espera).
@@ -284,7 +305,7 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             # sobre relay.db: camino UI 79 preguntas → 79 `ok`; camino
             # grafo 32 preguntas → 32 `error`. Misma tool, misma pausa,
             # etiqueta opuesta según qué código cierra el chat.
-            await _cerrar_chat(db, chat_id, "error" if roto else "ok",
+            await _cerrar_chat(db, chat_id, "error" if roto or falta_verificacion else "ok",
                                salida["error"], res)
         return salida
 
@@ -295,6 +316,7 @@ async def _cerrar_chat(db, chat_id: str, status: str, error: str = "",
                        res: Optional[dict] = None) -> None:
     """Mismo cierre durable que HTTP: los artefactos se pueden reintentar."""
     from . import finalization
+    from .server_expert_jobs import _stages_json
     if status != "ok" and not error:
         error = f"cerrado como {status!r} sin motivo declarado (bug del caller)"
     r = res or {}
@@ -304,7 +326,8 @@ async def _cerrar_chat(db, chat_id: str, status: str, error: str = "",
         cache_read_tokens=r.get("cache_read_tokens"), tool_calls=r.get("tool_calls"),
         phase_at_end=r.get("phase_at_end"), duration_ms=r.get("duration_ms"),
         model=r.get("model"), last_tool=r.get("last_tool"),
-        progress_events=json.dumps(r.get("progress_events") or []))
+        progress_events=json.dumps(r.get("progress_events") or []),
+        stages_json=_stages_json(r))
     try:
         row = await db.get_chat(chat_id)
         if row is None:
@@ -318,7 +341,9 @@ async def _cerrar_chat(db, chat_id: str, status: str, error: str = "",
             status=status, duration_ms=r.get("duration_ms") or 0,
             error=error or None, events=r.get("progress_events") or [])
         if r.get("messages_json") and (
-                status == "cancelled" or r.get("phase_at_end") in G.FASES_INCOMPLETAS):
+                status == "cancelled"
+                or r.get("verifier_verdict") != "complete"
+                or r.get("phase_at_end") in G.FASES_INCOMPLETAS):
             # Historial del nodo, no del hilo compartido: conservarlo en
             # chat_outputs sin sobrescribir la conversación del grafo.
             artifact["messages_json"] = r["messages_json"]

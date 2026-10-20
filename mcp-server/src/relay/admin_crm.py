@@ -386,10 +386,22 @@ async def api_crm_digest(request: web.Request) -> web.Response:
         body = await request.json() if request.body_exists else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "JSON inválido"}, status=400)
-    body = body or {}
-    stale_days = int(body.get("stale_days") or crm_mod.DEFAULT_STALE_DAYS)
-    channel = body.get("channel") or crm_mod.DEFAULT_DIGEST_CHANNEL
-    dry_run = bool(body.get("dry_run"))
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body debe ser un objeto JSON"}, status=400)
+    if body.keys() - {"stale_days", "channel", "dry_run"}:
+        return web.json_response(
+            {"error": "Parámetros permitidos: stale_days, channel y dry_run"}, status=400)
+    stale_days = body.get("stale_days", crm_mod.DEFAULT_STALE_DAYS)
+    if type(stale_days) is not int or stale_days < 0:
+        return web.json_response(
+            {"error": "stale_days debe ser un entero mayor o igual a 0"}, status=400)
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return web.json_response({"error": "dry_run debe ser booleano"}, status=400)
+    channel = body.get("channel", crm_mod.DEFAULT_DIGEST_CHANNEL)
+    if not isinstance(channel, str) or not channel.strip():
+        return web.json_response({"error": "channel debe ser una cadena no vacía"}, status=400)
+    channel = channel.strip()
 
     rows = await _crm_health_rows(db)
     text = crm_mod.render_digest(rows, stale_days=stale_days)

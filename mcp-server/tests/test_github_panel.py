@@ -262,9 +262,9 @@ async def test_endpoint_proyecto_desconocido_404(cli):
 
 
 async def test_conversacion_con_issue_inexistente_no_se_crea(cli):
-    """Atar una conversación a un issue que no existe deja un PR con un
-    `Closes #N` que no cierra nada — y eso se descubre tarde. Se valida
-    contra GitHub ANTES de crear la rama."""
+    """Un vínculo a un issue inexistente no aporta seguimiento válido.
+
+    Se valida contra GitHub antes de crear la rama."""
     async def fake_slug(repo_path):
         return "AuroraDemo/website-demo"
 

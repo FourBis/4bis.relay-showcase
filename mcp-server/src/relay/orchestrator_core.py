@@ -54,7 +54,7 @@ async def correr_grafo(
     modelo grande mirando un fallo; puede devolver `"reintentar"`,
     `"fallar"` o `None` para que decida la regla por default.
     `verificar(user=, plan=, executor_result=) -> dict` es la
-    verificación de cierre: UNA por grafo, ver `_verificar_al_cerrar`.
+    verificación de cierre por pasada, ver `_verificar_al_cerrar`.
 
     Devuelve el progreso final. No lanza por un nodo que falla: un fallo
     es un estado del grafo, no una excepción del orquestador.
@@ -80,9 +80,24 @@ async def correr_grafo(
     vueltas = 0
 
     try:
-        vueltas = await _vueltas(db, graph_id, en_curso, ejecutar=ejecutar,
-                                 coordinar=coordinar, tope=tope,
-                                 on_cambio=on_cambio)
+        while True:
+            vueltas += await _vueltas(db, graph_id, en_curso, ejecutar=ejecutar,
+                                     coordinar=coordinar, tope=tope,
+                                     on_cambio=on_cambio, max_vueltas=MAX_VUELTAS - vueltas)
+            g = await db.get_task_graph(graph_id)
+            prog = G.progreso(_nodos(g))
+            terminal = prog["estado"] in ("hecho", "fallado")
+            if terminal and g.get("estado") != "cancelado":
+                if verificar is not None:
+                    # Veredicto y corrección se guardan juntos antes de continuar.
+                    if await _verificar_al_cerrar(db, graph_id, g, prog, verificar,
+                                                  allow_continue=vueltas < MAX_VUELTAS):
+                        if on_cambio:
+                            await _seguro(on_cambio, await db.get_task_graph(graph_id))
+                        continue
+                else:
+                    await db.set_task_graph_state(graph_id, prog["estado"])
+            break
     finally:
         # Salir por excepción, por MAX_VUELTAS o por cancelación no puede
         # dejar nodos corriendo sueltos. Ver `_cerrar_las_que_quedaron`.
@@ -104,29 +119,13 @@ async def correr_grafo(
 
     g = await db.get_task_graph(graph_id)
     prog = G.progreso(_nodos(g))
-    terminal = prog["estado"] in ("hecho", "fallado")
-    if terminal:
-        await db.set_task_graph_state(graph_id, prog["estado"])
-    # La verificación va DESPUÉS de fijar el estado y ANTES de avisar:
-    # el estado del grafo no depende de que la etapa corra (ver
-    # `_verificar_al_cerrar`), y el `on_cambio` es el que le lleva el
-    # veredicto al panel — dispararlo antes mostraría el grafo cerrado
-    # sin el único dato nuevo que este cierre agrega.
-    #
-    # `estado != cancelado`: si un humano lo paró, no le cobramos un
-    # turno para decirle lo que ya sabe. En el camino normal esto ni se
-    # evalúa —cancelar levanta `CancelledError` dentro de `_vueltas` y
-    # nunca se llega hasta acá—, pero un grafo marcado `cancelado` desde
-    # afuera mientras cerraba sí llegaría.
-    if terminal and verificar is not None and g.get("estado") != "cancelado":
-        await _verificar_al_cerrar(db, graph_id, g, prog, verificar)
     if on_cambio:
         await _seguro(on_cambio, await db.get_task_graph(graph_id))
     return prog
 
 
 async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
-                   coordinar, tope: int, on_cambio) -> int:
+                   coordinar, tope: int, on_cambio, max_vueltas: int = MAX_VUELTAS) -> int:
     """El loop en sí. Devuelve cuántas vueltas dio.
 
     Vive aparte de `correr_grafo` para que `en_curso` sea de quien
@@ -134,7 +133,7 @@ async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
     para cerrar lo que haya quedado vivo.
     """
     vueltas = 0
-    while vueltas < MAX_VUELTAS:
+    while vueltas < max_vueltas:
         vueltas += 1
         g = await db.get_task_graph(graph_id)
         if g is None:
@@ -142,38 +141,46 @@ async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
         nodos = _nodos(g)
         corriendo = [n for n in nodos if n.id in en_curso]
 
-        # Lanzar lo que se pueda sin pisar archivos ni pasar el tope.
-        for cand in G.elegibles(nodos, tope=tope, en_curso=corriendo):
-            fila = next(t for t in g["tasks"] if t["id"] == cand.id)
-            # `corriendo` PRIMERO y la reserva después. Al revés queda una
-            # ventana en la que la reserva existe pero la tarea todavía
-            # figura `pendiente`, y el barrido de reservas muertas
-            # —que borra las de toda tarea que no esté `corriendo`— se
-            # llevaría puesta una reserva recién tomada.
-            await db.update_task(cand.id, estado=G.CORRIENDO,
-                                 started_at=_ahora(),
-                                 intentos=cand.intentos + 1)
-            pisados = await db.claim_task_files(
-                cand.id, graph_id, list(cand.archivos))
-            if pisados:
-                # Defensa en profundidad: `elegibles` ya lo tendría que
-                # haber filtrado. Si igual llegamos acá, NO se lanza —
-                # perder una vuelta es más barato que dos bots editando
-                # el mismo archivo.
-                logger.warning(
-                    "tarea %s no arranca: %s ya está tomado por otra",
-                    cand.id, ", ".join(pisados))
-                await db.release_task_files(cand.id)
-                # Vuelve como estaba: un lanzamiento que no ocurrió no
-                # gasta un intento, o un grafo trabado por reservas
-                # agotaría los reintentos sin haber ejecutado nada.
-                await db.update_task(cand.id, estado=G.PENDIENTE,
-                                     intentos=cand.intentos)
-                continue
-            en_curso[cand.id] = asyncio.create_task(ejecutar(dict(fila)))
-            logger.info("grafo %s: lanzo %s (%s)", graph_id, cand.id,
-                        cand.titulo[:60])
-            corriendo.append(cand)
+        from .task_service import STOPPED, control_lock
+
+        cid = g.get("conversation_id")
+        # Serializar sólo el inicio con Pausar/Cancelar; los nodos ya lanzados
+        # terminan fuera del lock. La corrección pendiente queda para Retomar.
+        candidatos = G.elegibles(nodos, tope=tope, en_curso=corriendo)
+        for cand in candidatos:
+            async with control_lock(db, cid) if cid else contextlib.nullcontext():
+                if cid and (await db.get_conversation_task(cid)).get("state") in STOPPED:
+                    break
+                fila = next(t for t in g["tasks"] if t["id"] == cand.id)
+                # `corriendo` PRIMERO y la reserva después. Al revés queda una
+                # ventana en la que la reserva existe pero la tarea todavía
+                # figura `pendiente`, y el barrido de reservas muertas
+                # —que borra las de toda tarea que no esté `corriendo`— se
+                # llevaría puesta una reserva recién tomada.
+                await db.update_task(cand.id, estado=G.CORRIENDO,
+                                     started_at=_ahora(),
+                                     intentos=cand.intentos + 1)
+                pisados = await db.claim_task_files(
+                    cand.id, graph_id, list(cand.archivos))
+                if pisados:
+                    # Defensa en profundidad: `elegibles` ya lo tendría que
+                    # haber filtrado. Si igual llegamos acá, NO se lanza —
+                    # perder una vuelta es más barato que dos bots editando
+                    # el mismo archivo.
+                    logger.warning(
+                        "tarea %s no arranca: %s ya está tomado por otra",
+                        cand.id, ", ".join(pisados))
+                    await db.release_task_files(cand.id)
+                    # Vuelve como estaba: un lanzamiento que no ocurrió no
+                    # gasta un intento, o un grafo trabado por reservas
+                    # agotaría los reintentos sin haber ejecutado nada.
+                    await db.update_task(cand.id, estado=G.PENDIENTE,
+                                         intentos=cand.intentos)
+                    continue
+                en_curso[cand.id] = asyncio.create_task(ejecutar(dict(fila)))
+                logger.info("grafo %s: lanzo %s (%s)", graph_id, cand.id,
+                            cand.titulo[:60])
+                corriendo.append(cand)
 
         if not en_curso:
             break               # no queda nada corriendo ni lanzable

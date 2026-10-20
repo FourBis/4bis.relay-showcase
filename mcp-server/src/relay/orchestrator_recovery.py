@@ -1,9 +1,11 @@
-"""Reanudación explícita de nodos cortados por presupuesto."""
+"""Reanudación explícita por presupuesto y corrección de criterios pendientes."""
 from __future__ import annotations
 
 import json
+import uuid
 
 from . import grafo as G
+from .expert_verdicts import _validate_plan_correction
 
 _RESUME_NOTICE = (
     "## Continuación autorizada tras un límite de ejecución\n"
@@ -12,10 +14,23 @@ _RESUME_NOTICE = (
     "trabajo ya terminado ni efectos externos; si un efecto previo es incierto, "
     "pide la decisión correspondiente.\n\n"
 )
+_OFF_PLAN_NOTICE = (
+    "## Continuación autorizada tras un desvío del plan\n"
+    "Retoma solo los criterios pendientes y corrige el desvío señalado por el "
+    "verificador. Inspecciona los archivos y resultados existentes; conserva "
+    "lo terminado y no repitas efectos externos. Si un efecto previo es incierto, "
+    "pide la decisión correspondiente.\n\n"
+)
+
+
+def _off_plan_failure(error: str) -> bool:
+    """Reconoce el desvío del supervisor y el de la verificación final del nodo."""
+    return (error == "el nodo terminó en 'off_plan'"
+            or error.startswith("el verificador del nodo terminó en 'off_plan':"))
 
 
 async def prepare_graph_resume(db, graph: dict) -> list[str]:
-    """La acción de retomar concede otro intento a los cortes por presupuesto.
+    """Retomar concede otro intento a cortes por presupuesto o desvíos del plan.
 
     Conserva fallos funcionales, preguntas y padres sustituidos. El scheduler
     normal no llama a este helper: no se trata de un reintento automático.
@@ -24,7 +39,8 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
     replaced = G.sustituidos(nodes)
     retry = {t["id"] for t in graph["tasks"]
              if t["id"] not in replaced and t["estado"] == G.FALLADO
-             and G.es_error_de_presupuesto(t.get("error") or "")}
+             and (G.es_error_de_presupuesto(t.get("error") or "")
+                  or _off_plan_failure(t.get("error") or ""))}
     if not retry:
         return []
     states = {n.id: G.PENDIENTE if n.id in retry else n.estado for n in nodes}
@@ -46,7 +62,11 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
         task = by_id[tid]
         detail = task.get("detalle") or ""
         if tid in retry:
-            detail = _RESUME_NOTICE + detail.removeprefix(_RESUME_NOTICE)
+            for notice in (_RESUME_NOTICE, _OFF_PLAN_NOTICE):
+                detail = detail.removeprefix(notice)
+            notice = (_OFF_PLAN_NOTICE if _off_plan_failure(task.get("error") or "")
+                      else _RESUME_NOTICE)
+            detail = notice + detail
         statements.append((
             "UPDATE tasks SET estado=?, error='', ended_at=NULL, detalle=?, "
             "max_intentos=MAX(max_intentos, intentos+1) WHERE id=? AND estado=?",
@@ -61,7 +81,7 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
 
 async def graph_resume_context(db, task: dict) -> tuple[str, str]:
     """Lee el historial anterior antes de asignar el chat del nuevo intento."""
-    if not (task.get("detalle") or "").startswith(_RESUME_NOTICE) or not task.get("chat_id"):
+    if not (task.get("detalle") or "").startswith((_RESUME_NOTICE, _OFF_PLAN_NOTICE)) or not task.get("chat_id"):
         return "", ""
     rows = await db.run("SELECT payload FROM chat_outputs WHERE chat_id=?", (task["chat_id"],))
     history, context = "", ""
@@ -80,4 +100,98 @@ async def graph_resume_context(db, task: dict) -> tuple[str, str]:
         context = ("El intento anterior no conserva un historial de herramientas "
                    "reutilizable. Inspecciona los archivos y vuelve a comprobar "
                    "el estado antes de actuar.\n" + context)
+    previous = await db.get_chat(task["chat_id"])
+    try:
+        stages = json.loads((previous or {}).get("stages_json") or "{}")
+        feedback = str(stages.get("verifier_feedback") or "")[:2000]
+    except (ValueError, TypeError, AttributeError):
+        feedback = ""
+    if feedback:
+        context += "\n\n## Corrección del verificador del intento anterior\n" + feedback
     return history, context
+
+
+def _criteria(steps: list[dict], *, done: bool) -> set[str]:
+    return {" ".join((step["description"] + " " + step["expected_output"]).split()).casefold()
+            for step in steps if (step["status"] == "done") == done}
+
+
+async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
+                                *, allow_continue: bool = True) -> bool | None:
+    """Una tarea nueva, sin repetir las anteriores ni reinterpretar sus efectos.
+
+    Devuelve None si no aplica; si persiste, indica si la tarea puede continuar.
+
+    Solo se corrige un grafo cuyos nodos cerraron bien. Los fallos de ejecución,
+    permisos, cancelación o una pregunta siguen su circuito de recuperación.
+    Una nueva pasada exige que el verificador dé por resuelto algún criterio
+    pendiente anterior. Cambiar la redacción del feedback no alcanza.
+    """
+    if (graph.get("estado") == "cancelado" or verdict.get("error")
+            or verdict.get("verdict") != "needs_more"):
+        return None
+    nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in graph["tasks"]]
+    if G.estado_del_grafo(nodes) != "hecho":
+        return None
+
+    correction = verdict.get("plan_correction")
+    valid = isinstance(correction, dict)
+    if valid:
+        try:
+            valid = _validate_plan_correction(correction) is None
+            steps = correction["revised_steps"]
+            valid = valid and all(isinstance(s.get(k), str) and s[k].strip()
+                                  for s in steps for k in ("id", "description", "expected_output"))
+        except (KeyError, TypeError, ValueError):
+            valid = False
+    pending = _criteria(steps, done=False) if valid else set()
+    try:
+        previous = json.loads(graph.get("verificacion_json") or "{}")
+        recovery = previous.get("recovery") or {}
+    except (TypeError, ValueError, AttributeError):
+        recovery = {}
+    prior = set(recovery.get("pending") or ())
+    done = _criteria(steps, done=True) if valid else set()
+    progressed = not prior or bool(prior & done)
+    seen = {tuple(items) for items in recovery.get("seen") or []}
+    signature = tuple(sorted(pending))
+    proceed = bool(allow_continue and pending and progressed and signature not in seen)
+
+    task_id = f"{graph_id}:verify:{uuid.uuid4().hex[:8]}"
+    detail = ("Continúa el objetivo del grafo desde el estado actual del workspace. "
+              "Conserva lo terminado; inspecciona lo existente antes de modificar. "
+              "Corrige la causa de estos fallos y ejecuta sus comprobaciones reales. "
+              "No repitas migraciones, publicaciones ni otros efectos ya realizados; "
+              "si un efecto previo es incierto, pide la decisión correspondiente.\n\n")
+    if valid:
+        detail += correction["feedback_to_executor"][:2000] + "\n\n"
+        detail += "\n".join(f"- {s['description']}: {s['expected_output']}"
+                            for s in steps if s["status"] != "done")
+    else:
+        detail += str(verdict.get("feedback") or "Falta una corrección verificable.")
+    if proceed:
+        seen.add(signature)
+        verdict["recovery"] = {"pending": sorted(pending), "seen": sorted(seen)}
+    else:
+        verdict["recovery"] = recovery
+    reason = ("Se alcanzó el límite global de vueltas del grafo. " if not allow_continue
+              else "La verificación repite criterios sin avance comprobado. " if valid
+              else "El verificador no entregó una corrección válida. ")
+    # ponytail: un nodo independiente con ID local, sin aristas del modelo.
+    # Alta + checkpoint + estado deben sobrevivir juntos a reinicios/cancelación.
+    # El estado se comprueba dentro de la escritura: el veredicto puede llegar tarde.
+    from .db_support import now_iso
+    await db.run_tx([
+        ("INSERT INTO tasks (id, graph_id, titulo, detalle, idempotente, max_intentos, "
+         "orden, estado, error) SELECT ?,?,?,?,0,1,?,?,? "
+         "FROM task_graphs WHERE id=? AND estado <> 'cancelado'",
+         (task_id, graph_id, "Corregir criterios pendientes de la verificación final",
+          detail[:8000], max(int(t.get("orden") or 0) for t in graph["tasks"]) + 1,
+          G.PENDIENTE if proceed else G.FALLADO,
+          "" if proceed else reason + str(verdict.get("feedback") or "")[:1200], graph_id)),
+        ("UPDATE task_graphs SET verificacion_json=?, estado=?, updated_at=? "
+         "WHERE id=? AND estado <> 'cancelado'",
+         (json.dumps(verdict, ensure_ascii=False), "activo" if proceed else "fallado",
+          now_iso(), graph_id)),
+    ])
+    return proceed and bool(await db.run("SELECT id FROM tasks WHERE id=?", (task_id,)))

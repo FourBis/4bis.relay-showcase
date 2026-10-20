@@ -70,5 +70,30 @@ now += 1000; tickFn();
 assert.equal(n3, beforeMinimize, "una ventana minimizada siguió refrescándose");
 assert.equal(chatTicks, 2);
 
+
+// Una petición lenta nunca se solapa, ni siquiera tras varios vencimientos.
+let slowCalls = 0, releaseSlow;
+const stopSlow = registerPoller(() => {
+  slowCalls++;
+  return new Promise((resolve) => { releaseSlow = resolve; });
+}, 1000);
+now += 1000; tickFn();
+now += 4000; tickFn();
+assert.equal(slowCalls, 1);
+releaseSlow(); await flush();
+tickFn(); assert.equal(slowCalls, 2);
+stopSlow(); releaseSlow(); await flush();
+
+// Un rechazo libera la guardia para que el mismo poller pueda reintentarse.
+let recoverCalls = 0;
+const stopRecover = registerPoller(() => {
+  recoverCalls++;
+  return Promise.reject(new Error("transitorio"));
+}, 1000);
+now += 1000; tickFn(); await flush();
+now += 1000; tickFn(); await flush();
+assert.equal(recoverCalls, 2);
+stopRecover();
+
 Date.now = realNow;
 console.log("poller-registry: todos los checks pasaron");

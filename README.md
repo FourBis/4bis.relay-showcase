@@ -278,12 +278,12 @@ El modo operativo es un proceso Relay. Un worktree separa archivos de una tarea;
 
 ### 1. Arranca el workspace local
 
-Requisitos básicos: **Windows, PowerShell y Python 3.11 o posterior**. Para tareas de código necesitas también Git y el toolchain de tu repositorio. CBM, proveedores, CRM, OAuth y MCP se configuran según las capacidades que vayas a utilizar.
+Requisitos básicos: **Windows, PowerShell y Python 3.15 recomendado** (compatibilidad mínima: 3.11). Para tareas de código necesitas también Git y el toolchain de tu repositorio. CBM, proveedores, CRM, OAuth y MCP se configuran según las capacidades que vayas a utilizar.
 
 Desde la raíz del repositorio:
 
 ```powershell
-python -m venv .\mcp-server\.venv
+py -3.15 -m venv .\mcp-server\.venv
 & ".\mcp-server\.venv\Scripts\Activate.ps1"
 python -m pip install -e .\mcp-server
 .\mcp-server\start.ps1

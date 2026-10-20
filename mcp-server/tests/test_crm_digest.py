@@ -14,12 +14,13 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from relay import admin_crm
 from relay import github as github_mod
 from relay.db import Database
 from relay.server import DB_KEY, NOTIFY_KEY, create_app
@@ -204,6 +205,43 @@ async def test_digest_default_usa_stale_days_y_canal_por_defecto(env):
     body = await r.json()
     assert body["stale_days"] == 14  # CRM_STALE_DAYS default
     assert fake_notify.calls[0]["metadata"]["discord_channel"] == "#equipo-demo"
+
+
+@pytest.mark.parametrize("payload", [
+    None, False, 0, [], [1], "x",
+    *({"stale_days": value} for value in ("7", "abc", True, 1.5, None, -1, float("inf"))),
+    *({"dry_run": value} for value in ("false", 0, 1, None)),
+    *({"channel": value} for value in (123, [], None, "", "  ")),
+    {"dryrun": True},
+])
+async def test_digest_rechaza_payload_invalido_antes_de_leer_o_notificar(
+        env, monkeypatch, payload):
+    cli, _, fake_notify, *_ = env
+    health = AsyncMock(side_effect=AssertionError("no debe leer salud"))
+    monkeypatch.setattr(admin_crm, "_crm_health_rows", health)
+    response = await cli.post(
+        "/admin/api/crm/digest", data=json.dumps(payload),
+        headers={"Content-Type": "application/json"})
+    assert response.status == 400
+    assert "error" in await response.json()
+    health.assert_not_awaited()
+    assert fake_notify.calls == []
+
+
+async def test_digest_stale_cero_valido_y_no_envia(env):
+    cli, _, fake_notify, *_ = env
+    response = await cli.post(
+        "/admin/api/crm/digest",
+        json={"stale_days": 0, "dry_run": True, "channel": " #clientes "},
+    )
+    assert response.status == 200
+    body = await response.json()
+    assert body["stale_days"] == 0
+    assert body["channel"] == "#clientes"
+    assert body["stale_count"] == 2
+    assert body["dry_run"] is True
+    assert body["sent"] is False
+    assert fake_notify.calls == []
 
 
 # ---------- GET /admin/api/crm/clients expone last_activity_at ----------

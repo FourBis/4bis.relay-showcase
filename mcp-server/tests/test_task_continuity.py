@@ -310,8 +310,9 @@ async def test_feedback_pending_restart_uncertain_and_workspace_guard(tmp_path, 
 @pytest.mark.asyncio
 async def test_feedback_arriving_during_model_run_is_fifo_and_single_writer(tmp_path, monkeypatch):
     client, db, source, app = await make_client(tmp_path, monkeypatch)
+    gate = asyncio.Event()
+    drain = None
     try:
-        gate = asyncio.Event()
         started = asyncio.Event()
         calls = {"active": 0, "max_active": 0, "total": 0}
 
@@ -337,7 +338,12 @@ async def test_feedback_arriving_during_model_run_is_fifo_and_single_writer(tmp_
             "target": "demo", "conversation": cid, "user": "primero", "request_id": "r1"})
         assert response.status == 202
         drain = asyncio.create_task(task_service._drain(app, cid))
-        await asyncio.wait_for(started.wait(), timeout=5)
+        # Espera inspecciones Git reales; esta prueba mide orden, no latencia.
+        try:
+            await asyncio.wait_for(started.wait(), timeout=15)
+        except TimeoutError:
+            pytest.fail(f"El worker no inició; drain_done={drain.done()}, "
+                        f"task={await db.get_conversation_task(cid)}")
         feedback = await db.enqueue_conversation_event(
             cid, "feedback:1", "feedback", {
                 "user": "corrige", "role": "owner", "requested_by": "owner"})
@@ -350,6 +356,10 @@ async def test_feedback_arriving_during_model_run_is_fifo_and_single_writer(tmp_
         assert calls["total"] == 2
         assert calls["max_active"] == 1
     finally:
+        gate.set()
+        if drain is not None:
+            drain.cancel()
+            await asyncio.gather(drain, return_exceptions=True)
         await client.close()
 
 

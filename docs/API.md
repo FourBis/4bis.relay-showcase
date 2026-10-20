@@ -28,6 +28,28 @@ El login no guarda tokens de herramientas; estas se conectan desde **Mi cuenta**
 Las solicitudes JSON verifican origen y el alta rechaza proxies. Un host público
 sigue requiriendo Cloudflare Access; la sesión nativa no abre el servidor a Internet.
 
+### Cliente de delegación local
+
+`scripts/relay_delegate.py` usa la API local `http://127.0.0.1:8413` y lee
+`RELAY_SESSION_TOKEN` como el valor de una cookie `relay-session` de una sesión
+nativa autorizada. Configúrala explícitamente; el cliente no inicia OAuth ni
+extrae credenciales. Si configuras `RELAY_CLIENT_API_KEY`, envía además
+`X-Relay-Key`. Con autenticación nativa, la identidad viene de la sesión;
+`--author` solo atribuye el run. Las credenciales no se reenvían en redirecciones.
+
+```powershell
+python scripts/relay_delegate.py --list
+python scripts/relay_delegate.py demo "Describe la tarea"
+python scripts/relay_delegate.py --resume ID
+python scripts/relay_delegate.py --selftest
+```
+
+El equipo debe tener acceso a `127.0.0.1:8413` y a la ruta `md_path` que devuelve
+la API. `--selftest` funciona sin conexión. Al ejecutar una tarea se usa el
+proveedor ya configurado en Relay. `--max-tools` solicita cancelar al observar
+el umbral en el sondeo de 3 segundos; no es un tope estricto de gasto. El cliente
+no reintenta los POST. La copia global del cliente no se actualiza automáticamente.
+
 ## Consulta y configuración
 
 | Método | Ruta | Uso |
@@ -101,6 +123,12 @@ creación Git implícita; no vuelve idempotente cualquier POST. Reutiliza el mis
 ID y payload para reintentar; cambiar el payload con el mismo ID devuelve `409`.
 Usa un ID nuevo, como un UUID, para cada pedido nuevo.
 
+Un comando registrado (`!nombre`) responde de inmediato con HTTP 200 y
+`{"command": "nombre", "text": "resultado", "ok": true}`; si falla, `ok` es
+`false`. El estado HTTP por sí solo no confirma éxito. El cliente versionado
+sale con código 0 solo ante `ok: true`, 1 ante `ok: false` y 2 si un servidor
+anterior omite ese estado; conserva el texto y no repite el comando.
+
 Un 202 confirma aceptación, no que la ejecución haya finalizado correctamente.
 Conserva el `conversation_id` devuelto y consulta
 `/experts/status/{chat_id}` mientras el relay conserva el progreso en memoria.
@@ -134,9 +162,17 @@ envía el `resume_prompt` recibido como siguiente turno; responder por sí solo
 no reactiva una tarea bloqueada. Las preguntas vinculadas a nodos mantienen
 su flujo de respuesta y reanudación del grafo.
 
-Reanudar un grafo sin nodos listos o interrumpidos responde 409 y conserva
-su estado y resultados. El error distingue un plan terminado, una decisión
-humana pendiente y un fallo que necesita corrección; no inicia un worker vacío.
+Si el proceso se interrumpe durante la verificación final, el grafo conserva
+`estado: activo` y muestra `estado_visible: verificacion_pendiente`, aunque
+sus nodos estén terminados. **Retomar** (`POST /graphs/{id}/resume`) vuelve a
+verificar sin repetir esos nodos; el arranque por sí solo no lo relanza.
+Una tarea pausada o cancelada sigue protegida por sus controles habituales.
+El veredicto final y el estado se guardan juntos; una corrección tardía no
+crea trabajo ni reactiva un grafo que ya fue cancelado.
+
+Sin nodos listos, ejecuciones interrumpidas ni verificación pendiente,
+reanudar responde 409 y conserva estado y resultados. El error distingue un
+plan terminado, una decisión humana pendiente y un fallo que necesita corrección.
 
 Cancelar un grafo existente responde 200 con `estado: cancelado`, incluso si
 nadie lo ejecuta tras un reinicio o se repite la petición. No borra sus nodos
@@ -149,6 +185,25 @@ persistente de conversación son acciones distintas.
 Las cancelaciones simultáneas comparten la limpieza del worker: un reintento
 no vuelve a interrumpirlo, y la interrupción de la petición que lo espera
 no cancela otra vez esa limpieza.
+
+## Resumen operativo del CRM
+
+`GET /admin/api/crm/health?stale_days=7` consulta el estado de los clientes
+con proyectos vinculados. `POST /admin/api/crm/digest` prepara o solicita el
+envío del resumen mediante el bot ya configurado. Para previsualizar sin
+enviar, usa `{"dry_run": true}` y una sesión con permisos de Administración.
+
+El cuerpo del POST es opcional. Si lo envías, debe ser un objeto con solo
+`stale_days` (entero mayor o igual a cero), `dry_run` (booleano) y `channel`
+(cadena no vacía). Los parámetros omitidos usan los valores configurados;
+`dry_run` es `false` por defecto. Un cero explícito se conserva y se eliminan
+espacios exteriores del canal. Tipos inválidos o nombres de campo desconocidos
+devuelven `400` con `error`, antes de consultar clientes o notificar.
+
+Una respuesta válida incluye `text`, `sent`, `dry_run`, `channel`,
+`stale_days`, `stale_count` y `client_count`. `sent` refleja la respuesta del
+bot, sin comprobar recepción o lectura por una persona. Este POST no acepta
+`request_id` ni garantiza deduplicación de reintentos.
 
 ## Acceso
 

@@ -10,32 +10,15 @@ from . import grafo as G
 logger = logging.getLogger("relay.orquestador")
 
 # =====================================================================
-# La verificación de cierre: UNA por grafo
+# La verificación de cierre: una por pasada del grafo
 # =====================================================================
 #
-# Los chats pasan por `run_expert_staged` —planificador, ejecutor,
-# verificador— y el grafo llama a `run_expert` pelado, un nodo a la vez.
-# El motivo de saltear el PLANIFICADOR por nodo sigue en pie: el plan ya
-# existe, es el grafo, y volver a derivarlo por nodo sería pagar por una
-# decisión ya tomada.
+# La aceptación de cada nodo no sustituye la comprobación del objetivo
+# completo: el cierre revisa la integración y los criterios transversales.
 #
-# El verificador se había arrastrado en la misma decisión y ahí el
-# argumento no aplica: verificar no es re-derivar el plan, es mirar si lo
-# que salió se parece a lo que se pidió. La tarea que MÁS se puede
-# desviar —la grande, la de decenas de nodos— corría sin nadie mirando:
-# seis grafos muertos el 2026-09-06/07 se llevaron el 50 % de los tokens
-# del día sin entregar nada.
-#
-# Por qué UNA y no una por nodo: por nodo es exactamente el costo que la
-# decisión original evitaba (doblar el precio del grafo para revisar el
-# 90 % de tareas que salieron bien). Una al cerrar cuesta un turno corto
-# por grafo entero.
-#
-# Lo que esta etapa NO hace: relanzar. Aunque el veredicto sea
-# `needs_more`, el grafo no se reanuda solo — mismo criterio que los
-# grafos a medias en el boot del server: reparar es una cosa y arrancar
-# trabajo que nadie pidió es otra. El humano decide, con el veredicto a
-# la vista.
+# `needs_more` conserva la corrección estructurada: el scheduler puede
+# continuar los criterios pendientes dentro de la ejecución autorizada.
+# El arranque del servidor sigue sin relanzar grafos por su cuenta.
 
 # Tope del resumen de nodos que viaja al verificador, en caracteres. Un
 # grafo tiene decenas de nodos y este turno tiene que ser barato: las
@@ -228,17 +211,24 @@ async def _evidencia_de_los_nodos(db, g: dict) -> str:
 
 
 async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
-                               verificar) -> None:
-    """Corre la verificación del grafo y la guarda. NUNCA lanza.
+                               verificar, *, allow_continue: bool = True) -> bool:
+    """Guarda la verificación con su corrección; indica si puede continuar.
 
-    El grafo ya terminó su trabajo: que esta etapa falle es una falla de
-    TELEMETRÍA, no del trabajo. Mismo criterio que el `try/except` que
-    envuelve a `sanar` en el boot del server — se registra que falló y el
-    grafo cierra como habría cerrado. Por eso el estado ya está fijado
-    antes de llegar acá.
+    NUNCA lanza por un fallo del verificador o de persistencia.
+
+    Un error del verificador se registra sin invalidar los nodos terminados.
+    Una interrupción antes de guardar el resultado deja el grafo activo para
+    que Retomar recupere la verificación sin repetir esos nodos.
     """
     payload: dict = {"at": _ahora(), "estado_grafo": prog.get("estado") or "",
                      "verdict": "", "feedback": "", "modelo": "", "error": ""}
+    try:
+        previous = json.loads(g.get("verificacion_json") or "{}")
+        if isinstance(previous.get("recovery"), dict):
+            # Conservar el progreso acreditado entre pasadas y reinicios.
+            payload["recovery"] = previous["recovery"]
+    except (TypeError, ValueError, AttributeError):
+        pass
     try:
         res = await verificar(
             user=g.get("objetivo") or "",
@@ -269,6 +259,8 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
         # `chats.stages_json`: la clave solo existe si se midió, así
         # que ausente = "sin dato" y no cero.
         usage = res.get("usage") or {}
+        if usage.get("plan_correction"):
+            payload["plan_correction"] = usage["plan_correction"]
         if usage:
             payload["tokens_in"] = usage.get("tokens_in", 0)
             payload["tokens_out"] = usage.get("tokens_out", 0)
@@ -279,10 +271,20 @@ async def _verificar_al_cerrar(db, graph_id: str, g: dict, prog: dict,
                          "el grafo cierra igual", graph_id, e)
         payload["error"] = f"{type(e).__name__}: {e}"[:200]
     try:
-        await db.set_task_graph_verificacion(
-            graph_id, json.dumps(payload, ensure_ascii=False))
+        from .orchestrator_recovery import continue_verification
+
+        continued = await continue_verification(
+            db, graph_id, g, payload, allow_continue=allow_continue)
+        if continued is None:
+            # La verificación no vuelve a poner el grafo por delante de turnos posteriores.
+            await db.run(
+                "UPDATE task_graphs SET verificacion_json=?, "
+                "estado=CASE WHEN estado='cancelado' THEN estado ELSE ? END WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), prog["estado"], graph_id))
+        return bool(continued)
     except Exception:  # noqa: BLE001 — ídem: no puede voltear el cierre
-        logger.exception("grafo %s: no pude guardar el veredicto", graph_id)
+        logger.exception("grafo %s: no pude guardar el veredicto y su corrección", graph_id)
+        return False
 
 
 async def _seguro(fn, *a):

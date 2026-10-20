@@ -10,6 +10,11 @@ El pedido se ejecuta en la carpeta de la tarea. Si tiene permiso de publicación
 
 Los mensajes posteriores y las correcciones durante un turno se guardan en la misma cola. Las correcciones entran después del turno actual. **Publicar PR** concede permiso para publicar esa tarea; no autoriza merge ni despliegue.
 
+Referenciar un issue no declara que esté resuelto ni autoriza su cierre. Los
+cuerpos generados de PR usan referencias neutrales y sustituyen instrucciones
+como `Closes #123` por `Relacionado con #123`. Esto no modifica PR existentes,
+mensajes de commit ni automatizaciones configuradas en GitHub.
+
 El seguimiento empieza apagado. Activarlo en una tarea con PR permite leer comentarios, revisiones que solicitan cambios y fallos de CI, corregir y actualizar la misma PR. La UI propone 3 iteraciones, 50.000 tokens y 60 minutos; la API permite ajustar esos límites. Sin novedades no hay llamadas al modelo ni nuevos mensajes de ejecución.
 
 **Pausar** detiene nuevas continuaciones y publicaciones; el turno ya iniciado puede terminar de guardar sus archivos. **Cancelar** solicita interrumpirlo, cancela pendientes y conserva el workspace. **Continuar** reconcilia y desbloquea después de una pausa o error. Una cancelación y una PR cerrada/fusionada son terminales. Si queda feedback pendiente con seguimiento apagado, continuar conserva la cola y pide reactivar el seguimiento explícitamente.

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import asyncio
+import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,51 @@ async def db(tmp_path):
 async def test_init_schema_idempotente(db):
     await db.init_schema()  # segunda vez no explota
     assert (await db.list_projects()) == []
+
+
+@pytest.mark.parametrize("transaction", [False, True])
+@pytest.mark.parametrize("sql_fails", [False, True])
+async def test_cancel_waits_for_sqlite_connection_to_close(db, monkeypatch, transaction, sql_fails):
+    await db.run("CREATE TABLE cancellation_probe (value INTEGER)")
+    started = asyncio.Event()
+    release, closed = threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def hold():
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(5) or sql_fails:
+            raise RuntimeError("controlled SQL failure")
+        return 1
+
+    class Connection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            closed.set()
+
+    def connect():
+        conn = sqlite3.connect(db.path, factory=Connection)
+        conn.row_factory = sqlite3.Row
+        conn.create_function("hold", 0, hold)
+        return conn
+
+    monkeypatch.setattr(db, "_connect", connect)
+    operation = (db.run_tx([("INSERT INTO cancellation_probe VALUES (hold())", ())])
+                 if transaction else db.run("SELECT hold() AS value"))
+    task = asyncio.create_task(operation)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done(), "Cancellation returned while SQLite still owns the connection"
+    finally:
+        release.set()
+        result = (await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5))[0]
+        assert await asyncio.to_thread(closed.wait, 5)
+    assert isinstance(result, asyncio.CancelledError)
+    assert closed.is_set()
+    rows = await db.run("SELECT value FROM cancellation_probe")
+    assert rows == ([{"value": 1}] if transaction and not sql_fails else [])
 
 
 async def test_init_schema_no_asigna_owner_por_defecto(tmp_path, monkeypatch):

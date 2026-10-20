@@ -82,6 +82,17 @@ y se pausan al minimizarla/cerrarla. El seguimiento de una conversación en ejec
 principal continúa para conservar sus eventos; los chats separados pausan las
 consultas al ocultarse y retoman al volver a mostrarse. Ocultar una ventana no
 cancela trabajos del servidor.
+Un fallo de conexión al consultar el progreso conserva el estado en curso y
+muestra «reconectando». Si falta el progreso en memoria, el chat consulta el
+estado persistido antes de anunciar que terminó. Las respuestas anteriores a
+un cambio de conversación o de ejecución no actualizan el hilo nuevo.
+Los refrescos periódicos esperan a que finalice su consulta antes de iniciar
+otra del mismo módulo.
+
+Si crear una conversación devuelve un error de Git, permisos o configuración,
+el aviso conserva la causa y el borrador queda disponible para reintentar.
+La recomendación de commit o stash aparece solo ante cambios pendientes.
+
 El CSS y JS se sirven en vivo por el relay: cambios de frontend no requieren reinicio.
 
 ## Verificación runnable

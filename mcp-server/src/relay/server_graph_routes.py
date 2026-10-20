@@ -337,7 +337,9 @@ async def _resume_graph(request: web.Request) -> web.Response:
     g = await db.get_task_graph(graph_id)
     from . import grafo as G
     nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in g["tasks"]]
-    if not G.listas(nodes) and not any(n.estado == G.CORRIENDO for n in nodes):
+    verification_pending = G.estado_visible(nodes, g["estado"]) == "verificacion_pendiente"
+    if (not verification_pending and not G.listas(nodes)
+            and not any(n.estado == G.CORRIENDO for n in nodes)):
         reason = ("Responde la pregunta pendiente antes de retomar."
                   if any(n.estado == G.ESPERANDO for n in nodes)
                   else "Continúa la conversación indicando cómo resolver el fallo."

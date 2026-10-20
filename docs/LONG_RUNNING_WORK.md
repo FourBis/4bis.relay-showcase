@@ -52,9 +52,18 @@ pruebas reproducibles están en `mcp-server/tests/test_orquestador.py`:
 python -m pytest mcp-server/tests/test_orquestador.py -k "split or subdiv or fan_out or flag_apagado or subtarea" -q
 ```
 
-## Retomar un corte de presupuesto
+## Aceptar un nodo y retomar un trabajo interrumpido
 
-Tras un corte por `budget_exceeded` o `budget_split`, **Retomar** concede un
+Cada nodo reutiliza el plan del grafo y pasa por el verificador antes de
+contar como terminado. Solo `complete` acredita sus criterios; un veredicto
+incompleto o ausente conserva el diagnóstico y la evidencia. Una pregunta
+humana pausa el nodo. `defaults_json.graph_verifier=false` conserva el
+ejecutor de un solo turno para los proyectos que lo requieran. Puedes cambiarlo
+en **Flags del proyecto → Etapas del runner → graph_verifier**. Este cambio
+mantiene los límites de ejecución y las rondas configuradas.
+
+Tras un corte por `budget_exceeded`, `budget_split` o un desvío `off_plan`
+del nodo, **Retomar** concede un
 nuevo intento explícito y recupera el historial del nodo antes de abrir otro
 chat. Los nodos terminados y los padres ya sustituidos se conservan. Si el
 historial falta o es inválido, el siguiente intento recibe la instrucción de
@@ -63,9 +72,45 @@ los fallos funcionales y un veredicto global `off_plan` mantienen sus propios
 controles. El historial orienta la continuación; un efecto externo incierto
 requiere revisión antes de repetirlo.
 
+Al retomar un desvío del nodo también se recupera el feedback persistido
+del verificador. El scheduler no concede ese nuevo intento automáticamente.
+Las pruebas de aceptación usan respuestas simuladas en
+`mcp-server/tests/test_graph_node_acceptance.py`.
+
 La persistencia, la reanudación HTTP y el orden de ejecución se comprueban en
 `mcp-server/tests/test_graph_budget_resume.py` con base temporal y ejecutor
 simulado. Estas pruebas no demuestran el resultado de una ejecución real de IA.
+
+## Continuar criterios pendientes de la verificación
+
+Cuando todos los nodos terminan correctamente, la verificación revisa el
+objetivo completo. Si devuelve `needs_more` con una corrección estructurada
+válida, Relay agrega un nodo con los criterios pendientes y continúa en la
+misma ejecución autorizada. Los nodos terminados conservan su resultado y
+no vuelven a ejecutarse. La corrección usa el mismo workspace, identidad y
+controles de la ejecución original.
+
+**Pausar** impide iniciar nuevos nodos, también si se pulsa mientras responde
+el verificador. Los nodos en curso pueden terminar y la corrección queda
+pendiente con su progreso guardado. Para ejecutarla después, usa **Continuar**
+en la tarea y **Retomar** en el plan. Una tarea cancelada permanece terminal.
+
+Cada nueva corrección debe acreditar un criterio pendiente anterior y no
+repetir una lista de pendientes ya intentada. Si falta una corrección válida,
+no hay progreso o se alcanza el límite global de 200 vueltas del scheduler,
+se registra un nodo fallido con el motivo y se detiene la continuación. El
+porcentaje de progreso cuenta solo tareas terminadas correctamente; un fallo
+o un bloqueo no equivale a trabajo cumplido.
+
+Las cancelaciones, preguntas pendientes, fallos de ejecución y veredictos
+`off_plan` o `needs_human` conservan sus controles. Un error del verificador
+o al guardar su respuesta tampoco inicia trabajo adicional. El alta del nodo
+y su registro de progreso se guardan juntos; reiniciar el servidor no arranca
+los grafos automáticamente ni borra el freno ante criterios repetidos.
+
+Las pruebas de `mcp-server/tests/test_graph_verification_recovery.py` usan una
+base temporal y respuestas simuladas. Comprueban el mecanismo de continuación;
+no demuestran que un modelo real evalúe correctamente los criterios.
 
 ## Equipo, cuentas y escritura
 

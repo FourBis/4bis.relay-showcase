@@ -337,7 +337,6 @@ def progreso(nodos: list[Nodo]) -> dict:
         if n.id not in reemplazados:
             conteo[n.estado] = conteo.get(n.estado, 0) + 1
     total = len(nodos) - len(reemplazados)
-    cerrados = sum(conteo[e] for e in TERMINALES)
     return {
         "total": total,
         "total_historico": len(nodos),
@@ -348,7 +347,7 @@ def progreso(nodos: list[Nodo]) -> dict:
         "bloqueados": conteo[BLOQUEADO],
         "fallados": conteo[FALLADO],
         "esperando_humano": conteo[ESPERANDO],
-        "porcentaje": round(100 * cerrados / total) if total else 0,
+        "porcentaje": round(100 * conteo[HECHO] / total) if total else 0,
         "estado": estado_del_grafo(nodos),
     }
 
@@ -407,6 +406,8 @@ def estado_visible(nodos: list[Nodo], crudo: str = "") -> str:
     if crudo == "cancelado":
         return crudo
     base = estado_del_grafo(nodos)
+    if nodos and base == "hecho" and crudo == "activo":
+        return "verificacion_pendiente"
     if (base == "activo"
             and any(n.estado == ESPERANDO for n in nodos)
             and not any(n.estado == CORRIENDO for n in nodos)):

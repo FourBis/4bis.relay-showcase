@@ -161,12 +161,14 @@ async def experts_run(request: web.Request) -> web.Response:
             ctx = CommandContext(
                 db=db, sessions=request.app[SESSIONS_KEY], running=running,
                 source=source, author=author)
+            ok = True
             try:
                 text = await registry.dispatch(
                     cmd_name, {"project": target, "target": target}, ctx)
             except (ValueError, RuntimeError) as e:
                 text = f"`!{cmd_name}` falló: {e}"
-            return web.json_response({"command": cmd_name, "text": text})
+                ok = False
+            return web.json_response({"command": cmd_name, "text": text, "ok": ok})
 
     project = await db.get_project(target)
     if project is None or not project["enabled"]:
