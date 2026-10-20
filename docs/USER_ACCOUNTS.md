@@ -79,6 +79,11 @@ Cada persona conecta su cuenta desde **Mi cuenta**. Configurar un cliente OAuth
 no concede acceso a una cuenta ni a un buzón. La identidad externa no se deduce
 del correo de Equipo.
 
+El estado de conexión exige un token de acceso de texto no vacío. Aplica el
+margen de renovación de 60 segundos usado por las operaciones autenticadas:
+si el token entra en ese margen y no puede renovarse, muestra que necesitas
+reconectar. Consultar este estado no renueva tokens ni modifica la conexión.
+
 Las operaciones autenticadas usan al actor del turno o evento. GitHub, Git y
 `gh` no recurren a la cuenta del administrador cuando falta la conexión personal.
 Los commits usan el autor noreply verificado por GitHub. Los comandos de shell
