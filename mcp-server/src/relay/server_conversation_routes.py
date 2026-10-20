@@ -37,7 +37,7 @@ async def conversations_create(request: web.Request) -> web.Response:
         201 -> {id, project_slug, status: "open", branch, base_branch}
         404 -> proyecto desconocido
         409 -> ya hay una conversación abierta para ese proyecto
-        422 -> el repo no está en un estado git limpio (no se pudo ramificar)
+        422 -> no se pudo preparar el workspace o validar su remote de GitHub
     """
     db: Database = request.app[DB_KEY]
     try:

@@ -30,7 +30,7 @@ export function initPollers(getActiveTab) {
  * ese tab es el activo. Devuelve unregister().
  */
 export function registerPoller(cb, ms, { tabId = null } = {}) {
-  const entry = { cb, ms, tabId, next: Date.now() + ms };
+  const entry = { cb, ms, tabId, next: Date.now() + ms, inFlight: false };
   _pollers.add(entry);
   if (!_timer) _timer = setInterval(_tick, TICK_MS);
   return () => { _pollers.delete(entry); };
@@ -42,11 +42,19 @@ function _tick() {
   const active = _getActiveTab();
   // Copia: un callback puede des-registrarse a sí mismo durante el tick.
   for (const p of [..._pollers]) {
-    if (now < p.next) continue;
+    if (p.inFlight || now < p.next) continue;
     if (p.tabId && !(active instanceof Set ? active.has(p.tabId) : p.tabId === active)) continue;
     p.next = now + p.ms;
     // Un poller roto (throw sync o reject async) no frena al resto,
     // y cb corre sync como en el setInterval clásico.
-    try { Promise.resolve(p.cb()).catch(() => {}); } catch (_) {}
+    p.inFlight = true;
+    try {
+      const result = p.cb();
+      if (result && typeof result.then === "function") {
+        Promise.resolve(result).catch(() => {}).finally(() => { p.inFlight = false; });
+      } else {
+        p.inFlight = false;
+      }
+    } catch (_) { p.inFlight = false; }
   }
 }

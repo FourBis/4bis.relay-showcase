@@ -8,7 +8,69 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp.test_utils import TestServer
 
-from relay import admin, attachments, server, server_common
+from relay import admin, attachments, identity, native_auth, server, server_common
+
+
+async def local_test_session(db, monkeypatch):
+    """Identidad y sesión sintéticas; no inicia OAuth ni omite autenticación."""
+    for attr in ("_roles", "_disabled", "_names"):
+        monkeypatch.setattr(identity, attr, getattr(identity, attr).copy())
+    await db._in_thread(native_auth._finish_login, db, "42", "ui-owner@example.test",
+                        "ui-owner", True, "ui-test-session")
+    identity.load_roles(await db.list_users())
+
+
+@pytest.mark.skipif(os.environ.get("RELAY_TEST_UI") != "1", reason="integración UI opt-in con Chrome")
+async def test_new_chat_422_preserves_cause_and_draft(tmp_path, monkeypatch):
+    """El 422 de Git no se confunde con cambios pendientes y conserva el borrador."""
+    pw = pytest.importorskip("playwright.async_api")
+    monkeypatch.setenv("FOURBIS_DB_PATH", str(tmp_path / "relay.db"))
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
+    monkeypatch.setattr(admin, "_cbm_list_projects", AsyncMock(return_value={"projects": []}))
+    evidence = Path(os.environ.get("RELAY_TEST_UI_OUTPUT", tmp_path / "screenshots"))
+    evidence.mkdir(parents=True, exist_ok=True)
+    async with TestServer(server.create_app()) as http, pw.async_playwright() as browser_api:
+        db = http.app[server.DB_KEY]
+        await local_test_session(db, monkeypatch)
+        await db.upsert_project(dict(slug="draft-test", name="Draft test", repo_path=str(tmp_path)))
+        browser = await browser_api.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+            await page.context.add_cookies([{"name": native_auth.SESSION_COOKIE,
+                "value": "ui-test-session", "url": str(http.make_url("/"))}])
+            errors, console_errors, runs = [], [], []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+            async def reject_creation(route):
+                if route.request.method != "POST":
+                    return await route.continue_()
+                await route.fulfill(status=422, content_type="application/json",
+                                    body=json.dumps({"error": "fetch origin falló: HTTP 403 Forbidden"}))
+
+            async def reject_unexpected_run(route):
+                runs.append(route.request.url)
+                await route.fulfill(status=500, body="unexpected run in test")
+
+            await page.route("**/conversations", reject_creation)
+            await page.route("**/experts/run", reject_unexpected_run)
+            await page.goto(str(http.make_url("/admin")) + "#/chat")
+            await page.wait_for_load_state("networkidle")
+            await page.locator("#workspace-chat-new").click()
+            await page.locator("#chat-draft-project").select_option("draft-test")
+            await page.locator("#chat-panel-input").fill("Borrador que debe conservarse")
+            await page.locator("#chat-panel-send").click()
+            await pw.expect(page.locator("#toast-root")).to_contain_text("fetch origin falló: HTTP 403 Forbidden")
+            await pw.expect(page.locator("#toast-root")).not_to_contain_text("cambios sin commitear")
+            await pw.expect(page.locator("#chat-panel-input")).to_have_value("Borrador que debe conservarse")
+            await pw.expect(page.locator("#chat-panel-send")).to_be_enabled()
+            await page.screenshot(path=str(evidence / "chat-fetch-error-draft.png"))
+            assert not runs
+            assert not await db.run("SELECT id FROM conversations WHERE project_slug='draft-test'")
+            assert not errors, errors
+            assert all("422" in error for error in console_errors), console_errors
+        finally:
+            await browser.close()
 
 
 @pytest.mark.skipif(os.environ.get("RELAY_TEST_UI") != "1", reason="integración UI opt-in con Chrome")
@@ -25,10 +87,13 @@ async def test_chat_states_and_images_in_real_browser(tmp_path, monkeypatch):
     evidence.mkdir(parents=True, exist_ok=True)
     async with TestServer(server.create_app()) as http, pw.async_playwright() as browser_api:
         db = http.app[server.DB_KEY]
+        await local_test_session(db, monkeypatch)
         await db.upsert_project(dict(slug="ui-test", name="UI test", repo_path=str(tmp_path)))
         browser = await browser_api.chromium.launch(channel="chrome", headless=True)
         try:
             page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+            await page.context.add_cookies([{"name": native_auth.SESSION_COOKIE,
+                "value": "ui-test-session", "url": str(http.make_url("/"))}])
             errors, console_errors = [], []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)

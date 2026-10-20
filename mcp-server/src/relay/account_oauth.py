@@ -61,8 +61,11 @@ async def connections(request):
         if connected:
             try:
                 data = store.decrypt(row["token_blob"])
-                connected = (data.get("provider") == provider and data.get("relay_email") == email)
-                if row["expires_at"] and row["expires_at"] <= time.time():
+                access_token = data.get("access_token")
+                connected = (data.get("provider") == provider and data.get("relay_email") == email
+                             and isinstance(access_token, str) and bool(access_token))
+                if (row["expires_at"] and row["expires_at"] <=
+                        time.time() + user_accounts.TOKEN_REFRESH_MARGIN_SECONDS):
                     connected = connected and bool(data.get("refresh_token")) and (
                         not row["refresh_expires_at"] or row["refresh_expires_at"] > time.time())
             except AccountError:
