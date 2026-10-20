@@ -13,6 +13,7 @@ from . import config
 from .experts import cbm_binary_path, cbm_call
 from .night_plan import NightConfig, resolve_cwd_for_cmd, run_branch_name, run_gate
 from .night_generator import NIGHT_WORK_CONTRACT
+from .pr_text import neutralize_gh_pr_create_body
 from .night_types import (
     COMMIT_TRAILER, EXPERT_TIMEOUT_S, FORBIDDEN_PATTERNS, GATE_TIMEOUT_S,
     GIT_TIMEOUT_S, TRANSIENT_BUILD_SIGNATURES, NightTask, TaskResult,
@@ -120,6 +121,8 @@ class BranchWorker:
         """Como _sh pero sin shell: cada arg va literal (create_subprocess_exec).
         Para `gh`, donde el título/body vienen del LLM: sin cmd.exe no hay
         que escapar comillas, %, &, ^ ni newlines (evita inyección/roturas)."""
+        if program == "gh" and args[:2] == ("pr", "create"):
+            args = neutralize_gh_pr_create_body(args)
         proc = await asyncio.create_subprocess_exec(
             program, *args, cwd=self.repo,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)

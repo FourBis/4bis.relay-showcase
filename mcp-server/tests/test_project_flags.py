@@ -76,6 +76,19 @@ class FlagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(flags["sandbox"]["explicito"])
         self.assertTrue(flags["sandbox"]["valor"])
 
+    async def test_graph_verifier_can_be_disabled_and_restored(self) -> None:
+        self.assertTrue((await self._flags())["graph_verifier"]["valor"])
+        response = await self.client.patch("/admin/api/projects/demo/flags",
+                                           json={"graph_verifier": False})
+        self.assertEqual(response.status, 200)
+        defaults = (await self.db.get_project("demo"))["defaults_json"]
+        self.assertFalse(defaults["graph_verifier"])
+        self.assertEqual(defaults["timeout"], 900)
+        response = await self.client.patch("/admin/api/projects/demo/flags",
+                                           json={"graph_verifier": None})
+        self.assertEqual(response.status, 200)
+        self.assertTrue((await self._flags())["graph_verifier"]["valor"])
+
     async def test_cada_flag_trae_tipo_y_descripcion(self) -> None:
         """La UI arma el control desde el tipo; sin descripción, un
         checkbox llamado `native_files` no le dice nada a nadie."""

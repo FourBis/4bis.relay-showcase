@@ -63,6 +63,7 @@ async def test_la_tarea_tiene_chat_id_antes_de_ejecutar_el_nodo(db, tmp_path):
     )
 
     proyecto = await db.get_project("inventorydemo")
+    proyecto["defaults_json"] = {"graph_verifier": False}
     grafo_row = await db.get_task_graph("g")
     ejecutar = orquestador.ejecutor_minimax(db, proyecto, grafo_row)
 
@@ -123,6 +124,7 @@ async def test_la_asociacion_se_escribe_antes_de_run_expert(db, tmp_path):
     )
 
     proyecto = await db.get_project("inventorydemo")
+    proyecto["defaults_json"] = {"graph_verifier": False}
     grafo_row = await db.get_task_graph("g")
     ejecutar = orquestador.ejecutor_minimax(db, proyecto, grafo_row)
 

@@ -485,7 +485,8 @@ from unittest.mock import patch
 
 def _proyecto(tmp_path):
     return {"slug": "demo", "repo_path": str(tmp_path), "system_prompt": "p",
-            "mcp_servers": [], "native_tools": [], "defaults_json": {}}
+            "mcp_servers": [], "native_tools": [],
+            "defaults_json": {"graph_verifier": False}}
 
 
 async def test_el_nodo_corre_sin_las_etapas_y_sin_historial(db, tmp_path):
@@ -1037,7 +1038,7 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
     graph = await db.get_task_graph("g-cancel")
     project = _proyecto(tmp_path)
     project["id"] = 1
-    project["defaults_json"] = {"native_files": False, "native_shell": False,
+    project["defaults_json"] = {"graph_verifier": False, "native_files": False, "native_shell": False,
                                 "sql_tools": False, "timeout": 60}
     execute = orquestador.ejecutor_minimax(db, project, graph, modelo="fake")
     run = asyncio.create_task(orquestador.correr_grafo(db, "g-cancel", ejecutar=execute))

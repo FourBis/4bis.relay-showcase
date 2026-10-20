@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 
 from . import git_flow, git_process, github, night, task_workspace
+from .pr_text import neutralize_issue_closing_keywords
 
 
 class TaskPRError(RuntimeError):
@@ -117,6 +118,7 @@ async def publish(db, project, conv_id):
         body = (f"Cambios de la tarea `{conv_id}`.\n\n"
                 f"Validación local del commit `{sha}`: **{validation['status']}**.\n\n"
                 f"{detail}\n\nAbrir esta PR no finaliza la tarea ni acredita CI remoto.")
+        body = neutralize_issue_closing_keywords(body)
         # Se registra ANTES del efecto, incluso si el proceso muere dentro de gh.
         await db.update_conversation_task(conv_id, publish_uncertain=True)
         args = ["pr", "create", "--base", "develop", "--head", branch,
