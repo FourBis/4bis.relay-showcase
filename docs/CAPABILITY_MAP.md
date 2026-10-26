@@ -2,6 +2,8 @@
 
 Inventario basado en el código de esta edición pública, revisado el 24 de septiembre de 2026, con una revisión acotada de continuidad el [2 de octubre](qa/showcase-maintenance-2026-10-02.md). Complementa el [recorrido del README](../README.md) con fuentes y condiciones de uso. Describe implementación disponible; no declara que una instalación tenga configuradas o comprobadas todas las integraciones. Las pruebas visuales se documentan por separado en [readme-tour.md](qa/readme-tour.md).
 
+La [revisión acotada del 26 de octubre de 2026](qa/showcase-verified-status-2026-10-26.md) aclara el estado de PR externos y sincronización de issues: están implementados en el código público e integrados en `develop` mediante el [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38), del 20 de octubre, con una corrección de observaciones concurrentes en el [PR #39](https://github.com/FourBis/4bis.relay-showcase/pull/39). La demo y las pruebas documentadas usan datos sintéticos y GitHub simulado. Su disponibilidad depende de la versión instalada; esta revisión no acredita un despliegue conectado ni una nueva validación global del inventario.
+
 ## Modelos, configuración y ejecución
 
 | Capacidad | Recorrido y valor práctico | Condiciones y límites | Fuentes |

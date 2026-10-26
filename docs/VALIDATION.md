@@ -1,6 +1,8 @@
 # Validación de la versión de portafolio
 
-Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 y 6 de octubre de 2026. Relay se presenta como proyecto
+Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 y 6 de octubre de 2026.
+La [revisión acotada del 26 de octubre](qa/showcase-verified-status-2026-10-26.md)
+actualiza la presentación y comprueba la demo estática; no revalida todo el servidor. Relay se presenta como proyecto
 experimental para uso local, con licencia [MIT](../LICENSE). Esta revisión reduce
 riesgos concretos de publicación; no certifica ausencia de vulnerabilidades ni
 preparación para un servicio público multiusuario.

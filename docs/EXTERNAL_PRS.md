@@ -2,6 +2,8 @@
 
 [English](EXTERNAL_PRS.en.md) · [Issues y Projects](ISSUE_SYNC.md)
 
+**Alcance revisado el 26 de octubre de 2026:** este recorrido está implementado en el código público e integrado en `develop` mediante el [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38), del 20 de octubre, con una corrección de sincronización en el [PR #39](https://github.com/FourBis/4bis.relay-showcase/pull/39). La demo y las pruebas documentadas usan datos sintéticos y GitHub simulado. La disponibilidad depende de la versión instalada; esta documentación no acredita un despliegue conectado. Consulta la [evidencia y los límites de esta revisión](qa/showcase-verified-status-2026-10-26.md).
+
 Puedes registrar en **Chat → Registrar PR externo** un PR creado con otra herramienta o manualmente. Relay verifica el repositorio y la identidad en GitHub y conserva el vínculo con la tarea; no genera código ni prepara un worktree para ese registro.
 
 ## Recorrido

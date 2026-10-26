@@ -16,6 +16,15 @@ Detrás del chat hay un catálogo de modelos, un índice de código consultable,
 
 La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte del recorrido en el navegador: no llama a modelos ni ejecuta herramientas. Este repositorio incluye también el servidor y el workspace para instalación local, con [alta del primer administrador mediante GitHub](docs/SETUP.md#crear-el-primer-admin-con-github). Relay es experimental; la [evidencia de validación](docs/VALIDATION.md) describe qué se ha comprobado.
 
+## Qué está comprobado
+
+| Estado | Evidencia y alcance |
+|---|---|
+| Implementado en el código público | El [mapa de capacidades](docs/CAPABILITY_MAP.md) enlaza módulos, condiciones y límites. No todas las integraciones están configuradas por defecto. |
+| Integrado en `develop` | El [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) incorporó el registro de PR externos y la sincronización opcional de issues; el [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrigió observaciones concurrentes. Integración de código no equivale a despliegue. |
+| Demostrado en el navegador | Los cinco escenarios usan datos sintéticos, sin modelos, GitHub ni backend. La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) documenta la comprobación local. |
+| Disponible en una instancia | Depende de la versión instalada, sus permisos y su configuración. Esta revisión no acredita un despliegue conectado ni la disponibilidad operativa de PR externos. |
+
 ## Explora Relay
 
 [Modelos](#modelos-configurables-para-cada-parte-del-trabajo) · [Indexación y contexto](#un-repositorio-que-el-agente-puede-explorar-con-contexto) · [Ejecución y grafos](#del-pedido-a-un-grafo-que-puede-cambiar-mientras-trabaja) · [Workspace](#un-workspace-para-trabajar-con-los-resultados) · [GitHub](#una-tarea-con-su-propia-rama-diff-y-pull-request) · [Equipo y CRM](#del-cliente-al-equipo-y-al-repositorio) · [Herramientas](#herramientas-skills-e-integraciones) · [Consumo](#ver-la-actividad-y-entender-el-consumo) · [Arquitectura](#cómo-se-conectan-las-piezas) · [Primer proyecto](#poner-tu-primer-proyecto-a-trabajar)
@@ -153,7 +162,7 @@ Más controles y comportamiento en la [guía del workspace](docs/UI_WORKSPACE.md
 
 ## Una tarea con su propia rama, diff y pull request
 
-En **Chat → Registrar PR externo** puedes vincular una tarea con un PR creado con otra herramienta. Relay separa responsable humano, autor verificado, evidencia declarada, checks y revisión independiente por commit. Un head nuevo vuelve histórica la evidencia anterior; el estado de Relay no bloquea merges en GitHub. Consulta [el recorrido de PR externos](docs/EXTERNAL_PRS.md).
+En una versión que incluya el módulo de PR externos, **Chat → Registrar PR externo** permite vincular una tarea con un PR creado con otra herramienta. El código público separa responsable humano, autor verificado, evidencia declarada, checks y revisión independiente por commit. Un head nuevo vuelve histórica la evidencia anterior; el estado de Relay no bloquea merges en GitHub. Consulta [el recorrido y su alcance](docs/EXTERNAL_PRS.md).
 
 Una tarea de Relay y un PR externo también pueden compartir una issue verificada. El vínculo no declara resolución completa ni activa movimientos: la [sincronización de issue y Projects](docs/ISSUE_SYNC.md) exige una política explícita por proyecto, inicialmente deshabilitada. La demo pública recrea ambos recorridos con datos ficticios, sin solicitudes remotas.
 

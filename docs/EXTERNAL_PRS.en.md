@@ -2,6 +2,8 @@
 
 [Español](EXTERNAL_PRS.md) · [Issues and Projects](ISSUE_SYNC.en.md)
 
+**Scope reviewed on October 26, 2026:** this workflow is implemented in the public code and integrated into `develop` through [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38), dated October 20, with a synchronization correction in [PR #39](https://github.com/FourBis/4bis.relay-showcase/pull/39). The demo and documented tests use synthetic data and simulated GitHub responses. Availability depends on the installed version; this documentation does not establish a connected deployment. See the [evidence and limits of this review](qa/showcase-verified-status-2026-10-26.md).
+
 In **Chat → Registrar PR externo**, register a PR created with another tool or manually. Relay verifies its repository and identity in GitHub and links it to a task. Registration does not generate code or create a worktree.
 
 ## Workflow
