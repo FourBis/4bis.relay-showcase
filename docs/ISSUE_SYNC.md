@@ -2,6 +2,8 @@
 
 [English](ISSUE_SYNC.en.md) · [PR externos](EXTERNAL_PRS.md)
 
+**Alcance revisado el 26 de octubre de 2026:** estas funciones están implementadas en el código público e integradas en `develop` mediante el [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38), del 20 de octubre, con una corrección de observaciones concurrentes en el [PR #39](https://github.com/FourBis/4bis.relay-showcase/pull/39). La demo y las pruebas documentadas usan datos sintéticos y GitHub simulado. La disponibilidad depende de la versión instalada; esta documentación no acredita un despliegue conectado. Consulta la [evidencia y los límites de esta revisión](qa/showcase-verified-status-2026-10-26.md).
+
 Una conversación de Relay y un PR externo pueden compartir una issue del repositorio autorizado. El vínculo conserva la identidad canónica verificada: repositorio e ID, número, node ID, URL, título y estado.
 
 ## Vincular el trabajo

@@ -16,6 +16,15 @@ Behind the chat are a model catalog, a searchable code index, project memory, st
 
 The [public demo](https://fourbis.github.io/4bis.relay-showcase/) recreates part of the workflow in a browser: it does not call models or run tools. This repository also includes the server and workspace for local installation. Relay is experimental; the [validation evidence](docs/VALIDATION.md) describes what has been checked.
 
+## What is verified
+
+| State | Evidence and scope |
+|---|---|
+| Implemented in public code | The [capability map](docs/CAPABILITY_MAP.md) links modules, conditions, and limits. Not every integration is configured by default. |
+| Integrated into `develop` | [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) added external PR registration and optional issue synchronization; [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrected concurrent observations. Code integration does not establish deployment. |
+| Demonstrated in the browser | All five scenarios use synthetic data, without models, GitHub, or a backend. The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) records the local checks. |
+| Available in an instance | This depends on the installed version, permissions, and configuration. This review does not establish a connected deployment or operational availability of external PR registration. |
+
 ## Explore Relay
 
 [Models](#models-configurable-for-each-part-of-the-work) · [Indexing and context](#a-repository-the-agent-can-explore-with-context) · [Execution and graphs](#from-a-request-to-a-graph-that-can-change-as-work-progresses) · [Workspace](#a-workspace-for-working-with-results) · [GitHub](#a-task-with-its-own-branch-diff-and-pull-request) · [Team and CRM](#from-client-to-team-and-repository) · [Tools](#tools-skills-and-integrations) · [Usage](#see-activity-and-understand-usage) · [Architecture](#how-the-pieces-connect) · [First project](#get-your-first-project-working)
@@ -153,7 +162,7 @@ More controls and behavior are described in the [workspace guide](docs/UI_WORKSP
 
 ## A task with its own branch, diff, and pull request
 
-In **Chat → Registrar PR externo**, link a task to a PR created with another tool. Relay separates the responsible person, verified author, declared evidence, checks and independent review by commit. A new head makes previous evidence historical; Relay state does not block GitHub merges. See [the external PR workflow](docs/EXTERNAL_PRS.en.md).
+In a version that includes the external PR module, **Chat → Registrar PR externo** links a task to a PR created with another tool. The public code separates the responsible person, verified author, declared evidence, checks and independent review by commit. A new head makes previous evidence historical; Relay state does not block GitHub merges. See [the workflow and its scope](docs/EXTERNAL_PRS.en.md).
 
 A Relay task and an external PR can also share a verified issue. Linking it neither declares complete resolution nor enables remote changes: [issue and Projects synchronization](docs/ISSUE_SYNC.en.md) requires an explicit per-project policy, disabled initially. The public demo recreates both workflows with fictional data and no remote requests.
 
