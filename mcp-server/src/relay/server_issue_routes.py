@@ -50,7 +50,7 @@ async def issues(request):
         rows = await issue_links.list_issues(project)
         await issue_links.authorize_project(project, identity.requester(request),
                                             lambda: _project(request, project["slug"]))
-        return web.json_response({"issues": rows})
+        return web.json_response({"issues": rows}, headers={"Cache-Control": "no-store"})
     except (ValueError, RuntimeError, OSError) as exc:
         return _error(exc)
 

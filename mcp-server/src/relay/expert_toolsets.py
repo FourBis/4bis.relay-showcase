@@ -11,6 +11,8 @@ from pydantic_ai.messages import BinaryContent
 from pydantic_ai.toolsets import WrapperToolset
 from typing import Optional
 from . import attachments as attachments_mod, config, expert_history
+from .secret_redaction import (redact_data, redact_text, redact_read_data, redact_read_text,
+                               redact_background_read_text)
 
 logger = logging.getLogger("relay.experts")
 try:
@@ -114,6 +116,86 @@ def tool_en_vuelo(inflight: dict) -> tuple[Optional[str], Optional[float]]:
     return nombre, since
 
 
+def _tool_text_fragments(value):
+    """Visit textual values/parts without flattening or changing binary parts."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(getattr(value, "text", None), str):
+        yield value.text
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _tool_text_fragments(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _tool_text_fragments(item)
+
+
+def _filter_tool_text_parts(value, text_filter):
+    """Filter typed text parts left opaque by the JSON-shaped data redactor."""
+    if isinstance(getattr(value, "text", None), str):
+        return value.model_copy(update={"text": text_filter(value.text)})
+    if isinstance(value, list):
+        return [_filter_tool_text_parts(item, text_filter) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_filter_tool_text_parts(item, text_filter) for item in value)
+    if isinstance(value, dict):
+        return {key: _filter_tool_text_parts(item, text_filter) for key, item in value.items()}
+    return value
+
+
+_READ_PATH_KEYS = frozenset({"path", "ruta", "file_path", "filename", "file", "uri"})
+_READ_PATH_LIST_KEYS = _READ_PATH_KEYS | {"paths", "rutas", "file_paths", "filenames", "files", "uris"}
+_MAX_LOG_SNAPSHOTS = 8
+
+
+def _tool_read_paths(value, *, path_value=False):
+    """Read explicit file arguments, not arbitrary prompts or source strings."""
+    if isinstance(value, str):
+        if path_value:
+            yield value
+    elif isinstance(value, dict):
+        path_record = any(key in _READ_PATH_KEYS for key in value)
+        for key, item in value.items():
+            yield from _tool_read_paths(
+                item, path_value=key in _READ_PATH_LIST_KEYS or path_value and not path_record)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _tool_read_paths(item, path_value=path_value)
+
+
+def _sanitize_background_read_result(value, snapshots):
+    """Unknown MCP result shapes never establish per-file provenance.
+
+    JSON Schema describes a value's shape, not whether a path field is file
+    data or a trusted envelope. Keep the R4 fence over the whole ambiguous
+    return, including aliases and typed/structured fragments. Separate native
+    or individual reads can establish the ordinary file contract instead.
+    """
+    text_filter = lambda text: redact_background_read_text(text, snapshots)
+    original_fragments = list(_tool_text_fragments(value))
+    result = _filter_tool_text_parts(
+        redact_read_data(value, text_filter=text_filter), text_filter)
+    if len(original_fragments) > 1:
+        fragments = list(_tool_text_fragments(result))
+        per_part = [redact_text(fragment) for fragment in original_fragments]
+        crossed = False
+        for separator in ("", "\n"):
+            combined = separator.join(fragments)
+            original = separator.join(original_fragments)
+            crossed |= (redact_text(original) != separator.join(per_part)
+                        or redact_text(combined) != combined)
+        if crossed:
+            def withheld(_):
+                return ("error: lectura retenida: un patrón sensible cruza fragmentos "
+                        "del resultado y el MCP no acredita el origen por archivo. "
+                        "Lee los archivos por separado con read_file nativo o una "
+                        "herramienta individual ya autorizada, usando la ruta exacta "
+                        "y los permisos existentes. No uses este mensaje para editar.")
+            result = _filter_tool_text_parts(
+                redact_read_data(result, text_filter=withheld), withheld)
+    return result
+
+
 @dataclasses.dataclass
 class QuestionGateToolset(WrapperToolset):
     """Impide efectos posteriores a una pregunta persistida, incluidas tools MCP."""
@@ -173,6 +255,10 @@ class CappedToolset(WrapperToolset):
                         "background o agregales un timeout.") from None
             else:
                 result = await super().call_tool(name, tool_args, ctx, tool)
+        except ModelRetry as e:
+            # The SDK also translates MCP ToolError directly into ModelRetry.
+            # Keep its retry semantics while sanitizing the model-visible copy.
+            raise ModelRetry(redact_text(e.message)) from e
         except McpError as e:
             # Un MCP que contesta con error JSON-RPC MATABA el run entero
             # (2026-08-26). pydantic-ai convierte a ModelRetry el
@@ -191,7 +277,7 @@ class CappedToolset(WrapperToolset):
             # número de línea y el token que falló, que es exactamente lo
             # que el modelo necesita para corregir.
             raise ModelRetry(
-                f"La tool `{name}` falló del lado del MCP: {e} "
+                f"La tool `{name}` falló del lado del MCP: {redact_text(str(e))} "
                 "El error viene del server, no del relay — la tool sigue "
                 "disponible. Corrige los argumentos según ese mensaje y "
                 "vuelve a llamarla, o resuelve el paso de otra forma.") from e
@@ -202,6 +288,33 @@ class CappedToolset(WrapperToolset):
             expert_history._elide_old_response_parts(ctx.messages)
         except Exception as e:  # noqa: BLE001 — la elisión nunca rompe un run
             logger.warning("elisión de historial falló: %r", e)
+        # Console results keep their established strong rules. Ordinary reads
+        # preserve source expressions and innocuous JSON formatting. Generated
+        # log paths only hint at provenance: arbitrary MCP adapters need not
+        # share our filesystem even when their argument is absolute.
+        from .shell import (is_background_log_path, background_log_name_hint,
+                            background_log_read_snapshot)
+        paths = list(dict.fromkeys(_tool_read_paths(tool_args)))
+        console_output = name in expert_history._CONSOLE_TOOLS
+        text_filter = redact_text if console_output else redact_read_text
+        data_filter = redact_data if console_output else redact_read_data
+        possible_logs = {path for path in paths
+                         if background_log_name_hint(path) or is_background_log_path(path)}
+        if possible_logs and not console_output:
+            # Do not guess how an arbitrary MCP resolves file paths. Only
+            # its already-returned copy is compared with bounded server-owned
+            # log snapshots; unverified sensitive fragments are withheld.
+            checked_paths = [path for path in paths if path in possible_logs][:_MAX_LOG_SNAPSHOTS]
+            try:
+                copies = await asyncio.wait_for(asyncio.gather(*(
+                    asyncio.to_thread(background_log_read_snapshot, path)
+                    for path in checked_paths)), timeout=1.0)
+            except asyncio.TimeoutError:
+                copies = ()
+            snapshots = tuple(snapshot for snapshot in copies if snapshot is not None)
+            result = _sanitize_background_read_result(result, snapshots)
+        else:
+            result = _filter_tool_text_parts(data_filter(result), text_filter)
         result = expert_history._cap_tool_result(result, tool_name=name)
         parts = result if isinstance(result, list) else [result]
         images = [p for p in parts if isinstance(p, BinaryContent)

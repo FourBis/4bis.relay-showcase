@@ -27,6 +27,13 @@ def parse_url(url):
     return f"{match[1]}/{match[2]}", int(match[3])
 
 
+def same_repository(ref, repo_id, canonical):
+    """Both PR refs must belong to the project's repository, never a fork."""
+    repository = ref.get("repo") if isinstance(ref, dict) else None
+    return (isinstance(repository, dict) and type(repository.get("id")) is int
+            and repository["id"] == repo_id and isinstance(repository.get("full_name"), str)
+            and repository["full_name"].casefold() == canonical.casefold())
+
 async def _api(endpoint):
     rc, output = await github._gh("api", "--hostname", "github.com", endpoint)
     if rc:
@@ -66,7 +73,7 @@ async def _pages(endpoint):
 
 async def _read_snapshot(project, url, issue_number=None):
     requested, number = parse_url(url)
-    configured = await github.repo_slug(project.get("repo_path") or "")
+    configured = await github.repo_slug(project.get("repo_path") or "", refresh=True)
     if not configured or not _SLUG.fullmatch(configured):
         raise ValueError("El proyecto no tiene un repositorio GitHub autorizado")
     repo = await _api(f"repos/{configured}")
@@ -78,15 +85,16 @@ async def _read_snapshot(project, url, issue_number=None):
     pr = await _api(f"{prefix}/pulls/{number}")
     try:
         base, head = pr["base"], pr["head"]
-        valid = (pr["number"] == number and base["repo"]["id"] == repo["id"]
-                 and base["repo"]["full_name"].casefold() == canonical.casefold()
+        valid = (type(pr["number"]) is int and pr["number"] == number
+                 and same_repository(base, repo["id"], canonical)
+                 and same_repository(head, repo["id"], canonical)
                  and pr["html_url"].casefold() == f"https://github.com/{canonical}/pull/{number}".casefold()
                  and _SHA.fullmatch(base["sha"]) and _SHA.fullmatch(head["sha"])
                  and pr["state"] in {"open", "closed"} and type(pr["draft"]) is bool)
     except (TypeError, KeyError):
         valid = False
     if not valid:
-        raise TaskPRError("GitHub no confirmó repositorio, número y commits de la PR")
+        raise TaskPRError("La PR debe tener ambas ramas en el repositorio vinculado al proyecto; no se admiten forks ni referencias sin verificar")
     issue_link = await issue_links.resolve(project, issue_number) if issue_number is not None else None
     if issue_link and issue_link["repo_id"] != repo["id"]:
         raise ValueError("El repositorio cambió durante la verificación del issue")
@@ -117,8 +125,13 @@ async def _read_snapshot(project, url, issue_number=None):
     # Verify again after reading evidence: do not attach a mixed snapshot to an old head.
     latest = await _api(f"{prefix}/pulls/{number}")
     if (not isinstance(latest, dict) or latest.get("head", {}).get("sha") != sha or latest.get("base", {}).get("sha") != base["sha"]
+            or not same_repository(latest.get("head"), repo["id"], canonical)
+            or not same_repository(latest.get("base"), repo["id"], canonical)
             or latest.get("state") != pr["state"] or latest.get("draft") != pr["draft"]):
         raise TaskPRError("La PR cambió durante la lectura. Vuelve a actualizar.")
+    current_repo = await github.repo_slug(project.get("repo_path") or "", refresh=True)
+    if not isinstance(current_repo, str) or current_repo.casefold() != configured.casefold():
+        raise TaskPRError("El repositorio vinculado cambió durante la lectura; actualiza el proyecto antes de registrar")
     return {"repo": canonical, "repo_id": repo["id"], "number": number,
             "url": f"https://github.com/{canonical}/pull/{number}", "title": pr.get("title", ""),
             "state": "MERGED" if pr.get("merged_at") else pr["state"].upper(), "draft": pr["draft"],

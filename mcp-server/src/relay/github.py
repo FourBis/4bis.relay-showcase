@@ -150,7 +150,7 @@ def _parse_remote(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-async def repo_slug(repo_path: str) -> Optional[str]:
+async def repo_slug(repo_path: str, *, refresh: bool = False) -> Optional[str]:
     """"owner/name" del remote origin, o None si no hay/no es GitHub.
 
     Se deriva del remote en vez de guardarse en la DB a propósito: si
@@ -159,7 +159,7 @@ async def repo_slug(repo_path: str) -> Optional[str]:
     """
     key = ("slug", repo_path)
     hit, value = _cached(key)
-    if hit:
+    if hit and not refresh:
         return value
     try:
         proc = await asyncio.create_subprocess_exec(

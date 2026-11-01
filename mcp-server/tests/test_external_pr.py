@@ -247,7 +247,7 @@ def github_payloads():
     pr = {"number": 17, "html_url": URL, "title": "External change", "state": "open", "draft": False,
           "merged_at": None, "user": {"id": 11, "login": "author", "type": "User"},
           "base": {"repo": repo, "sha": BASE, "ref": "develop"},
-          "head": {"sha": SHA_A, "ref": "bot/change"}}
+          "head": {"repo": dict(repo), "sha": SHA_A, "ref": "bot/change"}}
     return {
         "user": {"id": 123, "login": "dev", "type": "User"},
         "repos/AuroraDemo/relay-demo": repo,

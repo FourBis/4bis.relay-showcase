@@ -18,6 +18,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -25,7 +27,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import config
+from . import config, persist
 
 logger = logging.getLogger("relay.voice")
 
@@ -120,25 +122,38 @@ async def transcribe_minimax(audio_path: Path) -> dict:
     }
 
 
-async def persist_transcript(record: dict) -> Path:
-    """Escribe `state/transcripts/<id>.jsonl` (un objeto JSON por archivo)."""
-    tdir = transcripts_dir()
-    await asyncio.to_thread(tdir.mkdir, parents=True, exist_ok=True)
+async def persist_transcript(record: dict, *, directory: Optional[Path] = None) -> Path:
+    """Publica un JSON completo; cancelar espera al IO antes de propagarse."""
+    tdir = directory if directory is not None else transcripts_dir()
     path = tdir / f"{record['id']}.jsonl"
     payload = json.dumps(record, ensure_ascii=False)
-    await asyncio.to_thread(path.write_text, payload + "\n", "utf-8")
+
+    def write():
+        tdir.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=tdir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(payload + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    await persist._write_completed(write)
     return path
 
 
-async def read_transcript(trx_id: str) -> Optional[dict]:
+async def read_transcript(trx_id: str, *, directory: Optional[Path] = None) -> Optional[dict]:
     """Lee un transcript persistido. None si no existe / id inválido."""
     # ids son trx_<hex>; rechazar cualquier cosa con separadores de path
     if not trx_id.startswith("trx_") or any(c in trx_id for c in "/\\."):
         return None
-    path = transcripts_dir() / f"{trx_id}.jsonl"
+    path = (directory if directory is not None else transcripts_dir()) / f"{trx_id}.jsonl"
     try:
         text = await asyncio.to_thread(path.read_text, "utf-8")
-        return json.loads(text)
+        record = json.loads(text)
+        return record if isinstance(record, dict) and record.get("id") == trx_id else None
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -157,6 +172,8 @@ async def list_transcripts(limit: int = 50) -> list[dict]:
             try:
                 rec = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(rec, dict) or rec.get("id") != p.stem:
                 continue
             out.append({k: rec.get(k) for k in (
                 "id", "ts", "author", "mode", "topic", "related_project")}

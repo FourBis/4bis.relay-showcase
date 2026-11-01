@@ -247,7 +247,8 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
     y un warning en `error`. Nunca 500 por basura del cliente.
 
     Caps defensivos (bug fix 2026-07-08 — Sub-ola 2.4):
-      - `?max_turns=N` (default 200): tope de turnos en el response
+      - `?max_turns=N` (default 200): últimos turnos en orden cronológico;
+        `truncated` indica que existe historia anterior.
       - `?content_cap=N` (default 4000): tope de chars por turno
         individual. Turnos más largos se truncan con sufijo
         `… [truncado, N chars totales]`.
@@ -256,6 +257,12 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
         podía devolver varios MB al cliente, lo que colgaba el modal
         de la UI. Ahora el response es bounded.
     """
+    from .secret_redaction import redact_data, redact_text
+
+    def display_cap(value, cap):
+        # Sanitize the display copy before truncation can remove token syntax.
+        return _cap_text(redact_text(value), cap)
+
     db: Database = request.app[DB_KEY]
     conv_id = request.match_info["id"]
     # parsear params con fallback a defaults
@@ -332,11 +339,10 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
     if md_turns:
         # Aplicar caps (max_turns / content_cap) igual que el camino viejo.
         out: list[dict] = []
-        truncated_turns = 0
         for t in md_turns:
             role = t.get("role", "")
             content = t.get("content", "") or ""
-            capped = _cap_text(content, content_cap)
+            capped = display_cap(content, content_cap)
             turn = {
                 "role": role,
                 "content": capped["text"],
@@ -364,9 +370,9 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
                 # igual — es justo el caso donde el proceso es TODO lo
                 # que quedó del run.
                 out.append({**turn, "content": "", "truncated": False, "total_chars": 0})
-            if len(out) >= max_turns:
-                truncated_turns += 1
-                break
+        # Keep the most recent bounded window without reversing chronology.
+        truncated_turns = max(0, len(out) - max_turns)
+        out = redact_data(out[-max_turns:])
         return web.json_response({
             "conversation_id": conv_id,
             "messages": out,
@@ -399,7 +405,6 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
             {"conversation_id": conv_id, "messages": [],
              "error": f"JSON corrupto: {e}", "truncated": False})
     out: list[dict] = []
-    truncated_turns = 0
     for m in msgs:
         kind = m.get("kind", "")
         parts = m.get("parts") or []
@@ -411,7 +416,7 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
                     c = p.get("content", "")
                     text_parts.append(
                         c if isinstance(c, str) else json.dumps(c))
-            content = _cap_text("\n".join(text_parts).strip(), content_cap)
+            content = display_cap("\n".join(text_parts).strip(), content_cap)
             if content["text"]:
                 out.append({
                     "role": "user",
@@ -423,7 +428,7 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
             for p in parts:
                 if p.get("part_kind") == "tool-return":
                     tc = p.get("content", "")
-                    capped = _cap_text(
+                    capped = display_cap(
                         tc if isinstance(tc, str) else json.dumps(tc),
                         content_cap)
                     out.append({"role": "tool", "tool_name": "tool",
@@ -442,7 +447,7 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
                     # el hilo (Fase 2 UI, 2026-07-20e).
                     tool_parts.append(p)
             if text_parts:
-                content = _cap_text("".join(text_parts).strip(), content_cap)
+                content = display_cap("".join(text_parts).strip(), content_cap)
                 if content["text"]:
                     out.append({
                         "role": "assistant",
@@ -489,10 +494,8 @@ async def conversations_get_messages(request: web.Request) -> web.Response:
                 if cmd:
                     turn["cmd"] = cmd
                 out.append(turn)
-        # cortar si pasamos max_turns (respetar orden natural del historial)
-        if len(out) >= max_turns:
-            truncated_turns += 1
-            break
+    truncated_turns = max(0, len(out) - max_turns)
+    out = redact_data(out[-max_turns:])
     return web.json_response({
         "conversation_id": conv_id,
         "messages": out,

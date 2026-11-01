@@ -309,16 +309,19 @@ async def _run_expert_bg(
             result = await _grafo_en_vez_de_proponer(
                 app, db, project, user, conv_id, result)
     except experts.ModelUnavailable as e:
+        result = {**result, **rescue, "phase_at_end": "error"}
         error, status = str(e), "error"
     except asyncio.TimeoutError:
+        result = {**result, **rescue, "phase_at_end": "timeout"}
         error, status = "timeout total del experto", "error"
     except asyncio.CancelledError:
         # Cancelar usa el mismo cierre durable que éxito/error; incluso si
         # todavía no había historial, la fila y los artefactos quedan cerrados.
         status = "cancelled"
-        result = {**rescue, "content": "run cancelado", "phase_at_end": "cancelled"}
+        result = {**result, **rescue, "content": rescue.get("content") or result.get("content") or "run cancelado", "phase_at_end": "cancelled"}
     except Exception as e:
         logger.exception("experto %s falló", target)
+        result = {**result, **rescue, "phase_at_end": "error"}
         error, status = f"{type(e).__name__}: {e}", "error"
     finally:
         # Estado post-mortem para que /status siga respondiendo hasta que el
@@ -347,7 +350,7 @@ async def _run_expert_bg(
     # primero, ese GET devolvía el historial VIEJO — las burbujas del turno
     # (prompt + respuesta + tool calls) no aparecían hasta recargar la
     # página, que era justo cuando el historial ya estaba guardado.
-    if conv_id and status in ("ok", "cancelled") and result.get("messages_json"):
+    if conv_id and result.get("messages_json"):
         try:
             await db.save_conversation_messages(
                 conv_id, result["messages_json"], expected=history_json)
@@ -366,7 +369,9 @@ async def _run_expert_bg(
         except Exception:
             logger.exception("no pude persistir la bitácora de conv=%s",
                              conv_id[:8])
-    duration_ms = result.get("duration_ms", int((time.monotonic() - t0) * 1000))
+    duration_ms = result.get("duration_ms")
+    if duration_ms is None:
+        duration_ms = int((time.monotonic() - t0) * 1000)
     content = result.get("content", "")
     generated = result.get("image_artifacts") or {}
     if generated and not all(f"/attachments/{aid}" in content for aid in generated):
@@ -409,6 +414,9 @@ async def _run_expert_bg(
         # esto, el .md solo tiene pedido + respuesta — ver el bug de los
         # 790.142 tokens / 61 tool calls / .md de 1 KB.
         events=result.get("progress_events"),
+        # Preserve recovered history in the durable output if the conversation
+        # CAS refused it. Export keeps this metadata out of Markdown/JSONL.
+        messages_json=result.get("messages_json") or "",
     )
     md_path = await finalization.finish(
         db, chat_id, status=status, artifact=artifact,
