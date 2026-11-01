@@ -30,18 +30,13 @@ async def _mcp_with_links(db) -> list[dict]:
         r["project_slugs"] = by_mcp.get(r["id"], [])
     return rows
 
-async def _mcp_set_links(db, mcp_id: int, slugs: list) -> str | None:
-    """Reemplaza los links de un MCP. Devuelve mensaje de error o None."""
-    ids = []
-    for slug in slugs:
-        p = await db.get_project(str(slug).strip())
-        if p is None:
-            return f"proyecto desconocido: {slug!r}"
-        ids.append(p["id"])
-    await db.run("DELETE FROM project_mcp_servers WHERE mcp_id=?", (mcp_id,))
-    for pid in ids:
-        await db.link_mcp(pid, mcp_id)
-    return None
+def _validated_scope(body: dict) -> list[str] | None:
+    if "project_slugs" not in body:
+        return None
+    slugs = body["project_slugs"]
+    if not isinstance(slugs, list) or any(not isinstance(s, str) or not s.strip() for s in slugs):
+        raise ValueError("project_slugs debe ser una lista de slugs no vacíos")
+    return list(dict.fromkeys(s.strip() for s in slugs))
 
 async def api_mcp_list(request: web.Request) -> web.Response:
     """GET /admin/api/mcp — catálogo completo (con project_slugs)."""
@@ -54,7 +49,8 @@ async def api_mcp_upsert(request: web.Request) -> web.Response:
 
     Body: {name, capability, transport?, command?, args?, url?, env?,
            read_only?, on_demand?, idle_timeout_s?, enabled?,
-           project_slugs?: [..]}  (project_slugs vacío/omitido = global)
+           project_slugs?: [..]}  ([] = global; omitido conserva el alcance
+           existente, o crea global si es un alta)
 
     Para el alta vía GitHub con vetting está POST /admin/api/mcp/install
     (F2, aún no implementada).
@@ -64,11 +60,16 @@ async def api_mcp_upsert(request: web.Request) -> web.Response:
         body = await request.json() if request.body_exists else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "JSON inválido"}, status=400)
-    body = body or {}
-    name = (body.get("name") or "").strip()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body debe ser objeto JSON"}, status=400)
+    if not isinstance(body.get("name"), str):
+        return web.json_response({"error": "name requerido"}, status=400)
+    name = body["name"].strip()
     if not name:
         return web.json_response({"error": "name requerido"}, status=400)
     existing = await db.get_mcp_server(name)
+    if "capability" in body and not isinstance(body["capability"], str):
+        return web.json_response({"error": "capability debe ser texto"}, status=400)
     if existing is None and not (body.get("capability") or "").strip():
         return web.json_response({"error": "capability requerida"}, status=400)
     data = {"name": name}
@@ -81,11 +82,10 @@ async def api_mcp_upsert(request: web.Request) -> web.Response:
                       "credenciales)"}, status=400)
     if "args" in data and not isinstance(data["args"], list):
         return web.json_response({"error": "args debe ser lista"}, status=400)
-    row = await db.upsert_mcp_server(data)
-    if isinstance(body.get("project_slugs"), list):
-        err = await _mcp_set_links(db, row["id"], body["project_slugs"])
-        if err:
-            return web.json_response({"error": err}, status=400)
+    try:
+        row = await db.upsert_mcp_server_with_links(data, _validated_scope(body))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     rows = await _mcp_with_links(db)
     row = next(r for r in rows if r["name"] == row["name"])
     return web.json_response({"mcp": _serialize(row)},
@@ -102,17 +102,22 @@ async def api_mcp_patch(request: web.Request) -> web.Response:
         body = await request.json() if request.body_exists else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "JSON inválido"}, status=400)
-    body = body or {}
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body debe ser objeto JSON"}, status=400)
     data = {"name": existing["name"]}
     for col in _MCP_EDITABLE:
         if col in body:
             data[col] = body[col]
-    if len(data) > 1:
-        await db.upsert_mcp_server(data)
-    if isinstance(body.get("project_slugs"), list):
-        err = await _mcp_set_links(db, existing["id"], body["project_slugs"])
-        if err:
-            return web.json_response({"error": err}, status=400)
+    if "capability" in data and not isinstance(data["capability"], str):
+        return web.json_response({"error": "capability debe ser texto"}, status=400)
+    if "env" in data and not isinstance(data["env"], dict):
+        return web.json_response({"error": "env debe ser objeto JSON"}, status=400)
+    if "args" in data and not isinstance(data["args"], list):
+        return web.json_response({"error": "args debe ser lista"}, status=400)
+    try:
+        await db.upsert_mcp_server_with_links(data, _validated_scope(body))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     rows = await _mcp_with_links(db)
     row = next(r for r in rows if r["id"] == existing["id"])
     return web.json_response({"mcp": _serialize(row)})

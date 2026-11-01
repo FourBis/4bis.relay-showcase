@@ -28,6 +28,7 @@ from .db import Database
 from .notify import NotifyClient
 from .skills import SkillCache
 from .server_expert_jobs import _run_expert_bg
+from .secret_redaction import redact_data
 @_require_auth
 @coordination.guard_workspace(DB_KEY, enqueue=True)
 async def experts_run(request: web.Request) -> web.Response:
@@ -530,9 +531,18 @@ async def _cancel_expert(request, chat_id):
             return web.json_response({"error": "La ejecución terminó sin guardar su cierre; revisa el registro."}, status=409)
         return web.json_response({"cancelled": [chat_id] if (chat or {}).get("status") == "cancelled" else [],
                                   "finished": [chat_id]})
+    if chat and chat.get("status") in {"queued", "running"} and chat.get("source") == "grafo":
+        # Graph workers use a separate registry. Preserve their results.
+        return web.json_response({"code": "graph_managed_run",
+            "error": "Este turno pertenece a un plan; usa sus controles para detenerlo o revisar su estado."}, status=409)
     if chat and chat.get("status") == "running":
-        await db.finish_chat(chat_id, status="cancelled", error="zombie: cancelado sin proceso vivo")
-        return web.json_response({"cancelled": [], "zombies_cleaned": [chat_id]})
+        changed = await db.cancel_running_chat(
+            chat_id, error="zombie: cancelado sin proceso vivo")
+        if changed:
+            return web.json_response({"cancelled": [], "zombies_cleaned": [chat_id]})
+        chat = await db.get_chat(chat_id)
+        if chat and chat.get("status") in {"queued", "running"}:
+            return web.json_response({"error": "La ejecución cambió de estado; revisa su registro."}, status=409)
     if chat:
         return web.json_response({"cancelled": [], "finished": [chat_id]})
     return web.json_response({"error": "no hay run en curso con ese id"}, status=404)
@@ -646,5 +656,5 @@ async def experts_status(request: web.Request) -> web.Response:
     if len(matches) > 1:
         return web.json_response(
             {"matches": [m for m in matches],
-             "snapshots": [progress[m].snapshot() for m in matches]})
-    return web.json_response(progress[matches[0]].snapshot())
+             "snapshots": [redact_data(progress[m].snapshot()) for m in matches]})
+    return web.json_response(redact_data(progress[matches[0]].snapshot()))

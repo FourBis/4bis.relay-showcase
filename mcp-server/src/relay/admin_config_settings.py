@@ -24,8 +24,12 @@ async def _refresh_runtime_config(db) -> None:
     except Exception as e:  # noqa: BLE001 — best-effort, no rompemos el set
         logger.warning("refresh runtime config falló: %r", e)
 
-_EDITABLE_CONFIG_KEYS = (*relay_config.PANEL_SETTINGS,
-                         *_MODEL_ROLE_KEYS.values())
+# Secrets and numeric settings use their dedicated validated endpoints.
+_EDITABLE_CONFIG_KEYS = (
+    "RELAY_HOST", "FOURBIS_REPOS_ROOT", "MODEL_PRICES",
+    "GITHUB_BOARD_OWNER", "GITHUB_BOARD_NUMBER", "DISCORD_GUILD_ID",
+    *_MODEL_ROLE_KEYS.values(),
+)
 
 _SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 

@@ -383,12 +383,14 @@ async def api_projects_patch(request: web.Request) -> web.Response:
     project = await db.get_project(slug)
     if not project:
         return web.json_response({"error": "not found"}, status=404)
+    changes = {"slug": project["slug"]}
+    policy_updates = {}
     if "external_pr_policy" in body:
         try:
             policy = _external_pr_policy(body["external_pr_policy"])
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=422)
-        project["defaults_json"] = {**(project.get("defaults_json") or {}), "external_pr_policy": policy}
+        policy_updates["external_pr_policy"] = policy
     editable = {"name", "description", "repo_path", "system_prompt",
                 "enabled", "include_in_index", "night_mode_enabled",
                 "night_config", "discord_channel_id"}  # Iter 10.1
@@ -409,13 +411,18 @@ async def api_projects_patch(request: web.Request) -> web.Response:
                 # NO queremos pisar el valor existente con NULL por
                 # accidente; usamos endpoint dedicado para clear).
                 if body[field] is None:
-                    project[field] = None
+                    changes[field] = None
                 elif isinstance(body[field], str) and body[field].strip():
-                    project[field] = body[field].strip()
+                    changes[field] = body[field].strip()
                 continue
-            project[field] = body[field]
-    await db.upsert_project(project)
-    return web.json_response({"project": _serialize(dict(project))})
+            changes[field] = body[field]
+    if len(changes) > 1:
+        await db.upsert_project(changes)
+    project = (await db.patch_project_defaults(slug, policy_updates) if policy_updates
+               else await db.get_project(slug))
+    if project is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"project": _serialize(project)})
 
 async def api_projects_set_discord_channel(request: web.Request) -> web.Response:
     """PATCH /admin/api/projects/{slug}/discord-channel — set/clear del

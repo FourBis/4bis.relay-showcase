@@ -3,14 +3,68 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
+import httpx
 from aiohttp import web
-from . import identity
-from .app_state import DB_KEY, NIGHT_KEY
+from . import coordination, identity
+from .app_state import DB_KEY, NIGHT_KEY, PROGRESS_KEY, RUNNING_KEY, STATE_DIR_KEY
+from .secret_redaction import redact_data, redact_text
+from .night_paths import night_plan_mirror
 
 logger = logging.getLogger("relay.admin")
+
+
+async def _zombie_idle_project(request, chat):
+    """Return the lease target only when no executor/control owns this run.
+
+    Managed tasks/graphs keep their own recovery controls. A project lease
+    also covers create_chat -> registration and the result-finalization gap.
+    """
+    db = request.app[DB_KEY]
+    if chat.get("status") != "running":
+        return None
+    if chat["id"] in getattr(db, "_unfinalized_process_chats", set()):
+        return None
+    worker = request.app.get(RUNNING_KEY, {}).get(chat["id"])
+    if worker is not None and not worker.done():
+        return None
+    if chat["id"] in request.app.get(PROGRESS_KEY, {}):
+        return None
+    if await db.conversation_event_for_chat(chat["id"]):
+        return None
+    if cid := chat.get("conversation_id"):
+        if (await db.get_conversation_task(cid)).get("mode"):
+            return None
+    # Graph-owned runs retain their graph controls even if a node link is
+    # missing. This endpoint only removes independent empty orphans.
+    if chat.get("source") == "grafo":
+        return None
+    project = await db.get_project(chat.get("project_slug") or chat.get("target") or "")
+    if not project or coordination.busy(db, project):
+        return None
+    return project
+
+
+async def _post_expert(request: web.Request, payload: dict) -> httpx.Response:
+    """Conserva la identidad y las guardas del endpoint en esta aplicación."""
+    # Nunca reenviar credenciales a RELAY_URL, Host o un proxy configurable:
+    # el puerto sale del socket local que recibió la petición autenticada.
+    address = request.transport.get_extra_info("sockname")
+    host = "[::1]" if ":" in address[0] else "127.0.0.1"
+    headers = {name: request.headers[name] for name in (
+        "Cf-Access-Jwt-Assertion",) if name in request.headers}
+    from .server_common import _get_api_key
+    if api_key := _get_api_key():
+        headers["X-Relay-Key"] = api_key
+    from .native_auth import SESSION_COOKIE
+    if session := request.cookies.get(SESSION_COOKIE):
+        headers["Cookie"] = f"{SESSION_COOKIE}={session}"
+    async with httpx.AsyncClient(timeout=10, trust_env=False, follow_redirects=False) as client:
+        return await client.post(f"{request.scheme}://{host}:{address[1]}/experts/run",
+                                 json=payload, headers=headers)
+
 
 async def api_zombies_list(request: web.Request) -> web.Response:
     """GET /admin/api/chats/zombies — chats en status=running viejos.
@@ -21,29 +75,56 @@ async def api_zombies_list(request: web.Request) -> web.Response:
     La UI muestra esta lista en un tab aparte con botón "Eliminar de BD".
     """
     db = request.app[DB_KEY]
-    older_than_s = int(request.query.get("older_than_s", "60"))
-    limit = int(request.query.get("limit", "200"))
+    try:
+        older_than_s = max(60, int(request.query.get("older_than_s", "60")))
+        limit = max(1, min(200, int(request.query.get("limit", "200"))))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "edad y límite deben ser enteros"}, status=400)
     rows = await db.list_zombie_chats(
         older_than_s=older_than_s, limit=limit)
+    rows = [row for row in rows if await _zombie_idle_project(request, row)]
     return web.json_response({
-        "zombies": [dict(r) for r in rows],
+        "zombies": redact_data([dict(r) for r in rows]),
         "older_than_s": older_than_s,
         "count": len(rows),
     })
 
 async def api_chat_delete(request: web.Request) -> web.Response:
-    """DELETE /admin/api/chats/{chat_id} — hard delete de un zombie.
-
-    Iter 5.3: la grid de zombies tiene un botón "Eliminar de BD" que
-    dispara este endpoint. Best-effort: borra la fila + .md asociado.
-    El JSONL no se toca (best-effort, no urge, pesan poco).
-    """
+    """DELETE an empty orphan only; never remove a result or an active run."""
     db = request.app[DB_KEY]
     chat_id = request.match_info["chat_id"]
-    ok = await db.delete_chat(chat_id)
-    if not ok:
+    chat = await db.get_chat(chat_id)
+    if not chat:
         return web.json_response(
             {"error": f"chat {chat_id!r} no existe"}, status=404)
+    if identity.role_of(request) != "owner" and not await identity.can_control_chat(request, db, chat):
+        return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
+    from .task_service import control_lock
+    cid = chat.get("conversation_id")
+    async with control_lock(db, cid) if cid else nullcontext():
+        chat = await db.get_chat(chat_id)
+        if chat and identity.role_of(request) != "owner" and not await identity.can_control_chat(request, db, chat):
+            return web.json_response({"error": "No tienes permiso para controlar este run."}, status=403)
+        project = await _zombie_idle_project(request, chat) if chat else None
+        if project is None:
+            return web.json_response({"error": "El run está activo, terminó o tiene controles propios; se conserva."}, status=409)
+        try:
+            lease = coordination.acquire(db, project)
+        except coordination.WorkspaceBusy:
+            return web.json_response({"error": "El proyecto tiene trabajo en curso; espera a que termine."}, status=409)
+        try:
+            # Revalidate synchronous registries after the last await and hold
+            # the same workspace exclusion as admission until SQLite commits.
+            worker = request.app.get(RUNNING_KEY, {}).get(chat_id)
+            if ((worker is not None and not worker.done())
+                    or chat_id in request.app.get(PROGRESS_KEY, {})
+                    or chat_id in getattr(db, "_unfinalized_process_chats", set())):
+                return web.json_response({"error": "El run sigue activo; se conserva."}, status=409)
+            ok = await db.delete_chat(chat_id, expected_started_at=chat["started_at"])
+        finally:
+            lease.release()
+    if not ok:
+        return web.json_response({"error": "El run cambió o conserva resultado, consumo o referencias; no se eliminó."}, status=409)
     return web.json_response({"deleted": chat_id})
 
 async def api_notes_create(request: web.Request) -> web.Response:
@@ -83,16 +164,11 @@ async def api_notes_create(request: web.Request) -> web.Response:
     if conv_id:
         payload["conversation"] = conv_id
 
-    relay_url = os.environ.get("RELAY_URL", "http://127.0.0.1:8413")
     try:
-        import httpx
-        r = await asyncio.to_thread(lambda: httpx.post(
-            f"{relay_url}/experts/run",
-            json=payload,
-            timeout=10.0))
+        r = await _post_expert(request, payload)
         if r.status_code >= 400:
             return web.json_response(
-                {"error": f"experts/run {r.status_code}: {r.text[:200]}"},
+                {"error": f"experts/run {r.status_code}: {redact_text(r.text)[:200]}"},
                 status=502)
         data = r.json()
         chat_id = data.get("id") or ""
@@ -118,7 +194,7 @@ async def api_notes_list(request: web.Request) -> web.Response:
         "FROM chats WHERE target=? ORDER BY started_at DESC LIMIT ? OFFSET ?",
         ("notes", limit, offset))
     return web.json_response({
-        "notes": [dict(r) for r in rows],
+        "notes": redact_data([dict(r) for r in rows]),
         "count": len(rows),
     })
 
@@ -134,7 +210,7 @@ async def api_night_runs_list(request: web.Request) -> web.Response:
     limit = int(request.query.get("limit", "50"))
     rows = await db.list_night_runs(project_slug=project, limit=limit)
     return web.json_response({
-        "runs": [dict(r) for r in rows],
+        "runs": redact_data([dict(r) for r in rows]),
         "count": len(rows),
     })
 
@@ -156,17 +232,8 @@ async def api_night_run_detail(request: web.Request) -> web.Response:
     # (run muy fresco), devolvemos [] y la UI muestra "todavía no
     # hay ledger" en lugar de explotar.
     from . import night as night_mod
-    # aiohttp web.AppKey se serializa al nombre "state_dir" en
-    # app["state_dir"]. El fallback a "./state" sirve si el setup no
-    # inyectó la key (tests, etc.) — pero el cwd del server DEBE ser
-    # el del repo (no mcp-server), o el path falla.
-    state_dir = request.app.get("state_dir") or Path("./state")
-    if not state_dir.is_absolute():
-        state_dir = state_dir.resolve()
-    # Importante: el espejo del plan vive en state/agents/night-runs/
-    # (la subcarpeta `agents/` es donde van los state de agentes por
-    # convención del repo). Iter 5.4 ponía el path incorrecto.
-    mirror = Path(state_dir) / "agents" / "night-runs" / run_id / "plan.md"
+    state_dir = request.app[STATE_DIR_KEY]
+    mirror = night_plan_mirror(state_dir, run_id)
     # Iter 5.4 — debug: devolvemos el path resuelto + si existe para
     # que la UI pueda mostrar "se buscó en X pero no hay plan ahí".
     detail["plan_mirror"] = str(mirror)
@@ -189,7 +256,7 @@ async def api_night_run_detail(request: web.Request) -> web.Response:
             detail["snapshot"] = orch.snapshot()
         except Exception:  # noqa: BLE001 — best-effort
             pass
-    return web.json_response(detail)
+    return web.json_response(redact_data(detail))
 
 async def api_night_run_report(request: web.Request) -> web.Response:
     """GET /admin/api/night-runs/{run_id}/report — devuelve el .md del reporte.
@@ -224,10 +291,11 @@ async def api_night_run_report(request: web.Request) -> web.Response:
     except OSError as e:
         return web.json_response(
             {"error": f"no pude leer el reporte: {e}"}, status=500)
+    text = redact_text(text)
     if len(text) > 256 * 1024:
         text = text[: 256 * 1024] + \
             f"\n\n…(truncado a 256 KB; el reporte completo está en {rp})"
-    return web.json_response({
+    return web.json_response(redact_data({
         "run_id": run_id,
         "project_slug": row.get("project_slug"),
         "end_reason": row.get("end_reason"),
@@ -236,7 +304,7 @@ async def api_night_run_report(request: web.Request) -> web.Response:
         "report_path": rp,
         "report_md": text,
         "size_bytes": path.stat().st_size,
-    })
+    }))
 
 async def api_project_expert_run(request: web.Request) -> web.Response:
     """POST /admin/api/projects/{slug}/expert-run — dispara /experts/run.
@@ -275,17 +343,12 @@ async def api_project_expert_run(request: web.Request) -> web.Response:
     if conv_id:
         payload["conversation"] = conv_id
 
-    relay_url = os.environ.get("RELAY_URL", "http://127.0.0.1:8413")
     try:
-        import httpx
-        r = await asyncio.to_thread(lambda: httpx.post(
-            f"{relay_url}/experts/run",
-            json=payload,
-            timeout=10.0))
+        r = await _post_expert(request, payload)
         if r.status_code >= 400:
             return web.json_response(
                 {"error": f"experts/run {r.status_code}: "
-                          f"{r.text[:200]}"},
+                          f"{redact_text(r.text)[:200]}"},
                 status=502)
         data = r.json()
         chat_id = data.get("id") or ""
@@ -321,12 +384,13 @@ async def api_project_expert_run(request: web.Request) -> web.Response:
                 Path(chat["md_path"]).read_text, encoding="utf-8")
         except OSError:
             out = "(no pude leer el .md del chat)"
+    out = redact_text(out)
     if len(out) > 32 * 1024:
         out = out[:32 * 1024] + "\n…(truncado a 32 KB)"
-    return web.json_response({
+    return web.json_response(redact_data({
         "id": chat_id, "chat_id": chat_id, "status": chat["status"],
         "error": chat.get("error"), "output": out,
         "tokens_in": chat.get("tokens_in"),
         "tokens_out": chat.get("tokens_out"),
         "conversation_id": conv_id or None,
-    })
+    }))

@@ -127,6 +127,8 @@ async def api_model_upsert(request: web.Request) -> web.Response:
         body: dict = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
         return web.json_response({"error": "json inválido"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Se esperaba un objeto de modelo"}, status=400)
     campos = {k: v for k, v in body.items() if k != "spec"}
     if campos.get("api_key", "sin tocar") == "":
         campos.pop("api_key")

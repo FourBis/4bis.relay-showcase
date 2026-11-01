@@ -9,6 +9,7 @@ from . import experts
 from . import memory
 from .db import Database
 from .server_conversation_jobs import _COMPACTING
+from .secret_redaction import redact_data
 # Fases sin `message`: ruido de heartbeat/telemetría, no razonamiento.
 # `thinking` y `writing` son "sigue vivo", no "pensó esto".
 _STEP_PHASES = {"say": "say", "tool_call": "tool", "steer": "steer"}
@@ -36,6 +37,7 @@ def _steps_from_progress(raw: str | None) -> list[dict]:
         return []
     if not isinstance(events, list):
         return []
+    events = redact_data(events)
     steps: list[dict] = []
     for e in events:
         if not isinstance(e, dict):

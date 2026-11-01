@@ -66,6 +66,33 @@ class DatabaseProjectsMixin:
         await self._upsert("projects", "slug", data)
         return (await self.get_project(data["slug"]))  # type: ignore[return-value]
 
+    async def patch_project_defaults(self, slug: str, patch: dict) -> Optional[dict]:
+        """Patch top-level keys against the value present at this UPDATE.
+
+        None removes a key; object values replace that key, rather than
+        recursively merging it. Unrelated concurrent settings survive.
+        """
+        if not patch:
+            return await self.get_project(slug)
+        current = ("CASE WHEN json_valid(defaults_json) THEN CASE WHEN json_type(defaults_json)='object' "
+                   "THEN defaults_json ELSE '{}' END ELSE '{}' END")
+        values = []
+        expression = current
+        for key, value in patch.items():
+            if not isinstance(key, str) or not key or any(c in key for c in '."\\[]'):
+                raise ValueError("Clave de defaults inválida")
+            if value is None:
+                expression = f"json_remove({expression}, ?)"
+                values.append(f"$.{key}")
+            else:
+                expression = f"json_set({expression}, ?, json(?))"
+                values.extend((f"$.{key}", json.dumps(value, ensure_ascii=False)))
+        rows = await self.run(
+            f"UPDATE projects SET defaults_json={expression}, updated_at=datetime('now') "
+            "WHERE slug=? COLLATE NOCASE RETURNING *", (*values, slug))
+        return self._parse_project(rows[0]) if rows else None
+
+
     async def _upsert(self, table: str, key: str, data: dict) -> None:
         """INSERT o UPDATE parcial por clave. No usamos ON CONFLICT
         porque valida el INSERT completo (NOT NULL) antes de resolver
@@ -273,6 +300,66 @@ class DatabaseProjectsMixin:
                 data[col] = 1 if data[col] else 0
         await self._upsert("mcp_servers", "name", data)
         return (await self.get_mcp_server(data["name"]))  # type: ignore[return-value]
+
+    async def upsert_mcp_server_with_links(self, m: dict, slugs: Optional[list[str]]) -> dict:
+        """Validate scope and publish configuration plus links atomically.
+
+        None preserves an existing scope. An explicit [] is global. Readers
+        can only see the old complete configuration or the new one.
+        """
+        data = {k: m[k] for k in _MCP_COLS if k in m}
+        if not data.get("name"):
+            raise ValueError("name requerido")
+        for col in ("args", "env"):
+            if col in data and not isinstance(data[col], str):
+                data[col] = json.dumps(data[col], ensure_ascii=False)
+        for col in ("read_only", "on_demand", "enabled"):
+            if col in data:
+                data[col] = 1 if data[col] else 0
+
+        def publish():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                project_ids = []
+                for slug in slugs or []:
+                    project = conn.execute(
+                        "SELECT id FROM projects WHERE slug=? COLLATE NOCASE", (slug,)).fetchone()
+                    if project is None:
+                        raise ValueError(f"proyecto desconocido: {slug!r}")
+                    project_ids.append(project["id"])
+                existing = conn.execute(
+                    "SELECT id FROM mcp_servers WHERE name=? COLLATE NOCASE", (data["name"],)).fetchone()
+                if existing:
+                    changes = {k: v for k, v in data.items() if k != "name"}
+                    if changes:
+                        clause = ", ".join(f"{key}=?" for key in changes)
+                        conn.execute(f"UPDATE mcp_servers SET {clause}, updated_at=datetime('now') WHERE id=?",
+                                     (*changes.values(), existing["id"]))
+                    mcp_id = existing["id"]
+                else:
+                    if not str(data.get("capability") or "").strip():
+                        raise ValueError("capability requerida")
+                    columns, marks = ", ".join(data), ", ".join("?" for _ in data)
+                    cursor = conn.execute(f"INSERT INTO mcp_servers ({columns}) VALUES ({marks})", tuple(data.values()))
+                    mcp_id = cursor.lastrowid
+                if slugs is not None:
+                    conn.execute("DELETE FROM project_mcp_servers WHERE mcp_id=?", (mcp_id,))
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO project_mcp_servers(project_id,mcp_id) VALUES (?,?)",
+                        [(pid, mcp_id) for pid in project_ids])
+                row = dict(conn.execute("SELECT * FROM mcp_servers WHERE id=?", (mcp_id,)).fetchone())
+                conn.commit()
+                return row
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        async with self._upsert_lock:
+            return self._parse_mcp(await self._in_thread(publish))
+
 
     async def delete_mcp_server(self, name: str) -> bool:
         """Hard delete (los links caen por ON DELETE CASCADE)."""

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from pathlib import Path
 from typing import Optional
 
 from .db_support import _CAP_PROMPT_FILA, now_iso
@@ -27,6 +26,11 @@ class DatabaseChatsMixin:
         tabla que se lee en cada poll para mostrar 60 caracteres.
         """
         chat_id = str(uuid.uuid4())
+        # Admission can await disk/SQLite before the executor is registered.
+        # An unfinalized run born in this process is not a proven orphan.
+        if not hasattr(self, "_unfinalized_process_chats"):
+            self._unfinalized_process_chats = set()
+        self._unfinalized_process_chats.add(chat_id)
         prompt = (user_prompt or "").strip()[:_CAP_PROMPT_FILA] or None
         await self.run(
             "INSERT INTO chats (id, project_slug, vscode_session_id, source, "
@@ -86,6 +90,24 @@ class DatabaseChatsMixin:
                  "ON CONFLICT(chat_id) DO UPDATE SET payload=excluded.payload, exported=0",
                  (chat_id, json.dumps(artifact, ensure_ascii=False))),
             ])
+        getattr(self, "_unfinalized_process_chats", set()).discard(chat_id)
+
+    async def cancel_running_chat(self, chat_id: str, *, error: str) -> bool:
+        """Cierra un zombie sólo si sigue corriendo al escribir.
+
+        La lectura/ACL previa del caller puede haber quedado vieja durante
+        sus awaits. La condición pertenece a la misma sentencia que cambia
+        el estado: un resultado terminado entretanto conserva toda su fila
+        y su salida. Sólo el writer que hizo la transición recibe True.
+        """
+        rows = await self.run(
+            "UPDATE chats SET status='cancelled', finished_at=?, "
+            "error=COALESCE(error, ?), "
+            "phase_at_end=COALESCE(phase_at_end, 'cancelled') "
+            "WHERE id=? AND status='running' RETURNING id",
+            (now_iso(), error, chat_id),
+        )
+        return bool(rows)
 
     async def reap_running_chats(self, motivo: str) -> int:
         """Cierra los chats que quedaron en `running` de un relay anterior.
@@ -132,16 +154,10 @@ class DatabaseChatsMixin:
     async def list_zombie_chats(
         self, *, older_than_s: int = 60, limit: int = 200,
     ) -> list[dict]:
-        """Chats en status=running con started_at muy viejo (Iter 5.3).
+        """Age-based candidates only; callers must exclude live owners.
 
-        Un zombie es un chat que figura running pero el relay perdió el
-        proceso (reinicio, crash sin DB update, etc.). Por convención
-        los consideramos zombies después de `older_than_s` segundos sin
-        terminar — un run interactivo normal termina en <60s, así que
-        un running de hace 2min es sospechoso.
-
-        Si el relay está corriendo y el chat TIENE proceso vivo, NO
-        aparece acá — el relay se va a enterar por sí solo.
+        Age is never evidence that an executor died. Runs with durable
+        results or graph/event/question references are not deletable here.
         """
         threshold = time.time() - older_than_s
         # started_at es ISO 8601 UTC ("...Z"). strftime '%Y-%m-%dT%H:%M:%SZ'.
@@ -152,33 +168,37 @@ class DatabaseChatsMixin:
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(threshold))
         return await self.run(
             "SELECT * FROM chats WHERE status='running' "
-            "AND started_at < ? ORDER BY started_at DESC LIMIT ?",
+            "AND started_at < ? AND " + self._EMPTY_ZOMBIE_SQL +
+            " ORDER BY started_at DESC LIMIT ?",
             (threshold_iso, limit))
 
-    async def delete_chat(self, chat_id: str) -> bool:
-        """Hard-delete de un chat zombie (Iter 5.3).
+    _EMPTY_ZOMBIE_SQL = (
+        "finished_at IS NULL AND md_path IS NULL "
+        "AND COALESCE(tokens_in,0)=0 AND COALESCE(tokens_out,0)=0 "
+        "AND COALESCE(cache_read_tokens,0)=0 AND COALESCE(tool_calls,0)=0 "
+        "AND progress_events IS NULL AND stages_json IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM chat_outputs o WHERE o.chat_id=chats.id) "
+        "AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.chat_id=chats.id) "
+        "AND NOT EXISTS (SELECT 1 FROM conversation_events e WHERE e.chat_id=chats.id) "
+        "AND NOT EXISTS (SELECT 1 FROM expert_questions q WHERE q.chat_id=chats.id)"
+    )
 
-        Borra la fila de `chats` y best-effort el .md y el JSONL
-        asociado. Devuelve True si borró, False si no existía.
-        El .md/JSONL son best-effort — si no existen o fallan, igual
-        la fila queda fuera.
+    async def delete_chat(self, chat_id: str, *, expected_started_at: str,
+                          older_than_s: int = 60) -> bool:
+        """Delete only the still-empty orphan approved under the owner lock.
+
+        Completion/result persistence racing this statement makes its WHERE
+        false. Files are always retained; age alone never authorizes deletion.
         """
-        chat = await self.get_chat(chat_id)
-        if chat is None:
+        if chat_id in getattr(self, "_unfinalized_process_chats", set()):
             return False
-        md_path = chat.get("md_path")
-        await self.run("DELETE FROM chats WHERE id=?", (chat_id,))
-        # Cascade best-effort de archivos. Si falla (permisos, etc.),
-        # la fila de DB ya está fuera — el humano verá el .md suelto
-        # en state/ y decidirá qué hacer.
-        if md_path:
-            try:
-                Path(md_path).unlink(missing_ok=True)
-            except OSError:
-                pass
-        # JSONL lives under chats/<target>/...jsonl (relative to the
-        # chat dir). Best-effort: skip — los JSONL no pesan, no urge.
-        return True
+        threshold = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - max(60, older_than_s)))
+        rows = await self.run(
+            "DELETE FROM chats WHERE id=? AND status='running' "
+            "AND started_at=? AND started_at<? AND " + self._EMPTY_ZOMBIE_SQL + " RETURNING id",
+            (chat_id, expected_started_at, threshold))
+        return bool(rows)
 
     async def set_chat_stages(self, chat_id: str, stages_json: str) -> None:
         """Escribe `stages_json` en un chat que TODAVÍA está corriendo.

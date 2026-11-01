@@ -39,11 +39,8 @@ async def api_commands_upsert(request: web.Request) -> web.Response:
 
     Body: {name, description, handler, args_schema, enabled?}.
 
-    `handler` es un dotted path Python del estilo `relay.handlers.foo`
-    o `relay.commands.builtin_build`. El server NO verifica que
-    importe — eso lo hace `CommandRegistry.load_from_db` al recibir
-    una conexión nueva. Si el import falla, el comando queda en la
-    DB pero no se ejecuta; desde esta UI vas a ver el error.
+    El registro activo se recarga tras persistir: cambios, desactivación
+    y eliminación afectan al siguiente despacho, sin reiniciar Relay.
     """
     db = request.app[DB_KEY]
     try:
@@ -65,6 +62,9 @@ async def api_commands_upsert(request: web.Request) -> web.Response:
         "enabled": bool(body.get("enabled", True)),
     }
     await db.upsert_command(cmd)
+    reg = request.app.get(COMMANDS_KEY)
+    if reg is not None:
+        await reg.load_from_db()
     return web.json_response({"command": _serialize(cmd)}, status=201)
 
 async def api_commands_delete(request: web.Request) -> web.Response:
@@ -74,6 +74,9 @@ async def api_commands_delete(request: web.Request) -> web.Response:
     deleted = await db.delete_command(name)
     if not deleted:
         return web.json_response({"error": "no encontrado"}, status=404)
+    reg = request.app.get(COMMANDS_KEY)
+    if reg is not None:
+        await reg.load_from_db()
     return web.json_response({"deleted": True, "name": name})
 
 async def api_commands_run(request: web.Request) -> web.Response:

@@ -303,7 +303,7 @@ class AccountStore:
             self.generations[key] = self.generations.get(key, 0) + 1
             await self.db.run("DELETE FROM user_accounts WHERE email=? AND provider=?", (email, provider))
             self.pending = {k: v for k, v in self.pending.items()
-                            if (v["provider"], v["email"]) != (provider, email)}
+                            if (v["provider"], v.get("email")) != (provider, email)}
             if provider == "google":
                 self.mail_drafts = {k: v for k, v in self.mail_drafts.items() if v["email"] != email}
         return row
