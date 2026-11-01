@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 
 from aiohttp import web
 
-from . import external_pr_access, identity, logctx, server_common, tracing, voice, voice_routes
+from . import external_pr_access, identity, logctx, private_mcp_access, server_common, tracing, voice, voice_routes
 from .db import read_system_config_sync
 from .server_common import (
     browser_guard,
@@ -19,8 +19,8 @@ from .server_common import (
 from .server_core import health, handshake, list_sessions_view, mcp_endpoint, system_active
 from .server_expert_routes import experts_cancel, experts_run, experts_status, experts_steer
 from .server_conversation_routes import (
-    conversations_create, conversations_get, conversations_get_messages,
-    conversations_list,
+    conversations_create, conversations_get, conversations_get_messages, conversations_get_request,
+    conversations_lookup_creation, conversations_reject_creation, conversations_list,
 )
 from .server_conversation_actions import (
     conversation_branch_delete, conversation_branch_status,
@@ -148,7 +148,7 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
         # access_identity después, y solo sobre lo que ya pasó el guard.
         # require_role al final: necesita la identidad ya resuelta.
         middlewares=[browser_guard, localhost_guard, identity.access_identity,
-                     identity.require_role, external_pr_access.guard],
+                     identity.require_role, private_mcp_access.guard, external_pr_access.guard],
     )
     # El host efectivo del bind se muestra en la configuración.
     # y el endpoint /admin/api/config lo reporta a la UI.
@@ -172,17 +172,31 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
     # conversaciones (ADR-025) — /nuevo y /cerrar del bot
     app.router.add_post("/conversations", conversations_create)
     app.router.add_get("/conversations", conversations_list)
+    app.router.add_get("/conversations/creation-requests/{request_id}", conversations_lookup_creation)
+    app.router.add_post("/conversations/creation-requests/{request_id}", conversations_reject_creation)
+    from . import server_conversation_sharing
+    server_conversation_sharing.register(app)
     app.router.add_get("/conversations/{id}", conversations_get)
     app.router.add_get("/conversations/{id}/messages",
                        conversations_get_messages)
+    app.router.add_get("/conversations/{id}/requests/{request_id}", conversations_get_request)
     app.router.add_post("/conversations/{id}/compact", conversations_compact)
     app.router.add_post("/conversations/{id}/close", conversations_close)
     app.router.add_get("/conversations/{id}/pr", conversation_pr_status)
     app.router.add_get("/conversations/{id}/task", task_get)
     app.router.add_post("/conversations/{id}/task", task_action)
     app.router.add_post("/projects/{slug}/external-pr", server_external_pr_routes.register)
+    app.router.add_get("/projects/{slug}/external-pr", server_external_pr_routes.listing)
     app.router.add_post("/conversations/{id}/external-pr", server_external_pr_routes.action)
+    from . import server_external_review_routes as external_reviews
+    app.router.add_get("/conversations/{id}/external-pr/images", external_reviews.image_list)
+    app.router.add_post("/conversations/{id}/external-pr/images", external_reviews.image_prepare)
+    app.router.add_get("/conversations/{id}/external-pr/images/{draft_id}", external_reviews.image_download)
+    app.router.add_post("/conversations/{id}/external-pr/images/{draft_id}/confirm", external_reviews.image_confirm)
+    app.router.add_get("/admin/api/external-review/notifications", external_reviews.inbox)
+    app.router.add_post("/admin/api/external-review/notifications/{notification_id}/read", external_reviews.inbox_read)
     app.router.add_get("/projects/{slug}/issues", server_issue_routes.issues)
+    app.router.add_get("/projects/{slug}/pulls", server_issue_routes.pulls)
     app.router.add_post("/conversations/{id}/issue", server_issue_routes.link)
     app.router.add_get("/conversations/{id}/issue-sync", server_issue_routes.snapshot)
     app.router.add_post("/conversations/{id}/issue-sync", server_issue_routes.refresh)
@@ -264,6 +278,12 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
 
     # MCP (Iter 4: Google tools reales, hoy mocked)
     app.router.add_post("/mcp", mcp_endpoint)
+    # The capability is absent until an administrator explicitly enables it
+    # and restarts. The handler also checks current global/project/actor scope.
+    if relay_config.private_mcp_boot_enabled():
+        from .private_mcp import endpoint as private_mcp_endpoint
+        app.router.add_post("/mcp/relay", private_mcp_endpoint)
+        app.router.add_get("/mcp/relay", private_mcp_endpoint)
 
     # Admin UI (ADR-014 / docs/ADMIN_UI_SPEC.md).
     # Mismo proceso y puerto (:8413), bind 127.0.0.1.

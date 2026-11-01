@@ -9,7 +9,7 @@ import uuid
 
 from aiohttp import web
 
-from . import identity, task_pr, task_service, task_workspace
+from . import coordination, identity, task_pr, task_service, task_workspace
 from .app_state import DB_KEY, GRAFOS_KEY
 from .server_common import _require_auth, _spawn_bg
 from .server_graph_helpers import _PLANIFICANDO, _cancelar_grafo
@@ -17,34 +17,59 @@ from .user_accounts import AccountError
 
 
 async def _task_snapshot(request, db, cid):
+    from . import conversation_access
     task = await db.get_conversation_task(cid)
     if isinstance(task, dict) and task.get("mode") == "external_pr":
-        from . import external_pr
-        conv = await db.get_conversation(cid)
-        project = await db.get_project(conv["project_slug"])
-        if not identity.can_write_project(request, project):
-            raise web.HTTPForbidden(text='{"error":"Proyecto no autorizado para tu cuenta"}', content_type="application/json")
-        return external_pr.snapshot(task, project)
+        from . import external_pr_access
+        try:
+            return await external_pr_access.snapshot(db, cid, identity.requester(request))
+        except PermissionError:
+            raise web.HTTPForbidden(text='{"error":"Proyecto no autorizado para tu cuenta"}', content_type="application/json") from None
+    await conversation_access.require(db, cid, identity.requester(request))
     state = await task_service.snapshot(db, cid)
     if not state:
         return state
     cancelling = getattr(db, "_task_cancellations", {}).get(cid)
     if cancelling is not None and not cancelling.done():
         state["state"] = "cancelling"
-    conv = await db.get_conversation(cid)
-    project = await db.get_project(conv["project_slug"]) if conv else None
+
+    def final_visibility(conn):
+        view = conversation_access.visibility_tx(conn, cid, identity.requester(request))
+        row = conn.execute("SELECT p.defaults_json FROM projects p JOIN conversations c "
+            "ON p.slug=c.project_slug COLLATE NOCASE WHERE c.id=?", (cid,)).fetchone()
+        try:
+            defaults = json.loads(row["defaults_json"] or "{}") if row else {}
+        except (ValueError, TypeError):
+            defaults = {"read_only": True}
+        view["technical_write"] = bool(view["access"]["project_assigned"]
+            and isinstance(defaults, dict) and not defaults.get("read_only"))
+        return view
+
+    # The account role and permission used for projection come from one final
+    # snapshot. No await follows it before returning this response payload.
+    view = await conversation_access.transaction(db, final_visibility)
+    access, owner = view["access"], view["is_owner"]
     actions = []
-    owner = identity.role_of(request) == "owner"
-    if owner:
-        actions = ["continue", "pause", "cancel", "publish", "track"]
-    elif identity.can_control_task(request, project, state, conv):
+    if access["can_control"]:
         actions = ["continue", "pause", "cancel"]
-    if state.get("mode") == "read_only" and identity.can_write_project(request, project):
-        actions.append("enable_write")
-    if state.get("mode") in {"write", "read_only"} and identity.can_write_project(request, project):
-        actions.extend(["link_issue", "issue_sync"])
+        if owner and view["technical_write"]:
+            actions.extend(["publish", "track"])
+            if state.get("creation_failed") and not state.get("mode"):
+                actions.append("import_local_changes")
+        if view["technical_write"]:
+            if state.get("mode") == "read_only":
+                actions.append("enable_write")
+            if state.get("mode") in {"write", "read_only"}:
+                actions.extend(["link_issue", "issue_sync"])
+    if state.get("no_checkout") is True:
+        actions = [action for action in actions if action in {"continue", "pause", "cancel"}]
+    if state.get("mcp_private"):
+        actions = []
     visible = task_service.visible_task(state, owner=owner)
-    return {**visible, "allowed_actions": actions}
+    for key in ("no_checkout", "mcp_private"):
+        if isinstance(state.get(key), bool):
+            visible[key] = state[key]
+    return {**visible, "can_control": access["can_control"], "allowed_actions": actions, "access": access}
 
 
 @_require_auth
@@ -54,7 +79,11 @@ async def task_get(request):
     if not conv:
         return web.json_response({"error": "No existe la conversación"}, status=404)
     state = await db.get_conversation_task(cid)
-    if state and state.get("mode") != "external_pr":
+    if state and state.get("mode") == "external_pr":
+        return web.json_response(await _task_snapshot(request, db, cid))
+    from . import conversation_access
+    access = await conversation_access.require(db, cid, identity.requester(request))
+    if state and state.get("mode") != "external_pr" and access["can_control"]:
         project = await db.get_project(conv["project_slug"])
         if project:
             try:
@@ -82,6 +111,8 @@ async def _continue(db, project, cid, body):
     if initial.get("creation_failed") and not initial.get("mode"):
         await task_workspace.initialize_task(db, project, cid,
             read_only=bool(initial.get("requested_read_only")))
+    if initial.get("media_only"):
+        raise ValueError("Este tipo de conversación todavía no está disponible en esta edición")
     await task_workspace.inspect_workspace(db, project, cid, fetch=True)
     await task_workspace.resolved_project(db, project, cid)
     events = await db.list_conversation_events(cid, states=["uncertain"])
@@ -106,11 +137,11 @@ async def _continue(db, project, cid, body):
                                            error="Reconciliado al continuar; no se repitió")
     pending = await db.list_conversation_events(cid, states=["pending"])
     task = await db.get_conversation_task(cid)
-    waiting_feedback = any(event["kind"] == "feedback" for event in pending) and not (task.get("tracking") or {}).get("enabled")
+    waiting_feedback = any(event["kind"] == "feedback" for event in pending) and bool(task_service.tracking_limit(task))
     await db.run("UPDATE conversations SET status='open', closed_at=NULL WHERE id=?", (cid,))
     if not await db.list_conversation_events(cid, states=["processing"]):
         await db.update_conversation_task(cid, state="ready", error=(
-            "Hay feedback pendiente; reactiva el seguimiento para procesarlo" if waiting_feedback else ""))
+            "Hay comentarios automáticos pendientes; puedes seguir conversando sin reactivar el seguimiento" if waiting_feedback else ""))
 
 
 async def _cancel_conversation(app, cid):
@@ -187,7 +218,19 @@ async def _apply_task_action(request):
         runners = request.app.get(task_service.TASK_RUNNERS_KEY, {})
         writer_active = bool(runners.get(cid) and not runners[cid].done())
         processing = bool(await db.list_conversation_events(cid, states=["processing"]))
-        if action == "enable_write":
+        if action == "import_local_changes":
+            if terminal or writer_active or processing:
+                raise ValueError("La tarea debe estar detenida y sin ejecuciones para incorporar cambios")
+            if state.get("source_repo") or state.get("workspace_path") or state.get("requested_read_only"):
+                raise ValueError("Solo se pueden incorporar cambios al recuperar una tarea de escritura sin workspace")
+            if await db.active_task_graph(cid) or await db.list_conversation_events(cid, states=["pending", "uncertain"]):
+                raise ValueError("Revisa el plan y los eventos pendientes antes de incorporar cambios")
+            lease = coordination.acquire(db, project)
+            try:
+                await task_workspace.initialize_task(db, project, cid, import_local_changes=True)
+            finally:
+                lease.release()
+        elif action == "enable_write":
             if terminal or writer_active or processing:
                 raise ValueError("La tarea debe estar detenida y sin ejecuciones antes de habilitar escritura")
             graph = await db.active_task_graph(cid)
