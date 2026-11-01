@@ -17,6 +17,7 @@
 import { $, $$, api, escape, _dbg } from "./api.js";
 import { toast } from "./ui.js";
 import { navigateConversation, viewChat } from "./tab-chats.js";
+import { openProjectAdmin } from "./tab-projects.js";
 
 const MIN_CHARS = 2;
 const DEBOUNCE_MS = 180;
@@ -26,6 +27,14 @@ let _flat = [];               // [{kind, id, label, sub, action}]
 let _activeIdx = -1;
 let _debounceTimer = null;
 let _abortController = null;
+let _generation = 0;
+
+function _invalidateSearch() {
+  ++_generation;
+  clearTimeout(_debounceTimer);
+  _abortController?.abort();
+  _abortController = null;
+}
 
 function _showTab(name) {
   const btn = document.querySelector(`.tab[data-tab="${name}"]`);
@@ -64,17 +73,10 @@ function _flatten(r) {
   return out;
 }
 
-async function _openAdmin(slug) {
-  // El tab Proyectos carga async (loadProjects); esperar activamente a
-  // que el row con el admin-btn aparezca (reintenta cada 100ms hasta 5s).
-  const sel = `.admin-btn[data-slug="${CSS.escape(slug)}"]`;
-  for (let i = 0; i < 50; i++) {
-    const btn = document.querySelector(sel);
-    if (btn) { btn.click(); return; }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  _dbg("search: admin-btn no apareció para", slug);
-  toast(`No se pudo abrir el admin de "${slug}" — refresca Proyectos.`, "err");
+function _openAdmin(slug) {
+  // La página/filtro de la tabla no determina si un proyecto puede abrirse.
+  // El detalle consulta el slug y el servidor conserva sus controles de acceso.
+  openProjectAdmin(slug);
 }
 
 async function _openChat(chatId, conversationId) {
@@ -178,17 +180,21 @@ function _activate(idx) {
   setTimeout(() => r.action(), 30);
 }
 
-async function _search(q) {
-  if (_abortController) _abortController.abort();
-  _abortController = new AbortController();
+async function _search(q, generation = _generation) {
+  const current = () => generation === _generation && q === _lastQ
+    && $("#search-modal")?.classList.contains("open");
+  if (!current()) return;
+  const controller = new AbortController();
+  _abortController = controller;
   try {
-    const r = await api(`search?q=${encodeURIComponent(q)}`, {}, 8_000);
+    const r = await api(`search?q=${encodeURIComponent(q)}`, {signal:controller.signal}, 8_000);
+    if (!current()) return;
     _results = r;
     _flat = _flatten(r);
     _activeIdx = _flat.length ? 0 : -1;
     _render();
   } catch (e) {
-    if (e.name === "AbortError") return;
+    if (!current() || e.name === "AbortError") return;
     $("#search-list").innerHTML = `<div class="px-4 py-6 text-center text-sm text-zinc-400">
       error: ${escape(e.message)}</div>`;
   }
@@ -196,16 +202,18 @@ async function _search(q) {
 
 function _onInput(e) {
   const q = e.target.value.trim();
+  _invalidateSearch();
+  const generation = _generation;
   _lastQ = q;
-  clearTimeout(_debounceTimer);
+  _results = null;
+  _flat = [];
+  _activeIdx = -1;
   if (q.length < MIN_CHARS) {
-    _results = null;
-    _flat = [];
-    _activeIdx = -1;
     _render();
     return;
   }
-  _debounceTimer = setTimeout(() => _search(q), DEBOUNCE_MS);
+  $("#search-list").innerHTML = '<p class="muted" role="status">Buscando…</p>';
+  _debounceTimer = setTimeout(() => _search(q, generation), DEBOUNCE_MS);
 }
 
 function _onKey(e) {
@@ -233,6 +241,7 @@ export function open() {
   document.getElementById('workspace-launcher-dialog')?.close();
   const m = $("#search-modal");
   if (!m) return;
+  _invalidateSearch();
   m.classList.add("open");
   const inp = $("#search-input");
   inp.value = "";
@@ -242,14 +251,16 @@ export function open() {
   _results = null;
   _flat = [];
   _activeIdx = -1;
-  setTimeout(() => inp.focus(), 30);
+  const generation = _generation;
+  setTimeout(() => { if (generation === _generation && m.classList.contains("open")) inp.focus(); }, 30);
 }
 
 export function close() {
+  _invalidateSearch();
+  _results = null; _flat = []; _activeIdx = -1;
   const m = $("#search-modal");
   if (!m) return;
   m.classList.remove("open");
-  if (_abortController) _abortController.abort();
 }
 
 export function initSearch() {

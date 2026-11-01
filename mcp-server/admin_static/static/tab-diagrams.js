@@ -28,8 +28,8 @@
 // con peso de llamadas, clusters por cohesión, hotspots por fan-in y rutas.
 
 import { escape, api, _dbg } from "./api.js";
-import { toast } from "./ui.js";
-import { taskWorkspaceQuery } from "./workspace.js";
+import { toast, confirmModal } from "./ui.js";
+import { taskWorkspaceQuery, captureTaskWorkspaceContext } from "./workspace.js";
 
 // Los tipos sequence / class / state ya NO son plantillas en blanco: son
 // autogeneradores con datos reales del grafo de cbm, disponibles para
@@ -49,6 +49,27 @@ const DEFAULT_CODE = `graph TD
 let _mermaidTheme = 'dark';
 let _state = null;     // {code, svg, error, theme, loading}
 let _projects = [];    // [{slug, name, repo_path, indexed, ...}] cache
+let _documentGeneration = 0, _savedGeneration = 0, _renderGeneration = 0, _llmGeneration = 0;
+let _savedContext = null;
+
+function diagramSourceCurrent(project) {
+  return !!_state && project?.documentGeneration === _documentGeneration
+    && document.getElementById('diag-slug')?.value === project.slug;
+}
+
+function diagramDestination(context) {
+  return `${context.projectSlug} · ${context.conversationId ? `conversación ${context.conversationId}` : "raíz del proyecto, sin conversación"}`;
+}
+
+function paintDiagramContext() {
+  const code = document.getElementById('mermaid-code');
+  if (!code || !_state) return;
+  let note = document.getElementById('diag-document-context');
+  if (!note) { note = document.createElement('p'); note.id = 'diag-document-context'; note.className = 'muted text-xs'; code.before(note); }
+  note.textContent = _state.workspaceContext
+    ? `Documento fijado a ${diagramDestination(_state.workspaceContext)}. Cambiar el foco o el selector no cambia su destino de guardado.`
+    : 'Elige un proyecto. El destino del documento se fijará al abrirlo, generarlo o empezar a editar.';
+}
 
 // Mapea la primera palabra del código Mermaid a un label legible para
 // screen readers. El patrón es estable: cualquier mermaid empieza con
@@ -261,21 +282,25 @@ function paintPreview() {
 
 async function renderDiagram() {
   if (!_state || !_state.code.trim()) return;
+  const state = _state, code = state.code, theme = state.theme, generation = ++_renderGeneration;
+  const current = () => state === _state && generation === _renderGeneration && code === state.code && theme === state.theme;
   _state.loading = true;
   _state.error = '';
   _state.svg = '';
   paintPreview();
   try {
     await loadMermaid();
-    window.mermaid.initialize({ startOnLoad: false, theme: _state.theme, securityLevel: 'strict' });
+    if (!current()) return;
+    window.mermaid.initialize({ startOnLoad: false, theme, securityLevel: 'strict' });
     const id = 'mermaid-' + Math.random().toString(36).slice(2, 8);
-    const { svg } = await window.mermaid.render(id, _state.code);
+    const { svg } = await window.mermaid.render(id, code);
+    if (!current()) return;
     _state.svg = svg;
   } catch (e) {
+    if (!current()) return;
     _state.error = (e && e.message) || 'Error de sintaxis Mermaid';
   } finally {
-    _state.loading = false;
-    paintPreview();
+    if (current()) { _state.loading = false; paintPreview(); }
   }
 }
 
@@ -283,16 +308,19 @@ async function renderDiagram() {
 
 // `kind` alimenta el nombre sugerido al guardar (sample-app-arquitectura, …)
 // para no volver al `{slug}-{timestamp}` que no decía qué era el archivo.
-function setCodeAndRender(code, kind) {
-  if (!_state) return;
+function setCodeAndRender(code, kind, project = getSelectedProject()) {
+  if (!diagramSourceCurrent(project)) return;
+  ++_documentGeneration;
   _state.code = code;
+  _state.dirty = true;
+  _state.workspaceContext = project.workspaceContext;
   if (kind) {
-    const p = getSelectedProject();
-    _state.name = `${p ? p.slug : "diagrama"}-${kind}`;
+    _state.name = `${project.slug}-${kind}`;
   }
   const codeEl = document.getElementById('mermaid-code');
   if (codeEl) codeEl.value = code;
-  renderDiagram();
+  paintDiagramContext();
+  return renderDiagram();
 }
 
 function safeId(s) {
@@ -314,7 +342,8 @@ function safeId(s) {
 function getSelectedProject() {
   const slug = document.getElementById('diag-slug')?.value;
   if (!slug) return null;
-  return _projects.find((p) => p.slug === slug) || null;
+  const project = _projects.find((p) => p.slug === slug);
+  return project ? {...project,workspaceContext:captureTaskWorkspaceContext(slug),documentGeneration:_documentGeneration} : null;
 }
 
 function tsSlug() {
@@ -407,7 +436,7 @@ function autoProjectCard() {
     `  P --> T["native_tools: ${tools.replace(/"/g, "'")}"]`,
     `  P --> N["night_mode: ${p.night_mode_enabled ? "on" : "off"}"]`,
   ].join("\n");
-  setCodeAndRender(code, "ficha");
+  setCodeAndRender(code, "ficha", p);
 }
 
 // Ruido de builtins: en repos Python cbm cuenta `str`/`len`/`list` como
@@ -472,18 +501,25 @@ const DIAG_DIR = "docs/diagrams";
 let _saved = [];        // [{name, path}] .md de docs/diagrams del proyecto
 let _lastKind = null;   // último autogen corrido (para ⟳ Regenerar)
 
-async function loadSavedDiagrams() {
+async function loadSavedDiagrams(context) {
+  const generation = ++_savedGeneration;
   _saved = [];
   const p = getSelectedProject();
+  if (context && context.projectSlug !== p?.slug) return;
+  _savedContext = context || p?.workspaceContext || null;
+  const selectedContext = _savedContext;
+  paintSavedChips();
   if (p) {
     try {
       const r = await api(`projects/${encodeURIComponent(p.slug)}`
-        + `/workspace/files${taskWorkspaceQuery(p.slug, { subdir: DIAG_DIR })}`);
+        + `/workspace/files${taskWorkspaceQuery(p.slug, { subdir: DIAG_DIR }, selectedContext)}`);
+      if (generation !== _savedGeneration || document.getElementById('diag-slug')?.value !== p.slug) return;
       _saved = (r.entries || [])
         .filter((e) => !e.is_dir && e.name.endsWith(".md"))
         .map((e) => ({ name: e.name.replace(/\.md$/, ""), path: e.path,
                        modified_at: e.modified_at }));
     } catch (e) {
+      if (generation !== _savedGeneration) return;
       // 404 = el repo todavía no tiene docs/diagrams. Es lo normal, no error.
       if (e.status !== 404) _dbg("diagrams: listado guardados falló", e.message);
     }
@@ -514,21 +550,30 @@ function extractMermaid(md) {
   return m ? m[1].trimEnd() : String(md || "").trim();
 }
 
-async function openSavedDiagram(path, kind) {
+async function openSavedDiagram(path, kind, context = _savedContext) {
   const p = getSelectedProject();
   if (!p) return;
+  context = context?.projectSlug === p.slug ? context : p.workspaceContext;
+  const generation = ++_documentGeneration, state = _state;
+  const current = () => state === _state && generation === _documentGeneration && document.getElementById('diag-slug')?.value === p.slug;
+  if (state?.dirty && !await confirmModal({title:"Abrir diagrama",body:"El documento tiene cambios sin guardar. ¿Descartarlos para abrir el diagrama elegido?",confirmText:"Descartar cambios",danger:true})) return;
+  if (!current()) return;
   try {
     const r = await api(`projects/${encodeURIComponent(p.slug)}`
-      + `/workspace/file${taskWorkspaceQuery(p.slug, { path })}`);
-    if (!_state) return;
+      + `/workspace/file${taskWorkspaceQuery(p.slug, { path }, context)}`);
+    if (!current()) return;
+    _state.workspaceContext = context;
+    _state.dirty = false;
     _state.code = extractMermaid(r.content);
     _state.name = path.split("/").pop().replace(/\.md$/, "");
     const codeEl = document.getElementById('mermaid-code');
     if (codeEl) codeEl.value = _state.code;
     if (kind) _lastKind = kind;
+    paintDiagramContext();
     renderDiagram();
     toast(`Mostrando el guardado ${path} — ⟳ Regenerar para recalcular.`, "ok");
   } catch (e) {
+    if (!current()) return;
     toast(`No se pudo abrir ${path}: ${e.message}`, "err");
   }
 }
@@ -555,6 +600,7 @@ async function runAutogen(kind, force) {
     toast("Elige un proyecto primero en el selector de arriba.", "warn");
     return;
   }
+  ++_documentGeneration;
   _lastKind = kind;
   updateAutoButtons();
   if (!force) {
@@ -614,7 +660,7 @@ async function autoArchitecture() {
   for (const b of bounds) {
     lines.push(`  ${safeId(b.from)} -->|${mmLabel(b.calls)}| ${safeId(b.to)}`);
   }
-  setCodeAndRender(lines.join("\n"), "arquitectura");
+  setCodeAndRender(lines.join("\n"), "arquitectura", p);
 }
 
 // Símbolos más usados del repo (fan-in real de cbm), agrupados por paquete.
@@ -649,7 +695,7 @@ async function autoHotspots() {
     // Los 3 más pesados se resaltan: sin esto todo pesa igual visualmente.
     if (s.fan >= max * 0.5) lines.push(`  style ${id} stroke:#f59e0b,stroke-width:2px`);
   }
-  setCodeAndRender(lines.join("\n"), "hotspots");
+  setCodeAndRender(lines.join("\n"), "hotspots", p);
 }
 
 // Módulos que cbm detecta por cohesión de llamadas.
@@ -677,7 +723,7 @@ async function autoClusters() {
       lines.push(`  ${id} --> ${safeId("cn_" + c.id + "_" + n)}("${mmLabel(n)}")`);
     }
   }
-  setCodeAndRender(lines.join("\n"), "modulos");
+  setCodeAndRender(lines.join("\n"), "modulos", p);
 }
 
 // Superficie HTTP del repo, agrupada por recurso.
@@ -709,7 +755,7 @@ async function autoRoutes() {
         + `("${mmLabel(m)} ${mmLabel(rt.path)}")`);
     }
   }
-  setCodeAndRender(lines.join("\n"), "rutas");
+  setCodeAndRender(lines.join("\n"), "rutas", p);
 }
 
 // ── Clases / Secuencia / Estados: los tipos que antes eran plantillas
@@ -776,7 +822,7 @@ async function autoClasses() {
     lines.push(`  ${safeId(b)} <|-- ${safeId(a)}`);
     if (++rel >= 20) break;
   }
-  setCodeAndRender(lines.join("\n"), "clases");
+  setCodeAndRender(lines.join("\n"), "clases", p);
 }
 
 // sequenceDiagram del camino de llamadas REAL de una función.
@@ -838,7 +884,7 @@ async function autoSequence() {
     lines.push(`  ${tId}->>${c.id}: ${mmLabel(c.name)}()`
       + (c.hop > 1 ? ` [hop ${c.hop}]` : ""));
   }
-  setCodeAndRender(lines.join("\n"), "secuencia");
+  setCodeAndRender(lines.join("\n"), "secuencia", p);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
@@ -892,7 +938,7 @@ async function autoStates() {
       lines.push(`  ${id} --> ${safeId("u_" + e + "_" + u)}("${mmLabel(u)}")`);
     }
   }
-  setCodeAndRender(lines.join("\n"), "estados");
+  setCodeAndRender(lines.join("\n"), "estados", p);
 }
 
 // Árbol de archivos REAL (file_tree de cbm), no el scan de sub-repos.
@@ -929,7 +975,7 @@ async function autoFileTree() {
   if (all.length > entries.length) {
     lines.push(`  ROOT --> _more["… +${all.length - entries.length} entradas más"]`);
   }
-  setCodeAndRender(lines.join("\n"), "arbol");
+  setCodeAndRender(lines.join("\n"), "arbol", p);
 }
 
 // ── Guardado a repo (Iter 10.4) ──
@@ -942,7 +988,8 @@ async function autoFileTree() {
 // de pisarlo. docs/diagrams/ terminaba lleno de basura sin poder saber cuál
 // era cuál.
 async function saveCurrentDiagram(kind /* "md" | "svg" */) {
-  const p = getSelectedProject();
+  const context = _state?.workspaceContext || getSelectedProject()?.workspaceContext;
+  const p = context && _projects.find(project => project.slug === context.projectSlug);
   if (!p) { toast("Elige un proyecto primero.", "warn"); return; }
   if (!_state) return;
   if (kind === "md" && !_state.code.trim()) {
@@ -954,27 +1001,38 @@ async function saveCurrentDiagram(kind /* "md" | "svg" */) {
     return;
   }
 
-  const suggested = (_state.name || `${p.slug}-${tsSlug().slice(0, 10)}`);
-  const raw = prompt(
-    `Nombre del archivo (sin extensión). Se guarda en `
-    + `docs/diagrams/ del repo de ${p.name || p.slug}:`, suggested);
-  if (raw === null) return;                       // cancelado
+  const state = _state, generation = _documentGeneration, code = state.code, svg = state.svg;
+  const current = () => state === _state && generation === _documentGeneration;
+  const destination = diagramDestination(context);
+  const suggested = (state.name || `${p.slug}-${tsSlug().slice(0, 10)}`);
+  const pending = confirmModal({title:"Guardar diagrama",body:`Destino fijado: ${destination}. Carpeta docs/diagrams/.`,confirmText:"Guardar",cancelText:"Cancelar"});
+  const label = document.createElement("label"); label.className = "field"; label.textContent = "Nombre del archivo (sin extensión)";
+  const input = document.createElement("input"); input.className = "input"; input.value = suggested; input.maxLength = 160;
+  input.setAttribute("aria-label", "Nombre del archivo del diagrama"); label.append(input);
+  document.getElementById("confirm-modal-body").append(label);
+  setTimeout(() => { if (document.getElementById("confirm-modal").classList.contains("open")) input.focus(); }, 60);
+  if (!await pending) return;
+  if (!current()) { toast("El documento cambió durante la confirmación. Se conserva el borrador; vuelve a guardar cuando termines de editar.", "warn"); return; }
+  const raw = input.value;
   const base = raw.trim().replace(/\.(md|svg)$/i, "")
     .replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
   if (!base) { toast("Nombre vacío.", "warn"); return; }
   _state.name = base;                             // recordado para el próximo
+  _state.workspaceContext = context;
+  paintDiagramContext();
 
   const path = `docs/diagrams/${base}.${kind}`;
   const content = kind === "md"
     // Fence mermaid: GitHub lo renderiza solo y queda editable a mano.
-    ? `# ${base}\n\n` + "```mermaid\n" + _state.code + "\n```\n"
-    : _state.svg;
+    ? `# ${base}\n\n` + "```mermaid\n" + code + "\n```\n"
+    : svg;
 
   const btn = document.getElementById(
     kind === "md" ? "diag-save-md" : "diag-save-svg");
   if (btn) btn.disabled = true;
+  const url = `projects/${encodeURIComponent(p.slug)}/workspace/file${taskWorkspaceQuery(p.slug, {}, context)}`;
   const put = (overwrite) => api(
-    `projects/${encodeURIComponent(p.slug)}/workspace/file${taskWorkspaceQuery(p.slug)}`,
+    url,
     { method: "PUT", body: { path, content, overwrite } });
   try {
     let r;
@@ -985,16 +1043,21 @@ async function saveCurrentDiagram(kind /* "md" | "svg" */) {
       // Existe: preguntamos en vez de fallar. Pisar un archivo del repo
       // del usuario sin avisar no, pero obligarlo a inventar otro nombre
       // tampoco — es exactamente el caso "corrige el diagrama y guardo".
-      if (!confirm(`Ya existe ${path}. ¿Sobrescribir?`)) {
+      if (!current()) return;
+      if (!await confirmModal({title:"Reemplazar diagrama",body:`Ya existe ${path} en ${destination}. ¿Sobrescribir ese archivo?`,confirmText:"Sobrescribir",danger:true})) {
         toast("Guardado cancelado.", "warn");
         return;
       }
+      if (!current()) return;
       r = await put(true);
     }
-    toast(`Guardado: ${r.path} (${r.size.toLocaleString()} bytes)`, "ok");
+    if (!current()) return;
+    if (kind === "md") _state.dirty = false;
+    toast(`Guardado: ${r.path} en ${destination} (${r.size.toLocaleString()} bytes)`, "ok");
     // El .md guardado pasa a ser lo que se muestra la próxima vez.
-    if (kind === "md") await loadSavedDiagrams();
+    if (kind === "md") await loadSavedDiagrams(context);
   } catch (e) {
+    if (!current()) return;
     if (e.status === 413) {
       toast("El diagrama supera el cap de 64KB del endpoint — guarda el .md "
         + "(mucho más chico) o usa ⬇ Descargar para el SVG.", "err");
@@ -1067,6 +1130,9 @@ export function initDiagrams() {
 export function loadDiagrams() {
   const root = document.getElementById('tab-diagrams');
   if (!root) return;
+  // Workspace oculta el panel al cerrar; su DOM y su documento siguen vivos.
+  // Reabrir no es descartar ni recargar el editor (incluye cambios sin guardar).
+  if (_state && root.querySelector('#mermaid-code')) return;
 
   root.innerHTML = `
     <div class="p-6 max-w-5xl mx-auto space-y-4">
@@ -1158,13 +1224,19 @@ export function loadDiagrams() {
     </div>
   `;
 
-  _state = { code: DEFAULT_CODE, svg: '', error: '', theme: 'dark',
-             loading: false, name: '' };
+  _state ??= { code: DEFAULT_CODE, svg: '', error: '', theme: 'dark',
+               loading: false, name: '' };
 
   const codeEl = document.getElementById('mermaid-code');
   codeEl.value = _state.code;
+  document.getElementById('mermaid-theme').value = _state.theme;
   codeEl.addEventListener('input', (e) => {
+    ++_documentGeneration; ++_renderGeneration;
+    if (!_state.workspaceContext) _state.workspaceContext = getSelectedProject()?.workspaceContext || null;
     _state.code = e.target.value;
+    _state.dirty = true;
+    _state.svg = ''; _state.error = ''; _state.loading = false;
+    paintDiagramContext(); paintPreview();
     updateAutoButtons();
   });
 
@@ -1279,6 +1351,9 @@ export function loadDiagrams() {
     const status = document.getElementById('diag-llm-status');
     const explain = document.getElementById('diag-llm-explain');
     const origText = btn ? btn.textContent : '';
+    p.documentGeneration = ++_documentGeneration;
+    const generation = ++_llmGeneration, state = _state;
+    const current = () => generation === _llmGeneration && state === _state;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Generando…'; }
     if (status) { status.classList.remove('hidden'); status.textContent = 'Consultando cbm…'; }
     if (explain) explain.classList.add('hidden');
@@ -1291,14 +1366,13 @@ export function loadDiagrams() {
         body.function = fn;
       }
       if (status) status.textContent = 'LLM interpretando…';
-      const r = await api(`projects/${encodeURIComponent(p.slug)}/diagrams/llm${taskWorkspaceQuery(p.slug)}`,
+      const r = await api(`projects/${encodeURIComponent(p.slug)}/diagrams/llm${taskWorkspaceQuery(p.slug, {}, p.workspaceContext)}`,
         { method: "POST", body }, 90_000);
-      if (!_state) return;
-      _state.code = r.mermaid || '';
-      _state.name = `${p.slug}-${kind}-llm`;
-      const codeEl = document.getElementById('mermaid-code');
-      if (codeEl) codeEl.value = _state.code;
-      await renderDiagram();
+      if (!current() || !diagramSourceCurrent(p)) return;
+      const rendering = setCodeAndRender(r.mermaid || '', `${kind}-llm`, p);
+      const documentGeneration = _documentGeneration;
+      await rendering;
+      if (!current() || documentGeneration !== _documentGeneration) return;
       if (r.explanation) {
         if (explain) {
           explain.innerHTML = `<strong>💡 Interpretación del LLM</strong><br>`
@@ -1309,8 +1383,10 @@ export function loadDiagrams() {
       const tok = r.tokens_in ? `${r.tokens_in}+${r.tokens_out || '?'} tok` : '';
       toast(`Diagrama generado con LLM${tok ? ` (${tok})` : ''}.`, "ok");
     } catch (e) {
+      if (!current() || !diagramSourceCurrent(p)) return;
       toast(`Error del LLM: ${e.message}`, "err");
     } finally {
+      if (!current()) return;
       if (btn) { btn.disabled = false; btn.textContent = origText; }
       if (status) { status.classList.add('hidden'); status.textContent = ''; }
       updateAutoButtons();

@@ -89,7 +89,7 @@ const actor = await api("me").catch((error) => {
 const allowedTabs = actor?.role === "owner" && actor.allowed_tabs === null ? null
   : new Set(Array.isArray(actor?.allowed_tabs) ? actor.allowed_tabs : []);
 if (embeddedConversation && (allowedTabs === null || allowedTabs.has("chat"))) {
-  bootEmbeddedChat({ initChats, selectConversation, initPollers }).catch(error => {
+  bootEmbeddedChat({ initChats: () => initChats(actor), selectConversation, initPollers }).catch(error => {
     console.error("No se pudo abrir la conversación", error);
     const message = document.createElement('p'); message.className = 'chat-task-error';
     message.textContent = `No se pudo abrir el chat: ${error.message}. `;
@@ -120,7 +120,7 @@ if (!canObserveGlobally) {
 // handlers" en vez de "medio admin no responde".
 for (const [tab, name, fn] of [
   ["running", "running", initRunning],
-  ["chat", "chats", initChats], ["voice", "voice", initVoice],
+  ["chat", "chats", () => initChats(actor)], ["voice", "voice", initVoice],
   ["projects", "projects", initProjects], ["orphans", "orphans", initOrphans],
   ["index", "index", initIndex], ["commands", "commands", initCommands],
   ["mcp", "mcp", initMcp], ["models", "models", initModels],
@@ -142,7 +142,7 @@ for (const [tab, name, fn] of [
   }
 }
 
-initWorkspace({ moduleLoaders: TAB_LOADERS, restoreChatObject, allowedTabs,
+initWorkspace({ moduleLoaders: TAB_LOADERS, restoreChatObject, allowedTabs, actor,
   accessMessage: actor ? "Tu cuenta todavía no tiene herramientas asignadas. Pide al administrador que revise Equipo." : "No se pudo verificar tu acceso. Recarga la página o contacta al administrador." });
 if (canObserveGlobally) refreshStatus();
 // Los módulos visibles se refrescan aunque otro tenga el foco. Minimizar

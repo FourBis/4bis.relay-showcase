@@ -3,15 +3,35 @@
 import { toast, confirmModal } from './ui.js';
 import { createConversationFrame } from './chat-window.js';
 
-const STORAGE = '4bis.workspace.v1';
+const LEGACY_STORAGE = '4bis.workspace.v1';
+const STORAGE = '4bis.workspace.v2';
+let storageKey = null, actorGeneration = 0;
 const windows = new Map();
 let modules = new Map(), loaders = {}, activeId = '', restoreObject;
 let stage, layer, dock, launcher;
 let saveTimer;
-let focusOrder = 0;
-let closeOrder = 0;
+let focusOrder = 0, closeOrder = 0;
 let taskContext = { conversationId: '', projectSlug: '' };
 let primaryTaskContext = taskContext;
+
+export function workspaceStorageKey(actor) {
+  const identity = typeof actor?.email === 'string' ? actor.email.trim().toLowerCase() : '';
+  return identity ? `${STORAGE}:${encodeURIComponent(identity)}` : null;
+}
+
+export function clearWorkspaceSession(actor) {
+  const key = actor ? workspaceStorageKey(actor) : storageKey;
+  ++actorGeneration; clearTimeout(saveTimer);
+  try {
+    localStorage.removeItem(LEGACY_STORAGE);
+    if (key) localStorage.removeItem(key);
+  } catch { /* Un storage bloqueado tampoco se restaura. */ }
+  storageKey = null;
+  taskContext = primaryTaskContext = {conversationId:'',projectSlug:''};
+  for (const w of windows.values()) { if (w.frame) w.frame.src = 'about:blank'; }
+  windows.clear(); activeId = '';
+  layer?.replaceChildren(); dock?.replaceChildren();
+}
 const mobile = () => matchMedia('(max-width: 760px)').matches;
 const descriptions = {
   chat: ['Conversar', 'Conversaciones, respuestas y memoria'],
@@ -44,13 +64,18 @@ export function setTaskWorkspaceContext({ conversationId = '', projectSlug = '' 
   if (!activeId || activeId === 'chat') taskContext = primaryTaskContext;
 }
 
-export function taskWorkspaceQuery(projectSlug, params = {}) {
+export function captureTaskWorkspaceContext(projectSlug) {
+  return Object.freeze({projectSlug:String(projectSlug || ''),
+    conversationId:taskContext.projectSlug === projectSlug ? taskContext.conversationId : ''});
+}
+
+export function taskWorkspaceQuery(projectSlug, params = {}, context = taskContext) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== '' && value != null) query.set(key, value);
   }
-  if (taskContext.conversationId && taskContext.projectSlug === projectSlug) {
-    query.set('conversation', taskContext.conversationId);
+  if (context.conversationId && context.projectSlug === projectSlug) {
+    query.set('conversation', context.conversationId);
   }
   const encoded = query.toString();
   return encoded ? `?${encoded}` : '';
@@ -138,12 +163,15 @@ function setWindowTitle(w, title) {
 
 function persist() {
   clearTimeout(saveTimer);
+  const key = storageKey, generation = actorGeneration;
+  if (!key) return;
   saveTimer = setTimeout(() => {
+    if (key !== storageKey || generation !== actorGeneration) return;
     const saved = [...windows.values()].filter(w => w.module || w.restore).map(w => ({
       id: w.id, module: w.module, title: w.title, customTitle: w.customTitle, restore: w.restore,
       rect: w.rect, closed: w.closed, closedAt: w.closedAt, minimized: w.minimized, maximized: w.maximized,
     }));
-    try { localStorage.setItem(STORAGE, JSON.stringify({ version: 1, windows: saved.slice(-40) })); }
+    try { localStorage.setItem(key, JSON.stringify({ version: 1, windows: saved.slice(-40) })); }
     catch { /* El workspace sigue funcionando aunque el storage no esté disponible. */ }
   }, 120);
 }
@@ -172,10 +200,11 @@ function visibility() {
   }
   document.getElementById('workspace-welcome').hidden = visible > 0;
   renderDock();
+  document.dispatchEvent(new Event("relay-workspace-visibility"));
 }
 
 function activate(w, focus = false) {
-  w.closed = false; w.minimized = false; activeId = w.id;
+  w.closed = false; w.closedAt = 0; w.minimized = false; activeId = w.id;
   // Cambiar apilado sin reinsertar el DOM: mover el nodo quitaría el foco
   // de inputs al llegar a una ventana de atrás con Tab.
   w.order = ++focusOrder;
@@ -225,8 +254,7 @@ function renderDock() {
 }
 
 function closeWindow(w) {
-  if (!w.closed) w.closedAt = ++closeOrder;
-  w.closed = true;
+  w.closed = true; w.closedAt = ++closeOrder;
   if (w.module) modules.get(w.module).panel.hidden = true;
   w.onClose?.();
   nextActive(); persist(); announce(`${w.title} cerrado. Puedes volver a abrirlo desde Herramientas.`);
@@ -377,7 +405,7 @@ export function openConversationWindow({ id, project_slug, title } = {}, saved) 
   const windowId = `object:conversation:${id}`;
   let w = windows.get(windowId);
   if (!w) w = makeWindow({ ...saved, id: windowId, module: null,
-    title: conversationTitle(project_slug || title, id, saved?.customTitle), source: 'Chat',
+    title: conversationTitle(title || project_slug, id, saved?.customTitle), source: 'Chat',
     restore: { kind: 'conversation', conversationId: id } });
   if (!w.frame) {
     w.frame = createConversationFrame(id, w.title);
@@ -405,6 +433,7 @@ export function openObject(options) {
 }
 
 async function restoreSavedObject(saved) {
+  const generation = actorGeneration;
   if (saved.restore?.kind === 'conversation') {
     openConversationWindow({ id: saved.restore.conversationId, title: saved.title }, saved);
     return;
@@ -415,10 +444,12 @@ async function restoreSavedObject(saved) {
   w.body.replaceChildren(message); activate(w);
   try {
     const result = await restoreObject(saved.restore);
+    if (generation !== actorGeneration) return;
     if (!(result?.content instanceof HTMLElement)) throw new Error('El resultado ya no está disponible en la conversación.');
     w.body.replaceChildren(result.content);
     w.el.querySelector('.workspace-window-kind').textContent = result.source || 'Desde el chat';
   } catch (e) {
+    if (generation !== actorGeneration) return;
     message.textContent = `No se pudo recuperar el resultado: ${e.message}`;
     const retry = document.createElement('button'); retry.className = 'btn'; retry.textContent = 'Reintentar';
     retry.onclick = () => restoreSavedObject(saved); w.body.append(retry);
@@ -475,7 +506,12 @@ export function visibleWorkspaceModules() {
   return new Set([...windows.values()].filter(w => w.module && !w.el.hidden).map(w => w.module));
 }
 
-export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = null, accessMessage = "" }) {
+export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = null, accessMessage = "", actor = null }) {
+  ++actorGeneration; clearTimeout(saveTimer);
+  storageKey = workspaceStorageKey(actor);
+  // El layout sin actor no tiene un propietario verificable. No migrar sus
+  // títulos ni referencias a la cuenta que casualmente inicia sesión ahora.
+  try { localStorage.removeItem(LEGACY_STORAGE); } catch { /* storage bloqueado */ }
   const originalHash = location.hash;
   loaders = moduleLoaders; restoreObject = restoreChatObject;
   stage = document.getElementById('main'); layer = document.getElementById('workspace-windows');
@@ -485,6 +521,11 @@ export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = 
     if (event.origin !== location.origin) return;
     const w = [...windows.values()].find(entry => entry.frame?.contentWindow === event.source);
     if (!w || w.closed) return;
+    if (event.data?.type === 'relay-chat-list' && event.data.conversationId === w.restore?.conversationId) {
+      openWorkspaceModule('chat');
+      document.dispatchEvent(new Event('relay-chat-list'));
+      return;
+    }
     if (event.data?.type === 'relay-chat-shortcut' && typeof event.data.shift === 'boolean') {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, shiftKey: event.data.shift }));
       return;
@@ -497,14 +538,16 @@ export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = 
     }
     if (event.data?.type === 'relay-chat-object' &&
         event.data.restore?.conversationId === w.restore?.conversationId) {
-      restoreObject(event.data.restore).then(openObject)
-        .catch(error => toast(`No se pudo abrir el resultado: ${error.message}`, 'err'));
+      const generation = actorGeneration;
+      restoreObject(event.data.restore).then(result => { if (generation === actorGeneration) openObject(result); })
+        .catch(error => { if (generation === actorGeneration) toast(`No se pudo abrir el resultado: ${error.message}`, 'err'); });
       return;
     }
     if (event.data?.type !== 'relay-chat-context' || event.data.conversationId !== w.restore?.conversationId) return;
     w.context = { conversationId: event.data.conversationId,
       projectSlug: typeof event.data.projectSlug === 'string' ? event.data.projectSlug : '' };
-    if (!w.customTitle && w.context.projectSlug) setWindowTitle(w, w.context.projectSlug.slice(0, 120));
+    const title = typeof event.data.title === 'string' ? event.data.title.trim().slice(0, 120) : '';
+    if (!w.customTitle && (title || w.context.projectSlug)) setWindowTitle(w, title || w.context.projectSlug.slice(0, 120));
     if (document.activeElement === w.frame) activate(w);
     if (activeId === w.id) taskContext = w.context;
   });
@@ -569,7 +612,7 @@ export function initWorkspace({ moduleLoaders, restoreChatObject, allowedTabs = 
     persist(); announce(`${open.length} ventanas ordenadas.`);
   };
   new ResizeObserver(() => { for (const w of windows.values()) place(w); visibility(); }).observe(stage);
-  let saved = []; try { saved = readLayout(localStorage.getItem(STORAGE), [...modules.keys()]); } catch { /* storage bloqueado */ }
+  let saved = []; try { if (storageKey) saved = readLayout(localStorage.getItem(storageKey), [...modules.keys()]); } catch { /* storage bloqueado */ }
   if (!modules.has('chat')) saved = saved.filter(entry => entry.module || !entry.restore);
   closeOrder = Math.max(closeOrder, ...saved.map(entry => entry.closedAt || 0));
   for (const entry of saved) {

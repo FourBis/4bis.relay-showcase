@@ -105,15 +105,15 @@ function _setVitals(v) {
   const chatsEl = $("#topbar-chats");
   if (!runsEl) return;
   if (v === null) {
-    dot.className = "topbar-dot down";
-    runsEl.textContent = "relay caído";
+    dot.className = "topbar-dot";
+    runsEl.textContent = "Actividad no disponible";
     if (tokEl) tokEl.textContent = "—";
     if (chatsEl) chatsEl.textContent = "—";
     return;
   }
   dot.className = "topbar-dot" + (v.running > 0 ? " busy" : "");
   runsEl.textContent = v.running > 0
-    ? `${v.running} corriendo` : "sin runs activos";
+    ? `${v.running} en curso` : "Sin trabajo en curso";
   if (tokEl) tokEl.textContent = v.tokens == null ? "—" : fmtNum(v.tokens);
   if (chatsEl) chatsEl.textContent = v.chats == null ? "—" : String(v.chats);
 }

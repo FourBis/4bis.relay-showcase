@@ -2,7 +2,7 @@
 
 import { $, api, apiRoot, escape } from "./api.js";
 import { statCell, toast, emptyRow, confirmModal, alertModal } from "./ui.js";
-import { dtView } from "./ui-table.js";
+import { dtView, updateTablePager } from "./ui-table.js";
 import { updateSkillsBadge } from "./tab-skills.js";
 
 // El health repartido en dos niveles: lo que contesta "¿anda?" arriba,
@@ -13,11 +13,15 @@ const _dato = (v, k) =>
   `<span class="text-[13px] text-zinc-300"><span
      class="font-semibold tabular-nums text-zinc-100">${v}</span> ${k}</span>`;
 
+let statusRefreshGeneration = 0;
+
 export async function refreshStatus() {
+  const generation = ++statusRefreshGeneration;
   const dot = $("#status-health-dot"), txt = $("#status-health-text");
   const meta = $("#status-health-meta"), inv = $("#status-inventory");
   try {
     const h = await api("health");
+    if (generation !== statusRefreshGeneration) return;
     $("#status-indicator").classList.remove("down");
     if (dot) dot.className = "h-2 w-2 shrink-0 rounded-full bg-emerald-400";
     if (txt) { txt.textContent = "Relay operativo"; txt.className =
@@ -46,6 +50,7 @@ export async function refreshStatus() {
     // health se pollea cada 15s, así el sidebar avisa sin abrir la tab.
     updateSkillsBadge(h.skill_drafts_pending ?? 0);
   } catch (e) {
+    if (generation !== statusRefreshGeneration) return;
     $("#status-indicator").classList.add("down");
     if (dot) dot.className = "h-2 w-2 shrink-0 rounded-full bg-red-400";
     if (txt) { txt.textContent = "El relay no responde"; txt.className =
@@ -81,11 +86,14 @@ const _SESS_COLUMNS = [
     value: (s) => s.last_handshake_ts || "" },
 ];
 const _sessState = { sortKey: 4, sortDir: "desc", page: 0 };  // handshake desc
+let _statusExtrasGeneration = 0;
 
 // Stats del día + sesiones VS Code (endpoints raíz del relay).
 async function refreshStatusExtras() {
+  const generation = ++_statusExtrasGeneration;
   try {
     const s = await apiRoot("/stats");
+    if (generation !== _statusExtrasGeneration) return;
     $("#stats-grid").innerHTML = [
       statCell(s.chats_today ?? 0, "chats hoy"),
       statCell((s.tokens_in_today ?? 0).toLocaleString(), "tokens in"),
@@ -97,8 +105,13 @@ async function refreshStatusExtras() {
     // cada 15s; loadRunning lo pisa con el número exacto al refrescar.
     updateRunningBadge(s.experts_running ?? 0);
   } catch (_) { /* best-effort */ }
+  if (generation !== _statusExtrasGeneration) return;
   try {
     const r = await apiRoot("/sessions");
+    if (generation !== _statusExtrasGeneration) return;
+    const view = dtView(_SESS_COLUMNS, {..._sessState,rows:r.sessions,query:""}, 25);
+    _sessState.page = view.page;
+    updateTablePager($("#sessions-table"), view, page => { _sessState.page = page; return refreshStatusExtras(); });
     const tbody = $("#sessions-table tbody");
     if (!r.sessions.length) {
       tbody.innerHTML = emptyRow(5, {
@@ -116,12 +129,7 @@ async function refreshStatusExtras() {
     // dtView: sort por columna + paginación si >25 (cabe un admin con
     // 20 repos abiertos y 2 VS Code por repo). Sin estado local el
     // orden elegido se perdía con cada /sessions del poller.
-    const { slice } = dtView(_SESS_COLUMNS, {
-      rows: r.sessions,
-      sortKey: _sessState.sortKey,
-      sortDir: _sessState.sortDir,
-      page: _sessState.page,
-    }, r.sessions.length > 25 ? 25 : 0);
+    const { slice } = view;
     tbody.innerHTML = slice.map((s) => `
       <tr>
         <td>${escape(s.name)}</td>

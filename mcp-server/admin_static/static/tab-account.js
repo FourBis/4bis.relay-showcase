@@ -2,6 +2,7 @@
 // preparados se conservan temporalmente en memoria para revisarlos y enviarlos.
 import { $, api, escape } from "./api.js";
 import { confirmModal, emptyState, field, formSection, skeletonRows, toast } from "./ui.js";
+import { clearWorkspaceSession } from "./workspace.js";
 
 const PROVIDERS = new Set(["github", "google"]);
 const PROVIDER_NAMES = { github: "GitHub", google: "Google / Gmail" };
@@ -14,6 +15,7 @@ let snapshot = null;
 let draftsSnapshot = [];
 let currentQuery = "";
 let generation = 0;
+let composeRevision = 0;
 const SEND_REQUESTS_KEY = "relay.account.mail-send-ids.v1";
 const SEND_REQUESTS_LIMIT = 50;
 const attr = value => escape(value).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -179,6 +181,7 @@ async function loadDrafts() {
 function loadDraft(draftId) {
   const draft = draftsSnapshot.find(item => item.draft_id === draftId);
   if (!draft) return;
+  ++composeRevision;
   const compose = $("#account-compose");
   compose.innerHTML = composeMarkup(); compose.hidden = false;
   $("#account-mail-to").value = recipientsText(draft.to);
@@ -267,6 +270,12 @@ function composeMarkup() {
 async function sendMail(event) {
   event.preventDefault();
   if (!showGmail()) return;
+  const form = event.target;
+  const compose = $("#account-compose");
+  const revision = composeRevision;
+  const email = snapshot?.email;
+  const current = () => form.isConnected && $("#account-mail-compose") === form
+    && composeRevision === revision && snapshot?.email === email && showGmail();
   const to = parseRecipients($("#account-mail-to").value, true);
   const cc = parseRecipients($("#account-mail-cc").value);
   const bcc = parseRecipients($("#account-mail-bcc").value);
@@ -280,7 +289,9 @@ async function sendMail(event) {
   }
   const draft = { from: googleConnection()?.email || snapshot.email, to: to.recipients,
     cc: cc.recipients, bcc: bcc.recipients, subject, body };
-  const request = await requestIdForDraft(draft, snapshot?.email);
+  const request = await requestIdForDraft(draft, email);
+  // Una nueva redacción o una edición durante el hash no autoriza el payload anterior.
+  if (!current()) return;
   if (request.error) {
     status.textContent = `${request.error} No se envió el correo.`;
     return;
@@ -296,14 +307,18 @@ async function sendMail(event) {
     if (result?.state !== "sent" || !result.message_id) {
       throw new Error(result?.error || "Relay no confirmó que Gmail aceptó el envío.");
     }
-    toast(`Correo enviado por ${googleConnection()?.email || draft.from}.`, "ok");
+    toast(`Correo enviado por ${draft.from}.`, "ok");
     forgetConfirmedSend(request.fingerprint);
-    $("#account-mail-compose").reset();
-    $("#account-compose").hidden = true;
-    $("#account-compose").replaceChildren();
+    // El resultado pertenece al formulario y a la revisión enviados. No borrar
+    // un borrador nuevo ni las ediciones hechas mientras Gmail respondía.
+    if (!current()) return;
+    form.reset();
+    compose.hidden = true;
+    compose.replaceChildren();
     await loadMessages(currentQuery);
   } catch (error) {
-    status.textContent = error.message;
+    if (current()) status.textContent = error.message;
+    else toast(`No se pudo confirmar el envío del borrador anterior: ${error.message}`, "err");
   } finally {
     if (button.isConnected) button.disabled = false;
   }
@@ -342,6 +357,7 @@ async function logout() {
   if (button) button.disabled = true;
   try {
     await api("auth/logout", { method: "POST", body: {} });
+    clearWorkspaceSession(actor);
     window.location.assign("/admin/");
   } catch (error) {
     toast(`No se pudo cerrar la sesión: ${error.message}`, "err");
@@ -350,6 +366,11 @@ async function logout() {
 }
 
 function wireRoot(root) {
+  const markComposeRevision = event => {
+    if (event.target.closest("#account-mail-compose")) ++composeRevision;
+  };
+  root.addEventListener("input", markComposeRevision);
+  root.addEventListener("change", markComposeRevision);
   root.addEventListener("click", event => {
     const button = event.target.closest("[data-account-action]");
     if (!button) return;
@@ -358,16 +379,19 @@ function wireRoot(root) {
     if (action === "connect") connect(button.dataset.provider);
     if (action === "disconnect") disconnect(button.dataset.provider);
     if (action === "compose") {
+      ++composeRevision;
       const compose = $("#account-compose");
       compose.innerHTML = composeMarkup(); compose.hidden = false;
       $("#account-mail-to").focus();
     }
     if (action === "load-draft") loadDraft(button.dataset.draftId);
     if (action === "cancel-compose") {
+      const form = $("#account-mail-compose");
+      const revision = composeRevision;
       confirmModal({ title: "¿Cerrar este borrador?",
         body: "Si un envío quedó sin confirmar, Relay conserva su identificador para que el reintento no genere un envío duplicado. Revisa Gmail antes de volver a redactar el mismo correo con cambios.",
         confirmText: "Descartar borrador", danger: true }).then(ok => {
-        if (!ok) return;
+        if (!ok || form !== $("#account-mail-compose") || revision !== composeRevision) return;
         $("#account-compose").replaceChildren(); $("#account-compose").hidden = true;
       });
     }

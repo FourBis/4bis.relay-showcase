@@ -20,7 +20,7 @@ import { chime, isMuted, toggleMute, pedirPermisoNotificaciones } from "./chime.
 // En UNA línea a propósito: chat-strip-junk.test.mjs carga este módulo
 // neutralizando los imports con un regex `^import .*$` por línea, y un
 // import multilínea le deja huérfano el resto del bloque.
-import { refreshQuestions, matchCommand, helpText, wireCommandPalette, paletteOpen, addCopyButtons } from "./chat-tools.js";
+import { invalidateQuestions, refreshQuestions, matchCommand, helpText, wireCommandPalette, paletteOpen, addCopyButtons } from "./chat-tools.js";
 import { attachGrafo, detachGrafo, pokeGrafo, wireGrafoPanel, planEnCurso } from "./chat-grafo.js";
 import { aplicarAnchosGuardados } from "./panel-resize.js";
 import { openConvDiff } from "./chat-diff.js";
@@ -28,7 +28,7 @@ import { openChatObject } from "./chat-objects.js";
 import { mountTaskPanel } from "./chat-task.js";
 import { openExternalRegistration } from "./chat-external-pr.js";
 import { issuePickerHtml, mountIssuePicker, optionalIssuePayload } from "./chat-issue.js";
-import { setTaskWorkspaceContext, openConversationWindow } from "./workspace.js";
+import { setTaskWorkspaceContext, openConversationWindow, visibleWorkspaceModules } from "./workspace.js";
 import { announceEmbeddedChat, getEmbeddedConversation, isChatViewVisible } from "./chat-window.js";
 
 // --- estado ----------------------------------------------------------
@@ -52,6 +52,9 @@ let chatSelectionGeneration = 0;
 let chatDraftGeneration = 0;
 let taskPanel = null;
 let draftIssuePicker = null;
+let composerRevision = 0;
+let questionActor = "";
+let attachmentRevision = 0, pendingAttachmentUploads = 0;
 
 function newRequestId() {
   return globalThis.crypto?.randomUUID?.()
@@ -281,6 +284,7 @@ export function navigateConversation(convId) {
 }
 
 export async function selectConversation(convId) {
+  invalidateQuestions($("#chat-panel-messages"));
   const generation = ++chatSelectionGeneration;
   setChatDrawer(false);
   try {
@@ -505,6 +509,7 @@ async function resumeRunningChat(convId, generation) {
 }
 
 function showMainView(which) {
+  if (which !== "convo") invalidateQuestions($("#chat-panel-messages"));
   $("#chat-empty").hidden = which !== "empty";
   $("#chat-convo").hidden = which !== "convo";
   $("#chat-memoria").hidden = which !== "memoria";
@@ -754,8 +759,23 @@ async function extractFactsFromConversation() {
 // forma de cerrar desde la UI — el 409 de "ya hay una abierta" mandaba a
 // cerrarla sin decir cómo.
 async function closeActiveConversation() {
-  if (!activeChat || activeChat.readOnly) return;
-  const short = activeChat.convId.slice(0, 8);
+  const selected = activeChat, generation = chatSelectionGeneration;
+  if (!selected || selected.readOnly || selected.questionsClosing) return;
+  selected.questionsClosing = true;
+  invalidateChatQuestions();
+  try {
+    await closeSelectedConversation(selected, generation);
+  } finally {
+    selected.questionsClosing = false;
+    if (activeChat === selected && selectionIsCurrent(generation, selected.convId)
+        && questionChatIsVisible()) refreshChatQuestions(selected.convId, generation);
+  }
+}
+
+async function closeSelectedConversation(selected, generation) {
+  const current = () => activeChat === selected && selectionIsCurrent(generation, selected.convId);
+  if (!current()) return;
+  const short = selected.convId.slice(0, 8);
 
   // No se cierra con trabajo en vuelo (2026-08-24). Cerrar compacta la
   // memoria y abre el PR: hacerlo a mitad de camino deja el summary sin
@@ -792,11 +812,17 @@ async function closeActiveConversation() {
     cancelText: "Volver",
     danger: true,
   })) return;
-  const convId = activeChat.convId;
+  if (!current()) return;
+  if (selected.busy || planEnCurso()) {
+    toast("Hay trabajo en curso; espera a que termine antes de cerrar la conversación.", "warn");
+    return;
+  }
+  const convId = selected.convId;
   try {
     const r = await apiRoot(
       `/conversations/${encodeURIComponent(convId)}/close`,
       { method: "POST" }, 30_000);
+    if (!current()) return;
     const bits = [];
     if (r.pr_url) bits.push(`PR abierto: ${r.pr_url}`);
     else if (r.pr === "running") bits.push("verificando y abriendo PR…");
@@ -805,13 +831,14 @@ async function closeActiveConversation() {
       : "sin historial que compactar");
     toast(`Conversación ${short}… cerrada ✓ — ${bits.join(" · ")}`, "ok");
     await loadChats();                       // refrescar sidebar (pasa a Cerradas)
+    if (!current()) return;
     await selectConversation(convId);        // re-render read-only + summary
     if (r.pr === "running") pollPrStatus(convId, short);
     // La rama local la borra el relay cuando el PR queda abierto (el
     // toast de pollPrStatus lo dice). Acá no se pregunta nada: el botón
     // del header sigue estando para las ramas viejas.
   } catch (e) {
-    toast("No pude cerrar la conversación: " + e.message, "err");
+    if (current()) toast("No pude cerrar la conversación: " + e.message, "err");
   }
 }
 
@@ -1343,22 +1370,28 @@ function colorizeDiff(diff) {
 // 2000 es el cap duro del endpoint; 20k chars alcanza para respuestas largas.
 async function loadMessages(convId) {
   const box = $("#chat-panel-messages");
+  const selected = activeChat, generation = chatSelectionGeneration;
+  const current = () => activeChat === selected && selectionIsCurrent(generation, convId)
+    && $("#chat-panel-messages") === box && box?.isConnected !== false;
+  if (!current()) return [];
+  invalidateChatQuestions();
   box.innerHTML = '<p class="p-3 text-xs text-zinc-400" role="status">Cargando mensajes…</p>';
   await ensureMd().catch(() => {});   // sin markdown ⇒ texto plano, no error
+  if (!current()) return [];
   try {
     const r = await apiRoot(
     `/conversations/${encodeURIComponent(convId)}/messages`
     + `?max_turns=2000&content_cap=20000`, null, 30_000);
-    if (activeChat?.convId !== convId) return []; // respuesta tardía de otro hilo
+    if (!current()) return [];
     if (r.error) throw new Error(r.error);
     renderBubbles(r.messages || []);
     restorePendingUser(r.messages || []);
     return r.messages || [];
   } catch (e) {
-    if (activeChat?.convId !== convId) return [];
+    if (!current()) return [];
     box.innerHTML = `<div class="p-3" role="alert"><p class="text-sm text-red-400">No se pudo leer la conversación: ${escape(e.message)}</p>
       <button class="btn mt-2" id="chat-messages-retry">Reintentar</button></div>`;
-    $("#chat-messages-retry").addEventListener("click", () => loadMessages(convId));
+    $("#chat-messages-retry").addEventListener("click", () => { if (current()) loadMessages(convId); });
     return [];
   }
 }
@@ -1676,42 +1709,61 @@ function appendCommandReply(label, text) {
 // que tiene en vuelo, sobre el historial ya rescatado. La alternativa que
 // existía era cancelar, que además de perder el hilo tiraba el avance.
 async function steerCurrentRun(text) {
-  const id = activeChat?.currentChatId;
+  const selected = activeChat, generation = chatSelectionGeneration;
+  const id = selected?.currentChatId, input = $("#chat-panel-input");
   if (!id) { toast("El run recién arranca — prueba en un segundo", "warn"); return; }
-  if (!activeChat.pendingSteer || activeChat.pendingSteer.text !== text) {
-    activeChat.pendingSteer = { text, requestId: newRequestId() };
+  if (selected.steerSending) return;
+  if (!selected.pendingSteer || selected.pendingSteer.text !== text) {
+    selected.pendingSteer = { text, requestId: newRequestId() };
   }
+  const pending = selected.pendingSteer;
+  const current = () => activeChat === selected && generation === chatSelectionGeneration;
+  selected.steerSending = true;
   try {
     const r = await apiRoot(`/experts/steer/${encodeURIComponent(id)}`, {
       method: "POST", body: JSON.stringify(steerRequestPayload(
-        activeChat.pendingSteer.text, activeChat.pendingSteer.requestId)),
+        pending.text, pending.requestId)),
     });
-    activeChat.pendingSteer = null;
-    $("#chat-panel-input").value = "";
+    if (selected.pendingSteer === pending) selected.pendingSteer = null;
+    if (!current()) return;
+    if (input.value.trim() === text.trim()) input.value = "";
     // Sin burbuja optimista a propósito: el 🧭 lo pinta el poll cuando el
     // experto REALMENTE cortó y la tomó. Así ves si se aplicó o no.
     toast(r?.durable && r?.phase === "queued"
       ? "Mensaje guardado; se ejecutará al terminar el turno actual"
       : "Corrección encolada — se aplica al terminar la tool en curso", "ok");
   } catch (e) {
-    if (e.status === 409 || e.status === 404) {
-      // Terminó entre que escribiste y mandaste: es un mensaje normal.
-      activeChat.pendingSteer = null;
+    if (!current()) return;
+    let detail = null;
+    try { detail = typeof e.body === "string" ? JSON.parse(e.body) : e.body; } catch { /* original error below */ }
+    if (e.status === 409 && detail?.finished === true && input.value.trim() === text.trim()) {
+      // Sólo el contrato explícito de turno terminado permite un nuevo
+      // envío. Un conflicto de actor, permisos o pausa conserva el texto.
+      selected.pendingSteer = null;
+      selected.currentChatId = null;
       setBusy(false);
       await sendCurrentMessage();
       return;
     }
     toast("No se pudo mandar la corrección: " + e.message, "err");
+  } finally {
+    selected.steerSending = false;
   }
 }
 
 async function stopCurrentRun() {
-  const id = activeChat?.currentChatId;
-  if (!id) return;
+  const selected = activeChat, id = selected?.currentChatId;
+  if (!id || selected.canControl === false) return;
   try {
-    await apiRoot(`/experts/cancel/${encodeURIComponent(id)}`, { method: "POST" });
-    toast("Run cortado — el avance queda guardado en el hilo", "ok");
+    const result = await apiRoot(`/experts/cancel/${encodeURIComponent(id)}`, { method: "POST" });
+    if (activeChat !== selected || selected.currentChatId !== id) return;
+    toast(result?.cancelled?.length
+      ? "Cancelación confirmada para este turno. Revisa los resultados disponibles en el historial."
+      : result?.zombies_cleaned?.length ? "Se cerró un turno sin proceso activo. Revisa su registro."
+      : result?.finished?.length ? "El turno ya terminó. Revisa su estado en el historial."
+      : "Solicitud de cancelación recibida. Revisa el estado del turno en el historial.", "ok");
   } catch (e) {
+    if (activeChat !== selected) return;
     toast("No se pudo cortar: " + e.message, "err");
   }
 }
@@ -1723,6 +1775,7 @@ async function stopCurrentRun() {
 let pendingAttachments = [];   // [{id, name, bytes, viewable, inline}]
 
 function renderAttachTray() {
+  ++attachmentRevision;
   const tray = $("#chat-attach-tray");
   if (!tray) return;
   tray.hidden = pendingAttachments.length === 0;
@@ -1738,6 +1791,7 @@ function renderAttachTray() {
     </span>`;
   }).join("");
   $$(".chat-attach-x").forEach((b) => b.addEventListener("click", () => {
+    ++composerRevision;
     pendingAttachments.splice(Number(b.dataset.i), 1);
     renderAttachTray();
   }));
@@ -1868,6 +1922,7 @@ function onModelChange() {
 }
 
 async function uploadAttachment(file) {
+  ++composerRevision; ++attachmentRevision; ++pendingAttachmentUploads;
   const fd = new FormData();
   fd.append("file", file, file.name || "adjunto");
   try {
@@ -1879,6 +1934,8 @@ async function uploadAttachment(file) {
     renderAttachTray();
   } catch (e) {
     toast(`No pude subir ${file.name}: ${e.message}`, "err");
+  } finally {
+    --pendingAttachmentUploads; ++attachmentRevision;
   }
 }
 
@@ -2170,21 +2227,84 @@ function renderSuggestions(list) {
 // respuesta, pero un click es menos fricción que escribir un párrafo.
 // Responder manda el `resume_prompt` como turno siguiente, así el hilo
 // retoma sin que el humano tenga que explicar de nuevo el contexto.
-async function refreshChatQuestions(expectedConvId = null, expectedGeneration = null) {
-  const convId = expectedConvId || activeChat?.convId;
-  const isCurrent = () => !!activeChat?.convId && activeChat.convId === convId
-    && !activeChat.readOnly
-    && (expectedGeneration === null
-      || expectedGeneration === chatSelectionGeneration);
-  if (!isCurrent()) return 0;
-  const box = $("#chat-panel-messages");
-  const n = await refreshQuestions(box, convId, (resume) => {
-    if (!isCurrent()) return;
-    const inp = $("#chat-panel-input");
-    if (inp && resume) { inp.value = resume; sendCurrentMessage(); }
+function invalidateChatQuestions() {
+  invalidateQuestions($("#chat-panel-messages"));
+}
+
+function questionChatIsVisible() {
+  return !document.hidden && (getEmbeddedConversation()
+    ? isChatViewVisible() : visibleWorkspaceModules().has("chat"));
+}
+
+function wireQuestionViewLifecycle() {
+  let visible = questionChatIsVisible();
+  let embeddedVisible = isChatViewVisible();
+  document.addEventListener("relay-workspace-visibility", () => {
+    const next = questionChatIsVisible();
+    if (next === visible) return;
+    visible = next;
+    if (!next) invalidateChatQuestions(); else resume();
   });
+  const resume = () => {
+    if (questionChatIsVisible() && activeChat?.convId && !activeChat.readOnly) {
+      refreshChatQuestions(activeChat.convId, chatSelectionGeneration);
+    }
+  };
+  on("#chat-parent-list", "click", invalidateChatQuestions);
+  window.addEventListener("pagehide", invalidateChatQuestions);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) invalidateChatQuestions(); else resume();
+  });
+  window.addEventListener("message", event => {
+    if (event.origin !== location.origin || event.source !== window.parent
+        || event.data?.type !== "relay-chat-visibility" || typeof event.data.visible !== "boolean") return;
+    if (event.data.visible === embeddedVisible) return;
+    embeddedVisible = event.data.visible;
+    if (!embeddedVisible) invalidateChatQuestions();
+    // chat-window updates its visibility in the same message dispatch.
+    else queueMicrotask(resume);
+  });
+}
+
+function captureQuestionDraft() {
+  const input = $("#chat-panel-input");
+  return {input, value:input?.value || "", revision:composerRevision,
+    chat:activeChat, attachments:pendingAttachments.slice(), uploads:pendingAttachmentUploads,
+    attachmentRevision, draftGeneration:chatDraftGeneration,
+    model:chosenModel, stageModels:JSON.stringify(chosenStageModels)};
+}
+
+function questionDraftIsClean(snapshot) {
+  return snapshot && snapshot.chat === activeChat && !activeChat?.busy
+    && snapshot.input === $("#chat-panel-input") && snapshot.revision === composerRevision
+    && !snapshot.value && !snapshot.input?.value
+    && !snapshot.attachments.length && !pendingAttachments.length
+    && snapshot.uploads === 0 && pendingAttachmentUploads === 0
+    && snapshot.attachmentRevision === attachmentRevision
+    && snapshot.draftGeneration === chatDraftGeneration
+    && snapshot.model === chosenModel && snapshot.stageModels === JSON.stringify(chosenStageModels);
+}
+
+async function refreshChatQuestions(expectedConvId = null, expectedGeneration = null) {
+  const selected = activeChat, generation = expectedGeneration ?? chatSelectionGeneration;
+  const convId = expectedConvId || selected?.convId;
+  const box = $("#chat-panel-messages");
+  const isCurrent = () => activeChat === selected && !!selected?.convId && selected.convId === convId
+    && !selected.readOnly && !selected.questionsClosing && !selected.draft
+    && selectionIsCurrent(generation, convId) && $("#chat-panel-messages") === box
+    && !$("#chat-convo")?.hidden && questionChatIsVisible();
   if (!isCurrent()) return 0;
-  if (n) renderSuggestions([]);   // primero contestá; los chips después
+  const n = await refreshQuestions(box, convId, (resume, answerDraft) => {
+    if (!isCurrent() || !resume) return;
+    if (!questionDraftIsClean(answerDraft)) {
+      toast("Respuesta registrada. Tu borrador y adjuntos siguen intactos; envía un mensaje cuando quieras continuar.", "info");
+      return;
+    }
+    answerDraft.input.value = resume;
+    sendCurrentMessage();
+  }, {isCurrent, expectedActor:questionActor, captureAnswerContext:captureQuestionDraft});
+  if (!isCurrent()) return 0;
+  if (n) renderSuggestions([]);
   return n;
 }
 
@@ -2262,6 +2382,7 @@ async function openNewChatDraft() {
   if (!sel.value) sel.value = sel.options[0]?.value || "";
   if (!sel.value) { toast("No hay proyectos habilitados", "warn"); return; }
 
+  invalidateQuestions($("#chat-panel-messages"));
   ++chatSelectionGeneration;
   activeChat = {
     convId: null, projectSlug: sel.value, currentChatId: null,
@@ -2781,7 +2902,10 @@ async function deleteMemory(convId) {
 // wire-up
 // =====================================================================
 
-export function initChats() {
+export function initChats(actor = null) {
+  questionActor = typeof actor?.email === "string" ? actor.email.trim().toLowerCase() : "";
+  document.addEventListener("relay-chat-list", () => setChatDrawer(true));
+  wireQuestionViewLifecycle();
   ensureMd().catch(() => {});   // precarga: el primer hilo abre ya con markdown
   wireChatObjects();
   // Sidebar
@@ -2817,8 +2941,10 @@ export function initChats() {
     on("#chat-project-filter", ev, filtrarProyecto);
   }
   on("#chat-memoria-toggle", "click", showMemoria);
-  on("#chat-memoria-back", "click", () =>
-    showMainView(activeChat ? "convo" : "empty"));
+  on("#chat-memoria-back", "click", () => {
+    showMainView(activeChat ? "convo" : "empty");
+    if (activeChat?.convId && !activeChat.readOnly) refreshChatQuestions(activeChat.convId, chatSelectionGeneration);
+  });
 
   // Panel
   on("#chat-panel-send", "click", sendCurrentMessage);
@@ -2850,6 +2976,7 @@ export function initChats() {
 
   // Ctrl+Enter envía. Si la paleta de comandos está abierta, el Enter es
   // suyo (elige la opción marcada) y no manda el mensaje.
+  on("#chat-panel-input", "input", () => { ++composerRevision; });
   on("#chat-panel-input", "keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       if (paletteOpen()) return;

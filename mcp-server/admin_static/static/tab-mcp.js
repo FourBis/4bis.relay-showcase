@@ -253,6 +253,22 @@ async function mcpSave() {
 
 let _activeJobId = null;
 let _pollHandle = null;
+let _installView = null;
+
+function installCurrent(view) {
+  return !!view && _installView === view && !$("#mcp-install-panel").hidden
+    && $("#mcp-gh-url").value.trim() === view.url;
+}
+
+function invalidateInstallView() {
+  _stopPolling();
+  _installView?.controller?.abort();
+  _installView = null;
+  _activeJobId = null;
+  $("#mcp-install-confirm").disabled = true;
+  $("#mcp-install-btn").disabled = false;
+  $("#mcp-install-panel").hidden = true;
+}
 
 // Pipeline visible: cada paso se marca al pasar.
 const STEPS = [
@@ -304,7 +320,7 @@ function _renderSteps(currentState) {
   }).join("");
 }
 
-function _renderJob(job) {
+function _renderJob(job, preserveProposal = false) {
   $("#mcp-install-panel").hidden = false;
   $("#mcp-job-id").textContent = job.id || "";
   $("#mcp-job-state").innerHTML = _stateBadge(job.state);
@@ -332,13 +348,15 @@ function _renderJob(job) {
   $("#mcp-vet-report").textContent = job.vet_report || "—";
 
   const prop = job.proposal || {};
-  $("#mcp-prop-cmd").value = prop.command || "";
-  $("#mcp-prop-args").value = prop.args && prop.args.length
-    ? JSON.stringify(prop.args) : "";
-  const caps = ["browser","db","docs","github","aws","files"];
-  $("#mcp-prop-cap").value = caps.includes(prop.capability)
-    ? prop.capability : "browser";
-  $("#mcp-prop-name").value = prop.name || "";
+  if (!preserveProposal) {
+    $("#mcp-prop-cmd").value = prop.command || "";
+    $("#mcp-prop-args").value = prop.args && prop.args.length
+      ? JSON.stringify(prop.args) : "";
+    const caps = ["browser","db","docs","github","aws","files"];
+    $("#mcp-prop-cap").value = caps.includes(prop.capability)
+      ? prop.capability : "browser";
+    $("#mcp-prop-name").value = prop.name || "";
+  }
 
   const needsManual = !!prop.needs_manual || (prop.command || "") === "";
   $("#mcp-needs-manual-hint").hidden = !needsManual;
@@ -355,11 +373,14 @@ function _renderJob(job) {
   return ready;
 }
 
-async function _pollJob() {
-  if (!_activeJobId) return;
+async function _pollJob(view = _installView) {
+  if (!installCurrent(view) || !view.jobId || view.controller) return;
+  const jobId = view.jobId, controller = view.controller = new AbortController();
   try {
-    const job = await api(`mcp/install/${_activeJobId}`);
-    const ready = _renderJob(job);
+    const job = await api(`mcp/install/${jobId}`, {signal:controller.signal});
+    if (!installCurrent(view) || job.id !== jobId) return;
+    view.job = job;
+    const ready = _renderJob(job, view.proposalDirty);
 
     if (ready || TERMINAL.has(job.state)) {
       _stopPolling();
@@ -375,16 +396,24 @@ async function _pollJob() {
       }
     }
   } catch (e) {
-    _stopPolling();
-    toast("Job expiró (¿se reinició el relay?). Reintenta.", "err");
+    if (!installCurrent(view)) return;
+    $("#mcp-install-confirm").disabled = true;
+    $("#mcp-install-msg").textContent = "No se pudo confirmar el estado de esta tarea. "
+      + (e.status === 404 ? "Ya no está disponible; no se repitió la instalación. "
+        : "Se volverá a consultar la misma tarea. ") + e.message;
+    if (e.status === 404) _stopPolling();
+  } finally {
+    if (view.controller === controller) view.controller = null;
   }
 }
 
-function _startPolling(jobId) {
+function _startPolling(jobId, view = _installView) {
+  if (!installCurrent(view)) return;
   _stopPolling();
   _activeJobId = jobId;
-  _pollHandle = registerPoller(_pollJob, 800, { tabId: "mcp" });
-  _pollJob();
+  view.jobId = jobId;
+  _pollHandle = registerPoller(() => _pollJob(view), 800, { tabId: "mcp" });
+  _pollJob(view);
 }
 
 function _stopPolling() {
@@ -397,6 +426,8 @@ function _stopPolling() {
 async function mcpInstallStart() {
   const url = $("#mcp-gh-url").value.trim();
   if (!url) { toast("Pega una URL de GitHub", "err"); return; }
+  invalidateInstallView();
+  const view = _installView = {url,jobId:null,job:null,controller:null,confirming:false,proposalDirty:false};
   $("#mcp-install-btn").disabled = true;
   $("#mcp-install-panel").hidden = false;
   $("#mcp-install-msg").textContent = "clonando + veteando…";
@@ -404,20 +435,23 @@ async function mcpInstallStart() {
     const r = await api("mcp/install", {
       method: "POST", body: JSON.stringify({ url }),
     });
+    if (!installCurrent(view)) return;
     if (r.error) {
       $("#mcp-install-msg").textContent = "Error: " + r.error;
       return;
     }
-    _startPolling(r.job_id);
+    _startPolling(r.job_id, view);
   } catch (e) {
+    if (!installCurrent(view)) return;
     $("#mcp-install-msg").textContent = "Error: " + e.message;
   } finally {
-    $("#mcp-install-btn").disabled = false;
+    if (installCurrent(view)) $("#mcp-install-btn").disabled = false;
   }
 }
 
 async function mcpInstallConfirm() {
-  if (!_activeJobId) return;
+  const view = _installView, jobId = view?.jobId;
+  if (!installCurrent(view) || !jobId || view.job?.state !== "awaiting_confirm" || view.confirming) return;
   let args;
   try {
     args = _parseJsonField("#mcp-prop-args", "args", []);
@@ -431,12 +465,14 @@ async function mcpInstallConfirm() {
     capability: $("#mcp-prop-cap").value,
     name: $("#mcp-prop-name").value.trim() || undefined,
   };
+  view.confirming = true;
   $("#mcp-install-confirm").disabled = true;
   $("#mcp-install-msg").textContent = "instalando + handshake…";
   try {
-    const r = await api(`mcp/install/${_activeJobId}/confirm`, {
+    const r = await api(`mcp/install/${jobId}/confirm`, {
       method: "POST", body: JSON.stringify(override),
     });
+    if (!installCurrent(view)) return;
     // Ojo: el job trae `error` como parte de su estado (p.ej.
     // handshake_failed) — solo es error de request si NO hay `state`.
     if (r.error && !r.state) {
@@ -444,23 +480,24 @@ async function mcpInstallConfirm() {
       $("#mcp-install-confirm").disabled = false;
       return;
     }
-    _startPolling(r.id || _activeJobId);
+    _startPolling(jobId, view);
   } catch (e) {
-    $("#mcp-install-msg").textContent = "Error: " + e.message;
-    $("#mcp-install-confirm").disabled = false;
+    if (!installCurrent(view)) return;
+    $("#mcp-install-msg").textContent = "No se confirmó el resultado. Consultando la misma tarea: " + e.message;
+    _startPolling(jobId, view);
+  } finally {
+    view.confirming = false;
   }
 }
 
 function mcpInstallDiscard() {
-  _stopPolling();
-  _activeJobId = null;
-  $("#mcp-install-panel").hidden = true;
+  invalidateInstallView();
   toast("Job liberado de la UI (sigue en el relay hasta que expire)",
         "info");
 }
 
 function mcpInstallClose() {
-  $("#mcp-install-panel").hidden = true;
+  invalidateInstallView();
 }
 
 // ---------- conexiones SQL (2026-08-16) ----------
@@ -628,6 +665,9 @@ export function initMcp() {
   onClick("#mcp-install-confirm", mcpInstallConfirm);
   onClick("#mcp-install-discard", mcpInstallDiscard);
   onClick("#mcp-install-close", mcpInstallClose);
+  $("#mcp-gh-url")?.addEventListener("input", invalidateInstallView);
+  ["#mcp-prop-cmd", "#mcp-prop-args", "#mcp-prop-cap", "#mcp-prop-name"].forEach(selector =>
+    $(selector)?.addEventListener("input", () => { if (_installView) _installView.proposalDirty = true; }));
   onClick("#db-refresh", loadDbConns);
   onClick("#db-save", dbSave);
 }

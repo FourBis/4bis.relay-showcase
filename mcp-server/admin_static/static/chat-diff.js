@@ -161,7 +161,16 @@ const S = {
   mode: "all", ctx: 3, split: false, wrap: false,
   rows: [], sel: -1, filtro: "", seen: new Set(),
   cache: new Map(), meta: null,
+  generation:0, readGeneration:0, readController:null,
 };
+
+function invalidateDiffRead() {
+  ++S.readGeneration; S.readController?.abort(); S.readController = null;
+}
+
+function diffCacheKey(fila, conv = S.conv, mode = S.mode, context = S.ctx) {
+  return JSON.stringify([conv,mode,context,fila.path,fila.old_path || ""]);
+}
 
 const MODOS = [
   ["all", "Todo", "merge-base → working tree: lo que va a quedar en el PR"],
@@ -175,6 +184,13 @@ const TITULO_ESTADO = { A: "agregado", D: "borrado", M: "modificado",
 
 /** Abre el visor para la conversación `meta` (`{id, branch}`). */
 export function openConvDiff(meta) {
+  ++S.generation; invalidateDiffRead();
+  const modal = document.getElementById("diff-modal");
+  if (modal && !modal.dataset.diffReadsWired) {
+    modal.dataset.diffReadsWired = "1";
+    modal.addEventListener("click", event => { if (event.target.closest("[data-close]")) invalidateDiffRead(); }, true);
+    document.addEventListener("keydown", event => { if (event.key === "Escape" && modal.classList.contains("open")) invalidateDiffRead(); }, true);
+  }
   inyectarCss();
   const otraConv = S.conv !== (meta && meta.id);
   S.conv = meta && meta.id;
@@ -196,9 +212,9 @@ export function openConvDiff(meta) {
   });
 }
 
-function pedirLista(mode) {
+function pedirLista(mode, conv = S.conv) {
   return apiRoot(
-    `/conversations/${encodeURIComponent(S.conv)}/diff?view=files`
+    `/conversations/${encodeURIComponent(conv)}/diff?view=files`
     + `&mode=${encodeURIComponent(mode)}`, null, 60_000);
 }
 
@@ -561,33 +577,41 @@ async function seleccionar(i) {
   const fila = S.rows[i];
   if (!fila) return;
   S.sel = i;
+  invalidateDiffRead();
+  const generation = S.generation, request = S.readGeneration, conv = S.conv, mode = S.mode, context = S.ctx;
   const raiz = document.querySelector("#diff-modal-body .cdv");
   if (!raiz) return;
+  const current = () => generation === S.generation && request === S.readGeneration
+    && conv === S.conv && mode === S.mode && context === S.ctx && S.sel === i && S.rows[i] === fila
+    && document.getElementById("diff-modal")?.classList.contains("open")
+    && document.querySelector("#diff-modal-body .cdv") === raiz;
   raiz.querySelectorAll(".cdv-fila").forEach((el) =>
     el.classList.toggle("sel", Number(el.dataset.i) === i));
   raiz.querySelector(`.cdv-fila[data-i="${i}"]`)
     ?.scrollIntoView({ block: "nearest" });
   const vista = raiz.querySelector(".cdv-vista");
-  const clave = `${S.mode}|${S.ctx}|${fila.path}`;
+  const clave = diffCacheKey(fila,conv,mode,context);
   if (S.cache.has(clave)) {
     vista.innerHTML = renderArchivo(fila, S.cache.get(clave));
     vista.scrollTop = 0;
     return;
   }
   vista.innerHTML = `<p class="cdv-nada muted">cargando ${escape(fila.path)}…</p>`;
+  const controller = new AbortController(); S.readController = controller;
   try {
     const datos = await apiRoot(
-      `/conversations/${encodeURIComponent(S.conv)}/diff`
-      + `?path=${encodeURIComponent(fila.path)}&mode=${S.mode}&context=${S.ctx}`
+      `/conversations/${encodeURIComponent(conv)}/diff`
+      + `?path=${encodeURIComponent(fila.path)}&mode=${mode}&context=${context}`
       // El origen de un rename va en el pathspec o git lo muestra como
       // alta completa: la detección corre después de limitar por path.
       + (fila.old_path ? `&old=${encodeURIComponent(fila.old_path)}` : ""),
-      null, 60_000);
+      {signal:controller.signal}, 60_000);
+    if (!current()) return;
     S.cache.set(clave, datos);
-    if (S.sel !== i) return;                    // el humano ya saltó a otro
     vista.innerHTML = renderArchivo(fila, datos);
     vista.scrollTop = 0;
   } catch (e) {
+    if (!current() || e.name === "AbortError") return;
     vista.innerHTML = `<p class="cdv-nada fail">no pude traer el diff: ${
       escape(e.message)}</p>`;
   }
@@ -641,6 +665,9 @@ function seleccionados() {
 }
 
 async function accion(act, raiz) {
+  const generation = S.generation, conv = S.conv;
+  const correrAqui = (action, body) => generation === S.generation && conv === S.conv
+    && document.querySelector("#diff-modal-body .cdv") === raiz ? correr(action, body) : null;
   const fila = S.rows[S.sel];
   switch (act) {
     case "recargar":
@@ -691,7 +718,7 @@ async function accion(act, raiz) {
       const paths = todo ? [] : seleccionados();
       if (!todo && !paths.length)
         return msg("marcá los archivos con el check, o volvé a 'todos'", "err");
-      const r = await correr("commit", { message, paths });
+      const r = await correrAqui("commit", { message, paths });
       if (r) {
         caja.hidden = true;
         toast(`commit ${r.sha} (${r.files} archivo${r.files === 1 ? "" : "s"}) ✓`, "ok");
@@ -700,12 +727,12 @@ async function accion(act, raiz) {
       return;
     }
     case "push": {
-      const r = await correr("push", {});
+      const r = await correrAqui("push", {});
       if (r) { toast(`push de ${S.branch} ✓`, "ok"); recargarSuave(); }
       return;
     }
     case "pr": {
-      const r = await correr("pr", { title: `${S.branch}: cambios del hilo` });
+      const r = await correrAqui("pr", { title: `${S.branch}: cambios del hilo` });
       if (r) {
         S.prUrl = r.pr_url;
         toast(r.created ? `PR abierto: ${r.pr_url}` : `PR ya existía: ${r.pr_url}`, "ok");
@@ -723,12 +750,12 @@ async function accion(act, raiz) {
         cancelText: "Volver",
         danger: true,
       })) return;
-      const r = await correr("merge", { method: "squash" });
+      const r = await correrAqui("merge", { method: "squash" });
       if (r) { toast(`PR mergeado a develop ✓`, "ok"); recargarSuave(); }
       return;
     }
     case "sync": {
-      const r = await correr("sync-base", {});
+      const r = await correrAqui("sync-base", {});
       if (r) {
         toast(r.behind ? `base ${r.base} adelantada ${r.behind} commit(s) ✓`
                        : `base ${r.base} ya estaba al día`, "ok");
@@ -749,7 +776,7 @@ async function accion(act, raiz) {
         cancelText: "Volver",
         danger: true,
       })) return;
-      const r = await correr("restore", { paths: [fila.path] });
+      const r = await correrAqui("restore", { paths: [fila.path] });
       if (r) { toast(`${fila.path} vuelto a HEAD ✓`, "ok"); recargarSuave(); }
       return;
     }
@@ -760,22 +787,30 @@ async function accion(act, raiz) {
 
 function repintar(fila) {
   const vista = document.querySelector("#diff-modal-body .cdv-vista");
-  const datos = S.cache.get(`${S.mode}|${S.ctx}|${fila.path}`);
+  const datos = S.cache.get(diffCacheKey(fila));
   if (vista && datos) vista.innerHTML = renderArchivo(fila, datos);
 }
 
 /** POST a /conversations/{id}/git/{accion}. Devuelve el payload o null. */
 async function correr(accion_, body) {
+  const generation = S.generation, conv = S.conv;
+  const root = document.querySelector("#diff-modal-body .cdv");
+  const current = () => generation === S.generation && conv === S.conv
+    && document.getElementById("diff-modal")?.classList.contains("open")
+    && document.querySelector("#diff-modal-body .cdv") === root;
+  if (!current()) return null;
   msg(`${accion_}…`);
   const botones = document.querySelectorAll("#diff-modal-body .cdv-btn");
   botones.forEach((b) => { b.disabled = true; });
   try {
     const r = await apiRoot(
-      `/conversations/${encodeURIComponent(S.conv)}/git/${accion_}`,
+      `/conversations/${encodeURIComponent(conv)}/git/${accion_}`,
       { method: "POST", body: body || {} }, 180_000);
+    if (!current()) return null;
     msg("");
     return r;
   } catch (e) {
+    if (!current()) return null;
     msg(e.message, "err");
     toast(`git ${accion_}: ${e.message}`, "err");
     return null;
@@ -788,10 +823,16 @@ async function correr(accion_, body) {
 async function recargarSuave() {
   const raiz = document.querySelector("#diff-modal-body .cdv");
   if (!raiz) return;
+  invalidateDiffRead();
+  const generation = S.generation, request = S.readGeneration, conv = S.conv, mode = S.mode, context = S.ctx;
+  const current = () => generation === S.generation && request === S.readGeneration && conv === S.conv
+    && mode === S.mode && context === S.ctx && document.querySelector("#diff-modal-body .cdv") === raiz
+    && document.getElementById("diff-modal")?.classList.contains("open");
   const abierto = S.rows[S.sel]?.path;
   S.cache.clear();
   try {
-    const r = await pedirLista(S.mode);
+    const r = await pedirLista(mode,conv);
+    if (!current()) return;
     S.prUrl = r.pr_url || null;
     cargarFilas(r);
     const top = raiz.querySelector(".cdv-ident");
@@ -806,6 +847,7 @@ async function recargarSuave() {
     else raiz.querySelector(".cdv-vista").innerHTML =
       `<div class="cdv-vacio muted">Ya no quedan cambios en este modo.</div>`;
   } catch (e) {
+    if (!current()) return;
     msg("no pude recargar la lista: " + e.message, "err");
   }
 }

@@ -2,7 +2,7 @@
 
 import { $, $$, apiRoot, escape, formatElapsed, _dbg, openProjectInVSCode, onClick } from "./api.js";
 import { statusBadge, modalLoad, isModalOpen, closeModal, confirmModal, toast } from "./ui.js";
-import { dtView } from "./ui-table.js";
+import { dtView, updateTablePager } from "./ui-table.js";
 import { viewChat } from "./tab-chats.js";
 import { showChatLogs } from "./tab-logs.js";
 import { updateRunningBadge } from "./tab-status.js";
@@ -12,6 +12,7 @@ import { updateRunningBadge } from "./tab-status.js";
 // on-click). Default: inicio descendente (lo más nuevo arriba).
 const _PAGE_SIZE = 25;
 const _runState = { sortKey: 0, sortDir: "desc", page: 0 };
+let _runGeneration = 0;
 const _RUN_COLUMNS = [
   { key: "started_at", label: "inicio", className: "whitespace-nowrap",
     value: (c) => c.started_at || "" },
@@ -32,6 +33,7 @@ const _RUN_COLUMNS = [
 
 // Refresco on-demand (decisión del usuario: sin auto-polling).
 export async function loadRunning() {
+  const generation = ++_runGeneration;
   const limit = $("#running-limit").value;
   const includeFinished = $("#running-include-finished").checked;
   _dbg("loadRunning start", { limit, includeFinished });
@@ -39,6 +41,7 @@ export async function loadRunning() {
   // terminados, segundo fetch con status=ok filtrado client-side (≤ 30s).
   try {
     const r = await apiRoot(`/chats?status=running&limit=${limit}`);
+    if (generation !== _runGeneration) return;
     _dbg("loadRunning fetch1 ok", "chats count:", r.chats?.length);
     let rows = r.chats || [];
     if (includeFinished) {
@@ -56,6 +59,10 @@ export async function loadRunning() {
       }
     }
     rows.sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""));
+    if (generation !== _runGeneration) return;
+    const view = dtView(_RUN_COLUMNS, {..._runState,rows,query:""}, _PAGE_SIZE);
+    _runState.page = view.page;
+    updateTablePager($("#running-table"), view, page => { _runState.page = page; return loadRunning(); });
     $("#running-summary").textContent = `${rows.length} en curso`;
     const tbody = $("#running-table tbody");
     if (!rows.length) {
@@ -68,13 +75,7 @@ export async function loadRunning() {
     $("#running-empty").hidden = true;
     // dtView filter+sort+paginate (sin input de búsqueda: el shell ya
     // existe y no queremos pisar el toolbar del usuario con un .dt-search).
-    const { slice } = dtView(_RUN_COLUMNS, {
-      rows,
-      query: "",
-      sortKey: _runState.sortKey,
-      sortDir: _runState.sortDir,
-      page: _runState.page,
-    }, rows.length > _PAGE_SIZE ? _PAGE_SIZE : 0);
+    const { slice } = view;
     tbody.innerHTML = slice.map((c) => {
       const elapsed = formatElapsed(c.started_at);
       const phase = c.status === "running"
@@ -123,6 +124,8 @@ export async function loadRunning() {
     updateRunningBadge(rows.filter((c) => c.status === "running").length);
     _dbg("loadRunning done (rendered)");
   } catch (e) {
+    if (generation !== _runGeneration) return;
+    updateTablePager($("#running-table"), {page:0,pages:1,all:[]}, () => {});
     _dbg("loadRunning ERROR", e.message);
     $("#running-summary").textContent = "error: " + e.message;
   }
