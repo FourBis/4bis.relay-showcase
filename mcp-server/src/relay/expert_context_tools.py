@@ -95,7 +95,8 @@ def build_context_tools(*, project, db, chat_id, conversation_id, _is_notes, bit
 
     # Iter 9.8: cbm_query no se adjunta en el workspace de notas.
     if (cbm_runtime.cbm_binary_path() is not None and not _is_notes
-            and not (project.get("defaults_json") or {}).get("task_feedback")):
+            and not (project.get("defaults_json") or {}).get("task_feedback")
+            and not (project.get("defaults_json") or {}).get("mcp_private")):
         # El experto está scopeado a UN proyecto: derivamos el nombre de cbm
         # del repo_path y lo inyectamos en cada query. El LLM NO puede adivinar
         # este nombre (es el path mangleado, ej "C-Users-developer-source-repos-
@@ -202,7 +203,8 @@ def build_context_tools(*, project, db, chat_id, conversation_id, _is_notes, bit
     from . import skills as _skills_mod  # lazy: evita ciclo de imports
     # El repo primero: una skill versionada junto al codigo que describe
     # le gana a la global del mismo nombre (ver `skills.skills_dirs`).
-    _skills_dirs = _skills_mod.skills_dirs(project.get("repo_path") or "")
+    private_consultation = bool((project.get("defaults_json") or {}).get("mcp_private"))
+    _skills_dirs = [] if private_consultation else _skills_mod.skills_dirs(project.get("repo_path") or "")
 
     async def read_skill(name: str) -> str:
         """Lee el cuerpo de una skill por nombre (ej: "ponytail", "4bis-shortcuts").
@@ -269,7 +271,8 @@ def build_context_tools(*, project, db, chat_id, conversation_id, _is_notes, bit
                              skill=name, encontrada=True)
         return content
 
-    tools.append(Tool(read_skill, takes_ctx=False))
+    if not private_consultation:
+        tools.append(Tool(read_skill, takes_ctx=False))
 
     # Cambios sin commitear: antes viajaban SIEMPRE en el system prompt
     # (ADR-020). El bloque cambia en cuanto el experto escribe un

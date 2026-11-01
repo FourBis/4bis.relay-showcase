@@ -30,6 +30,8 @@ class DatabaseCore:
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.create_function("relay_local_timestamp", 2, local_timestamp,
+                             deterministic=True)
         return conn
 
     def _run(self, sql: str, params: tuple = ()) -> list[dict]:

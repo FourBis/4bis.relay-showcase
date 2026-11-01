@@ -98,9 +98,11 @@ def account_tools(project: dict, *, read_only=False):
         from .tools.gmail import GmailReadTool
         return json.dumps(await GmailReadTool().call({"message_id": message_id}), ensure_ascii=False)
 
-    functions = [gmail_read, gmail_message, gmail_prepare]
+    # A project consultation does not inherit unrelated personal mail access.
+    private_consultation = bool((project.get("defaults_json") or {}).get("mcp_private"))
+    functions = [] if private_consultation else [gmail_read, gmail_message, gmail_prepare]
     if repo_path:
         functions += [github_issues, github_issue]
-        if not read_only:
+        if not read_only and not private_consultation:
             functions += [github_create_issue, github_comment, github_create_pr]
     return [Tool(fn, takes_ctx=False) for fn in functions]

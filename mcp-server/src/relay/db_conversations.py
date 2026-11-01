@@ -2,10 +2,87 @@
 from __future__ import annotations
 
 import time
+import json
+import re
+import sqlite3
 import uuid
 from typing import Optional
 
 from .db_support import now_iso
+
+
+_CREATION_CONFLICT = "El identificador de creación pertenece a otro pedido; no se modificó"
+
+# Only a server-stored v2 marker can identify another canonical spelling of
+# the same creation. Legacy conversations never acquire an invented request ID.
+_LOGICAL_CREATION_ROW = (
+    "project_slug=? COLLATE NOCASE AND CASE WHEN json_valid(task_json) THEN "
+    "json_type(task_json,'$.creation_request.version')='integer' AND "
+    "json_extract(task_json,'$.creation_request.version')=2 AND "
+    "json_type(task_json,'$.creation_request.request_id')='text' AND "
+    "json_extract(task_json,'$.creation_request.request_id')=? ELSE 0 END"
+)
+
+
+def _rejection_row(conn, conversation_id, project_slug=None, request_id=None):
+    sql = "SELECT * FROM creation_rejections WHERE conversation_id=?"
+    params = [conversation_id]
+    if project_slug is not None and request_id is not None:
+        sql += " OR (project_slug=? COLLATE NOCASE AND request_id=?)"
+        params.extend((project_slug, request_id))
+    # Older data could contain multiple case aliases: prefer the exact CID,
+    # otherwise the first immutable barrier, never a row selected by its hash.
+    sql += " ORDER BY CASE WHEN conversation_id=? THEN 0 ELSE 1 END,rejected_at,conversation_id LIMIT 1"
+    params.append(conversation_id)
+    return conn.execute(sql, tuple(params)).fetchone()
+
+
+def _rejection_contract(value):
+    if (not isinstance(value, dict) or value.get("version") not in {1, 2}
+            or not isinstance(value.get("request_id"), str)
+            or not 1 <= len(value["request_id"]) <= 128
+            or not isinstance(value.get("payload_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", value["payload_sha256"])):
+        raise ValueError("Contrato de creación no verificable")
+    return {key: value[key] for key in ("version", "request_id", "payload_sha256")}
+
+
+def _rejection_actor(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Actor de creación no verificable")
+    return value.strip().lower()
+
+
+def _require_rejection_scope(conn, actor, project_slug):
+    """Only an active chat actor can seal/read its own request proof.
+
+    Existing policy permits a personal read-only consultation without project
+    write assignment. Sealing must not impose a new assignment gate or grant
+    access to a row: reconciliation has its own control ACL, proof delivery
+    checks the original actor/hash, and creation revalidates permissions.
+    """
+    from .conversation_access import user_tx
+    user = user_tx(conn, actor)
+    if not user or user["role"] not in {"owner", "member", "subadmin"}:
+        raise PermissionError("Creación no disponible para esta cuenta")
+
+
+def _rejection_proof(row, *, actor, project_slug=None, creation_contract=None):
+    """Return only the immutable public identity, never actor, input or error text."""
+    if row is None:
+        return None
+    if (row["requested_by"] != actor
+            or (project_slug is not None and row["project_slug"].casefold() != project_slug.casefold())
+            or (creation_contract is not None and any(
+                row[column] != creation_contract[key]
+                for key, column in (("version", "contract_version"),
+                                    ("request_id", "request_id"),
+                                    ("payload_sha256", "payload_sha256"))))):
+        raise ValueError(_CREATION_CONFLICT)
+    return {"version": row["contract_version"], "state": "rejected",
+            "conversation_id": row["conversation_id"], "project_slug": row["project_slug"],
+            "request_id": row["request_id"], "payload_sha256": row["payload_sha256"],
+            "rejected_at": row["rejected_at"]}
 
 
 _AUTOCLOSE_ELIGIBLE = (
@@ -18,6 +95,7 @@ _AUTOCLOSE_ELIGIBLE = (
     "LEFT JOIN chats h ON h.id=q.chat_id WHERE q.status='open' "
     "AND (q.conversation_id=c.id OR h.conversation_id=c.id))"
 )
+
 
 class DatabaseConversationsMixin:
 
@@ -66,21 +144,137 @@ class DatabaseConversationsMixin:
         discord_author: Optional[str] = None,
         requested_by: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        initial_task: Optional[dict] = None,
     ) -> str:
         """Crea conversación. Iter 10.0: si viene de Discord, persistir
         discord_user_id + discord_author para que la UI pueda mandar
         replies de vuelta al autor."""
         conv_id = conversation_id or str(uuid.uuid4())
+        if initial_task is not None and not isinstance(initial_task, dict):
+            raise ValueError("initial_task debe ser un objeto del servidor")
         ts = now_iso()
-        await self.run(
-            "INSERT INTO conversations (id, project_slug, discord_thread_id, "
-            "discord_user_id, discord_author, status, started_at, "
-            "last_activity_at, author, branch, requested_by, task_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (conv_id, project_slug, discord_thread_id, discord_user_id,
-             discord_author, "open", ts, ts, author, branch, requested_by, "{}"),
-        )
+        task_json = json.dumps(initial_task or {}, ensure_ascii=False)
+        origin = (initial_task or {}).get("creation_request")
+        logical_contract = (_rejection_contract(origin)
+                            if isinstance(origin, dict) and origin.get("version") == 2 else None)
+        def work():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rejected = _rejection_row(conn, conv_id, project_slug,
+                                           logical_contract["request_id"] if logical_contract else None)
+                if rejected is not None:
+                    from .conversation_creation import CreationRejected
+                    requested_contract = _rejection_contract((initial_task or {}).get("creation_request"))
+                    actor = _rejection_actor(requested_by)
+                    _require_rejection_scope(conn, actor, project_slug)
+                    proof = _rejection_proof(
+                        rejected, actor=actor, project_slug=project_slug,
+                        creation_contract=requested_contract)
+                    raise CreationRejected(proof)
+                if logical_contract and conn.execute(
+                    f"SELECT 1 FROM conversations WHERE {_LOGICAL_CREATION_ROW} LIMIT 1",
+                    (project_slug, logical_contract["request_id"]),
+                ).fetchone():
+                    # A case-alias producer may have a different deterministic
+                    # CID. The route must reconcile the actual row under ACL.
+                    raise sqlite3.IntegrityError("La solicitud de creación ya tiene una conversación")
+                conn.execute(
+                    "INSERT INTO conversations (id, project_slug, discord_thread_id, "
+                    "discord_user_id, discord_author, status, started_at, "
+                    "last_activity_at, author, branch, requested_by, task_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (conv_id, project_slug, discord_thread_id, discord_user_id,
+                     discord_author, "open", ts, ts, author, branch, requested_by, task_json))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        await self._in_thread(work)
         return conv_id
+
+    async def get_creation_rejection(
+        self, conversation_id: str, *, requested_by: str,
+        project_slug: Optional[str] = None, creation_contract: Optional[dict] = None,
+        request_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Read terminal pre-row proof for its actor; absence is not rejection proof."""
+        actor = _rejection_actor(requested_by)
+        expected = _rejection_contract(creation_contract) if creation_contract is not None else None
+        if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 128):
+            raise ValueError("Identidad de creación no verificable")
+        if expected:
+            if request_id is not None and request_id != expected["request_id"]:
+                raise ValueError(_CREATION_CONFLICT)
+            request_id = expected["request_id"]
+        if project_slug is not None and (not isinstance(project_slug, str) or not project_slug):
+            raise ValueError("Identidad de creación no verificable")
+        def work():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN")
+                row = _rejection_row(conn, conversation_id, project_slug, request_id)
+                _require_rejection_scope(conn, actor, project_slug or (row["project_slug"] if row else None))
+                proof = _rejection_proof(row, actor=actor, project_slug=project_slug, creation_contract=expected)
+                conn.commit()
+                return proof
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        return await self._in_thread(work)
+
+    async def reject_creation(
+        self, *, project_slug: str, conversation_id: str, requested_by: str,
+        creation_contract: dict,
+    ) -> Optional[dict]:
+        """Prove a settled validation rejection iff no conversation won the race.
+
+        The rejection and every subsequent conversation INSERT exclude each other
+        under SQLite's write lock. A late producer cannot create the rejected ID.
+        None means a row already exists and must be reconciled, never a safe retry.
+        """
+        expected = _rejection_contract(creation_contract)
+        actor = _rejection_actor(requested_by)
+        if (not isinstance(project_slug, str) or not project_slug
+                or conversation_id != str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"relay:{project_slug}:{expected['request_id']}"))):
+            raise ValueError("Identidad de creación no verificable")
+        def work():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                _require_rejection_scope(conn, actor, project_slug)
+                if conn.execute(
+                    f"SELECT 1 FROM conversations WHERE id=? OR ({_LOGICAL_CREATION_ROW}) LIMIT 1",
+                    (conversation_id, project_slug, expected["request_id"]),
+                ).fetchone():
+                    conn.commit()
+                    return None
+                row = _rejection_row(conn, conversation_id, project_slug, expected["request_id"])
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO creation_rejections "
+                        "(conversation_id,project_slug,requested_by,contract_version,request_id,payload_sha256,rejected_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (conversation_id, project_slug, actor, expected["version"], expected["request_id"],
+                         expected["payload_sha256"], now_iso()))
+                    row = conn.execute(
+                        "SELECT * FROM creation_rejections WHERE conversation_id=?", (conversation_id,)
+                    ).fetchone()
+                proof = _rejection_proof(row, actor=actor, project_slug=project_slug,
+                                         creation_contract=expected)
+                conn.commit()
+                return proof
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        return await self._in_thread(work)
 
     async def get_open_conversation_for_workspace(self, project: dict) -> Optional[dict]:
         from .coordination import workspace_key
@@ -89,6 +283,9 @@ class DatabaseConversationsMixin:
             "ON p.slug=c.project_slug COLLATE NOCASE WHERE c.status='open' "
             "AND COALESCE(json_extract(c.task_json, '$.workspace_path'), '') = '' "
             "AND COALESCE(json_extract(c.task_json, '$.creation_failed'), 0) = 0 "
+            "AND COALESCE(json_extract(c.task_json, '$.mcp_private'), 0) = 0 "
+            "AND COALESCE(json_extract(c.task_json, '$.media_only'), 0) = 0 "
+            "AND COALESCE(json_extract(c.task_json, '$.no_checkout'), 0) = 0 "
             "AND COALESCE(json_extract(c.task_json, '$.mode'), '') <> 'external_pr' "
             "ORDER BY c.started_at DESC")
         key = workspace_key(project)
@@ -104,7 +301,8 @@ class DatabaseConversationsMixin:
         mismo repo (un solo working tree → pelearían por la rama activa)."""
         rows = await self.run(
             "SELECT * FROM conversations WHERE project_slug=? COLLATE NOCASE "
-            "AND status='open' AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
+            "AND status='open' AND COALESCE(json_extract(task_json, '$.mcp_private'), 0) = 0 "
+            "AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
             "ORDER BY started_at DESC LIMIT 1",
             (project_slug,))
         return rows[0] if rows else None
@@ -326,7 +524,6 @@ class DatabaseConversationsMixin:
         return await self.run(
             "SELECT c.id, c.project_slug, c.messages_json, c.requested_by FROM conversations c "
             f"WHERE {_AUTOCLOSE_ELIGIBLE}", (cutoff,))
-
 
     async def close_stale_conversation(self, conv_id: str, hours: float) -> bool:
         """Revalida al cerrar: una pregunta o grafo nuevos ganan al temporizador."""

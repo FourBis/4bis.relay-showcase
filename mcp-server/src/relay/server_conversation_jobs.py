@@ -59,7 +59,7 @@ async def _finalize_pr_bg_bound(db: Database, conv_id: str, project_slug: str,
     # Horas del PR (2026-08-31): el tiempo de USO —la suma de lo que
     # duraron los runs—, no el reloj de pared de la conversación. Es el
     # mismo número que muestra el chip ⏱ del header, y el único con
-    # sentido para "cuánto llevó esto": medido sobre `un run de ejemplo`, la
+    # sentido para "cuánto llevó esto": medido sobre `50379bac`, la
     # pared decía 16h16 y el trabajo real fueron 2h49.
     #
     # En su propio try porque acá todavía no entramos al `try` grande:
@@ -139,7 +139,7 @@ async def _finalize_pr_bg(db: Database, conv_id: str, project_slug: str,
 
 
 async def _compact_and_store(db: Database, conv_id: str,
-                             project_slug: str, messages_json: str) -> None:
+                             project_slug: str, messages_json: str, *, actor=None) -> None:
     """Compacta una conversación cerrada → summary + facts + FTS5.
 
     Best-effort total (ADR-026): si el compactador falla, la
@@ -148,24 +148,29 @@ async def _compact_and_store(db: Database, conv_id: str,
     Guard anti-doble-gasto: dos /close casi simultáneos (o /close +
     sweeper) compactarían dos veces — el segundo se saltea.
     """
+    source = await db.knowledge_source(conv_id, project_slug, actor=actor, permission="control")
+    if source is None:
+        return  # Unknown/private/revoked origins never feed reusable knowledge.
+    messages_json = source.get("messages_json") or ""
     if conv_id in _COMPACTING:
         logger.info("compactación conv=%s ya en curso, salteo", conv_id[:8])
         return
     _COMPACTING.add(conv_id)
     try:
         # Hechos vigentes → el compactador detecta obsoletos y no duplica.
-        existing_facts = await db.list_facts(project_slug, limit=100)
-        result = await memory.compact_conversation(
-            messages_json, existing_facts=existing_facts)
+        existing_facts = await db.list_facts(project_slug, limit=100, actor=actor, source_conversation=conv_id)
+        from . import user_accounts
+        with user_accounts.bind_actor(db, actor):
+            result = await memory.compact_conversation(
+                messages_json, existing_facts=existing_facts)
         if result is None:
             logger.info("compactación conv=%s: transcript vacío, salteo",
                         conv_id[:8])
             return
         if result.summary.strip():
-            await db.set_conversation_summary(conv_id, result.summary)
-            await db.add_memory(conv_id, project_slug, result.summary)
+            await db.add_memory(conv_id, project_slug, result.summary, actor=actor)
         n_facts = await db.add_facts(
-            project_slug, result.facts, source_conversation=conv_id)
+            project_slug, result.facts, source_conversation=conv_id, actor=actor)
         # Supersede soft: solo ids que realmente le mostramos (el LLM no
         # puede invalidar hechos fuera de su vista).
         shown_ids = {f["id"] for f in existing_facts}
@@ -173,18 +178,19 @@ async def _compact_and_store(db: Database, conv_id: str,
         n_superseded = 0
         if obsolete:
             n_superseded = await db.supersede_facts(
-                obsolete, project_slug, superseded_by=conv_id)
+                obsolete, project_slug, superseded_by=conv_id, actor=actor)
         # Autoaprendizaje (2026-07-12): si el compactador destiló un
         # procedimiento reusable, queda como BORRADOR pendiente de
         # aprobación en la Admin UI (tab Skills). Nunca se instala solo.
         draft_id = None
-        if result.skill is not None and result.skill.content.strip():
+        if (result.skill is not None and result.skill.content.strip()
+                and await db.knowledge_source(conv_id, project_slug, actor=actor, permission="control")):
             draft_id = await db.add_skill_draft(
                 name=result.skill.name,
                 description=result.skill.description,
                 content=result.skill.content,
                 project_slug=project_slug,
-                source_conversation=conv_id)
+                source_conversation=conv_id, actor=actor)
         logger.info(
             "compactación conv=%s ok: summary=%d chars, facts=%d, "
             "superseded=%d%s",
@@ -221,8 +227,8 @@ async def _autoclose_sweeper(app: web.Application) -> None:
     """Cierra conversaciones abiertas sin actividad > N horas y las
     compacta (ADR-025). N = FOURBIS_CONV_AUTOCLOSE_H (default 24).
 
-    El cierre revalida la inactividad y conserva grafos activos o preguntas
-    abiertas; la consulta previa no autoriza cerrar un estado que ya cambió.
+    No hace falta chequear runs vivos: touch_conversation se llama al
+    INICIO de cada run, y un run dura <= expert_timeout << 24h.
     """
     from . import config as relay_config
     db: Database = app[DB_KEY]
@@ -240,7 +246,7 @@ async def _autoclose_sweeper(app: web.Application) -> None:
                     if conv.get("messages_json"):
                         _spawn_bg(_compact_and_store(
                             db, conv["id"], conv["project_slug"],
-                            conv["messages_json"]))
+                            conv["messages_json"], actor=conv.get("requested_by")))
         except asyncio.CancelledError:
             raise
         except Exception:

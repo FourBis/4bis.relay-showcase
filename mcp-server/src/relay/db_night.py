@@ -11,11 +11,12 @@ class DatabaseNightMixin:
 
     async def create_night_run(
         self, run_id: str, project_slug: str, deadline_at: str,
+        *, requested_by: Optional[str] = None,
     ) -> None:
         await self.run(
             "INSERT INTO night_runs (id, project_slug, started_at, "
-            "deadline_at) VALUES (?,?,?,?)",
-            (run_id, project_slug, now_iso(), deadline_at))
+            "deadline_at, requested_by) VALUES (?,?,?,?,?)",
+            (run_id, project_slug, now_iso(), deadline_at, requested_by))
 
     async def finish_night_run(
         self, run_id: str, *, end_reason: str, prs_opened: int = 0,
@@ -59,7 +60,7 @@ class DatabaseNightMixin:
 
         Ese orden es la razon de ser del scope — una plantilla del
         proyecto TAPA a la global del mismo nombre, que es lo que deja
-        tener una "release" generica y una "release" propia de sample-app.
+        tener una "release" generica y una "release" propia de boxify.
         """
         rows = await self.run(
             "SELECT * FROM night_templates "

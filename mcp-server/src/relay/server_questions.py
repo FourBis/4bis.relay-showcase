@@ -33,6 +33,9 @@ async def _question_graph(db, question):
             if graph:
                 return graph
     cid = question.get("conversation_id")
+    if not cid and question.get("chat_id"):
+        chat = await db.get_chat(question["chat_id"])
+        cid = (chat or {}).get("conversation_id")
     if cid:
         graph = await db.active_task_graph(cid)
         if graph:
@@ -61,36 +64,82 @@ async def expert_question_skip(request: web.Request) -> web.Response:
 # El orchestrator está bloqueado en ask_and_wait() esperando y lo lee
 # en su próximo poll (5s).
 
+def _night_question_access_tx(conn, actor, question, *, write=False, active=False, live_actor=None):
+    """A question, its run and current account belong to one read snapshot."""
+    from .conversation_access import user_tx
+    user = user_tx(conn, actor)
+    if not user:
+        return False
+    if write and active and live_actor != actor:
+        return False
+    if user.get("role") == identity.OWNER_ROLE:
+        return True  # Administrative history access does not reassign the run.
+    run = conn.execute("SELECT requested_by,project_slug FROM night_runs WHERE id=?",
+                       (question.get("run_id") or "",)).fetchone()
+    if not run or not run["requested_by"] or run["requested_by"] != actor:
+        return False
+    project = conn.execute("SELECT slug,enabled,defaults_json FROM projects WHERE slug=? COLLATE NOCASE",
+                           (run["project_slug"],)).fetchone()
+    if not project or not project["enabled"]:
+        return False
+    try:
+        defaults = json.loads(project["defaults_json"] or "{}")
+    except (ValueError, TypeError):
+        return False
+    return bool(isinstance(defaults, dict) and not defaults.get("read_only")
+                and identity.user_can_write_project(user, project["slug"]))
+
+
+async def _night_question_access(request, question, *, write=False):
+    """Keep live write ownership and durable authorization distinct."""
+    from . import conversation_access
+    active = (request.app.get(NIGHT_KEY) or {}).get(question.get("run_id"))
+    live_actor = getattr(active[0], "relay_actor", None) if active else None
+    return await conversation_access.transaction(request.app[DB_KEY], lambda conn:
+        _night_question_access_tx(conn, identity.requester(request), question,
+                                  write=write, active=bool(active), live_actor=live_actor))
+
+
+def _night_question_denied():
+    # Misma respuesta para id ajeno o inexistente: no filtrar su contenido.
+    return web.json_response({"error": "Pregunta no disponible para esta cuenta."}, status=404)
+
 @_require_auth
 async def night_questions_list(request: web.Request) -> web.Response:
-    """GET /admin/api/night/questions?run_id=<id>&only_open=1"""
-    db: Database = request.app[DB_KEY]
+    """GET /admin/api/night/questions: authorize and read in one snapshot."""
+    from . import conversation_access
+    db = request.app[DB_KEY]
     run_id = request.query.get("run_id", "") or None
     only_open = request.query.get("only_open", "0") == "1"
-    rows = await db.list_night_questions(
-        run_id=run_id, only_open=only_open)
-    # Decodificar question_json y answer_json para el cliente.
-    out = []
-    for r in rows:
-        try:
-            q = json.loads(r["question_json"])
-        except (json.JSONDecodeError, TypeError):
-            q = {"_raw": r["question_json"]}
-        try:
-            a = json.loads(r["answer_json"]) if r.get("answer_json") else None
-        except (json.JSONDecodeError, TypeError):
-            a = None
-        out.append({
-            "id": r["id"],
-            "run_id": r["run_id"],
-            "phase": r["phase"],
-            "question": q,
-            "asked_at": r["asked_at"],
-            "answered_at": r.get("answered_at"),
-            "answer": a,
-            "open": r.get("answered_at") is None,
-        })
-    return web.json_response({"questions": out})
+    actor = identity.requester(request)
+    def snapshot(conn):
+        where, params = [], []
+        if run_id:
+            where.append("run_id=?")
+            params.append(run_id)
+        if only_open:
+            where.append("answered_at IS NULL")
+        sql = "SELECT * FROM night_questions" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY asked_at DESC"
+        out = []
+        for row in conn.execute(sql, params):
+            item = dict(row)
+            if not _night_question_access_tx(conn, actor, item):
+                continue
+            try:
+                question = json.loads(item["question_json"])
+            except (ValueError, TypeError):
+                question = {"_raw": item["question_json"]}
+            try:
+                answer = json.loads(item["answer_json"]) if item.get("answer_json") else None
+            except (ValueError, TypeError):
+                answer = None
+            out.append({"id": item["id"], "run_id": item["run_id"], "phase": item["phase"],
+                        "question": question, "asked_at": item["asked_at"],
+                        "answered_at": item.get("answered_at"), "answer": answer,
+                        "open": item.get("answered_at") is None})
+        return out
+    out = await conversation_access.transaction(db, snapshot)
+    return web.json_response({"questions": out}, headers={"Cache-Control": "no-store"})
 
 
 @_require_auth
@@ -102,14 +151,8 @@ async def night_question_answer(request: web.Request) -> web.Response:
     db: Database = request.app[DB_KEY]
     q_id = request.match_info.get("q_id", "")
     existing = await db.get_night_question(q_id)
-    if existing is None:
-        return web.json_response({"error": f"question {q_id!r} desconocida"}, status=404)
-    active = (request.app.get(NIGHT_KEY) or {}).get(existing.get("run_id"))
-    active_actor = getattr(active[0], "relay_actor", None) if active else None
-    if active and active_actor != identity.requester(request):
-        return web.json_response(
-            {"error": "Esta pregunta pertenece a otra persona; inicia un nuevo turno."},
-            status=409)
+    if existing is None or not await _night_question_access(request, existing, write=True):
+        return _night_question_denied()
     try:
         body: dict = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -121,7 +164,10 @@ async def night_question_answer(request: web.Request) -> web.Response:
     if not answer["choice"] and not answer["free_text"]:
         return web.json_response(
             {"error": "choice o free_text requerido"}, status=400)
-    ok = await db.answer_night_question(q_id, answer)
+    try:
+        ok = await db.answer_night_question(q_id, answer, actor=identity.requester(request))
+    except PermissionError:
+        return _night_question_denied()
     if not ok:
         # Ya respondida o no existe — distinguir para el cliente.
         return web.json_response(
@@ -139,7 +185,13 @@ async def night_question_skip(request: web.Request) -> web.Response:
     default de la pregunta. Mismas reglas de idempotencia que /answer."""
     db: Database = request.app[DB_KEY]
     q_id = request.match_info.get("q_id", "")
-    ok = await db.skip_night_question(q_id)
+    existing = await db.get_night_question(q_id)
+    if existing is None or not await _night_question_access(request, existing, write=True):
+        return _night_question_denied()
+    try:
+        ok = await db.skip_night_question(q_id, actor=identity.requester(request))
+    except PermissionError:
+        return _night_question_denied()
     if not ok:
         existing = await db.get_night_question(q_id)
         if existing is None:
@@ -154,24 +206,31 @@ async def night_question_skip(request: web.Request) -> web.Response:
 
 
 # ---- Iter 9.8: canal Discord para checkpoints ----
-# El bot C# hace POST a este endpoint cuando el humano
+# El bot C# (OdyMazo) hace POST a este endpoint cuando el humano
 # clickea un botón de embed (o usa un slash command /day).
-# Mismo primitive que /admin/api/night/questions/<q_id>/answer pero
-# sin auth: el bot corre en localhost, /discord/* es la convención
-# para endpoints de Discord (mismo patrón que la ausencia de auth en
-# /notify). Si algún día se mete auth, aplica a TODAS las rutas /discord/*.
+# Usa el mismo control de actor que Admin. El transporte local del bot
+# no acredita al humano que eligió la respuesta; requiere una sesión
+# personal verificable hasta disponer de un mapping Discord autorizado.
 
 async def discord_day_answer(request: web.Request) -> web.Response:
     """POST /discord/day-answer
     body: {"discord_user_id": str, "run_id": str, "question_id": str,
            "choice": str|null, "free_text": str|null}
-    → guarda la respuesta. El orchestrator (bloqueado en
+    Con identidad personal verificada, guarda la respuesta. El orchestrator (bloqueado en
     _ask_and_wait) la lee en su próximo poll (5s) y sigue.
     Idempotente: si la pregunta ya está respondida → 409 (la primera
     gana, igual que el endpoint admin). Si no existe → 404.
     Si choice y free_text ambos vacíos → 400.
     """
     db: Database = request.app[DB_KEY]
+    # El bot local y sus discord_user_id/run_id del body no acreditan a
+    # la persona que pulsó un botón. No hay mapping durable verificado
+    # Discord→cuenta Relay: hasta tenerlo, decidir desde la sesión personal.
+    if identity.requester(request) in {identity.OWNER, "anonymous", ""}:
+        return web.json_response({
+            "error": "actor_required",
+            "message": "Responde esta pregunta en Relay con tu cuenta; el puente Discord no verifica al actor.",
+        }, status=403)
     try:
         body: dict = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -185,8 +244,15 @@ async def discord_day_answer(request: web.Request) -> web.Response:
     if not choice and not free_text:
         return web.json_response(
             {"error": "choice o free_text requerido"}, status=400)
+    existing = await db.get_night_question(q_id)
+    if (existing is None or body.get("run_id") != existing.get("run_id")
+            or not await _night_question_access(request, existing, write=True)):
+        return _night_question_denied()
     answer = {"choice": choice, "free_text": free_text}
-    ok = await db.answer_night_question(q_id, answer)
+    try:
+        ok = await db.answer_night_question(q_id, answer, actor=identity.requester(request))
+    except PermissionError:
+        return _night_question_denied()
     if not ok:
         existing = await db.get_night_question(q_id)
         if existing is None:
@@ -273,6 +339,8 @@ async def discord_attachments_upload(request: web.Request) -> web.Response:
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
 
+    await request.app[DB_KEY].run("INSERT OR IGNORE INTO attachment_uploaders(attachment_id,actor) VALUES(?,?)",
+                                (attach_id, identity.requester(request)))
     return web.json_response(
         {"id": attach_id,
          "path": str(path).replace("\\", "/"),
@@ -306,11 +374,17 @@ async def discord_attachments_download(request: web.Request) -> web.Response:
         404 -> el id no existe (o no matchea el formato)
     """
     attach_id = request.match_info.get("attach_id", "")
+    from . import conversation_access
+    if not await conversation_access.can_read_attachment(request.app[DB_KEY], identity.requester(request), attach_id):
+        return web.json_response({"error": "Adjunto no disponible"}, status=404)
     path = attachments_mod.resolve(attach_id)
     if path is None:
         return web.json_response(
             {"error": f"attachment {attach_id!r} no encontrado"}, status=404)
-    # Only passive image formats render in the authenticated origin.
+    # Uploaded HTML/SVG/PDF and unknown bytes must never become an active
+    # document in Relay's authenticated origin. Only the passive image types
+    # already supported by the attachment pipeline may render inline. These
+    # headers also cover existing blobs, without changing storage or ACLs.
     image_type = attachments_mod.image_mime(path)
     disposition = "inline" if image_type else "attachment"
     return web.FileResponse(path, headers={

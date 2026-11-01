@@ -37,6 +37,7 @@ def _steps_from_progress(raw: str | None) -> list[dict]:
         return []
     if not isinstance(events, list):
         return []
+    # Protect legacy records on read; do not rewrite the historical DB rows.
     events = redact_data(events)
     steps: list[dict] = []
     for e in events:
@@ -117,7 +118,7 @@ def _cap_text(s: str, cap: int) -> dict:
     }
 
 
-async def compact_live_conversation(db: Database, conv: dict) -> dict:
+async def compact_live_conversation(db: Database, conv: dict, *, actor=None) -> dict:
     """Compacta un hilo ABIERTO sin cerrarlo (2026-07-22).
 
     Destila el historial a un resumen y lo REEMPLAZA como historial: la
@@ -134,30 +135,37 @@ async def compact_live_conversation(db: Database, conv: dict) -> dict:
     Devuelve {ok, before, after, summary, facts} — el caller reporta.
     """
     conv_id = conv["id"]
+    if actor is None:
+        from . import user_accounts
+        current = user_accounts.current_actor.get()
+        actor = current[1] if current and current[0].db is db else None
+    conv = await db.knowledge_source(conv_id, conv["project_slug"], actor=actor, permission="control")
+    if conv is None:
+        return {"ok": False, "error": "Origen no disponible para compactar"}
     raw = conv.get("messages_json") or ""
     before = await experts.context_usage_db(db, raw)
     if conv_id in _COMPACTING:
         return {"ok": False, "error": "ya hay una compactación en curso"}
     _COMPACTING.add(conv_id)
     try:
-        existing = await db.list_facts(conv["project_slug"], limit=100)
+        existing = await db.list_facts(conv["project_slug"], limit=100, actor=actor, source_conversation=conv_id)
         result = await memory.compact_conversation(raw, existing_facts=existing)
         if result is None or not result.summary.strip():
             return {"ok": False, "error": "el compactador no devolvió resumen"}
         n_facts = await db.add_facts(
-            conv["project_slug"], result.facts, source_conversation=conv_id)
+            conv["project_slug"], result.facts, source_conversation=conv_id, actor=actor)
         shown = {f["id"] for f in existing}
         obsolete = [i for i in result.obsolete_fact_ids if i in shown]
         if obsolete:
             await db.supersede_facts(
-                obsolete, conv["project_slug"], superseded_by=conv_id)
+                obsolete, conv["project_slug"], superseded_by=conv_id, actor=actor)
         # `previous_json` (2026-08-15): la compactación conserva el último
         # turno además del resumen. Sin eso, el turno siguiente arrancaba
         # con la prosa y cero working set — ver la nota en
         # `build_compacted_history`.
         new_json = memory.build_compacted_history(
             result.summary, facts=result.facts, previous_json=raw)
-        await db.save_conversation_messages(conv_id, new_json, expected=raw)
+        await db.save_compacted_history(conv_id, conv["project_slug"], new_json, expected=raw, actor=actor)
         logger.info(
             "compactación en vivo conv=%s: %d → %d chars de historial "
             "(%s → sin usage todavía), facts=%d",

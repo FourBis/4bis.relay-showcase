@@ -142,6 +142,56 @@ CREATE TABLE IF NOT EXISTS conversations (
     requested_by      TEXT,
     task_json         TEXT NOT NULL DEFAULT '{}'
 );
+-- Definitive validation rejection before a conversation row exists. No raw input
+-- or provider/error text; these IDs remain fenced against late concurrent POSTs.
+CREATE TABLE IF NOT EXISTS creation_rejections (
+    conversation_id TEXT PRIMARY KEY,
+    project_slug TEXT NOT NULL,
+    requested_by TEXT NOT NULL COLLATE NOCASE,
+    contract_version INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    rejected_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_creation_rejections_request
+    ON creation_rejections(project_slug COLLATE NOCASE,request_id);
+CREATE TRIGGER IF NOT EXISTS reject_tombstoned_conversation
+BEFORE INSERT ON conversations
+WHEN EXISTS (SELECT 1 FROM creation_rejections WHERE conversation_id=NEW.id)
+BEGIN
+    SELECT RAISE(ABORT, 'El identificador de creación ya fue rechazado');
+END;
+-- Additive trigger also protects an installation with the earlier CID-only
+-- trigger. No unique index is imposed on pre-existing case-alias rejections.
+CREATE TRIGGER IF NOT EXISTS reject_logical_tombstoned_conversation
+BEFORE INSERT ON conversations
+WHEN CASE WHEN json_valid(NEW.task_json) THEN
+    json_type(NEW.task_json,'$.creation_request.version')='integer'
+    AND json_extract(NEW.task_json,'$.creation_request.version')=2
+    AND json_type(NEW.task_json,'$.creation_request.request_id')='text'
+    AND EXISTS (SELECT 1 FROM creation_rejections
+                WHERE project_slug=NEW.project_slug COLLATE NOCASE
+                AND request_id=json_extract(NEW.task_json,'$.creation_request.request_id'))
+    ELSE 0 END
+BEGIN
+    SELECT RAISE(ABORT, 'El identificador de creación ya fue rechazado');
+END;
+CREATE TABLE IF NOT EXISTS conversation_shares (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    email TEXT NOT NULL COLLATE NOCASE REFERENCES users(email),
+    permission TEXT NOT NULL CHECK(permission IN ('read','collaborate')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    PRIMARY KEY(conversation_id,email)
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_email ON conversation_shares(email,revoked_at);
+CREATE TABLE IF NOT EXISTS attachment_uploaders (
+    attachment_id TEXT NOT NULL,
+    actor TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY(attachment_id,actor)
+);
 CREATE TABLE IF NOT EXISTS chat_outputs (
     chat_id TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
     payload TEXT NOT NULL,
@@ -225,6 +275,7 @@ CREATE INDEX IF NOT EXISTS idx_skill_drafts_status
 -- NO en DB (tabla night_tasks diferida hasta que la auditoría duela).
 CREATE TABLE IF NOT EXISTS night_runs (
     id              TEXT PRIMARY KEY,
+    requested_by    TEXT,                       -- actor autenticado; NULL histórico desconocido
     project_slug    TEXT NOT NULL,
     started_at      TEXT NOT NULL,
     deadline_at     TEXT NOT NULL,
@@ -558,6 +609,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL DEFAULT '',
     enabled    INTEGER NOT NULL DEFAULT 1,
     project_slugs_json TEXT NOT NULL DEFAULT '[]',
+    archived_at TEXT,              -- archivo reversible; conserva relaciones
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS github_logins (
