@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from . import github, issue_links
+from . import external_review_store, github, issue_links
 from .task_pr import TaskPRError, now
 from .user_accounts import AccountError
 
@@ -33,6 +33,7 @@ def same_repository(ref, repo_id, canonical):
     return (isinstance(repository, dict) and type(repository.get("id")) is int
             and repository["id"] == repo_id and isinstance(repository.get("full_name"), str)
             and repository["full_name"].casefold() == canonical.casefold())
+
 
 async def _api(endpoint):
     rc, output = await github._gh("api", "--hostname", "github.com", endpoint)
@@ -223,6 +224,8 @@ def _save(conn, task, project=None):
     pr = task["external_pr"]
     closed = pr["state"] in {"CLOSED", "MERGED"}
     stamp = now()
+    if project is not None:
+        external_review_store.enqueue(conn, task, project, task["requested_by"])
     conn.execute("UPDATE conversations SET task_json=?,pr_url=?,last_activity_at=?,status=?,"
                  "closed_at=CASE WHEN ? THEN COALESCE(closed_at,?) ELSE NULL END WHERE id=?",
                  (json.dumps(task, ensure_ascii=False), pr["url"], stamp,
@@ -308,6 +311,7 @@ async def register(db, project, body, who, *, authorize=None):
             await _failed_read(db, json.loads(known[0]["task_json"]), actor)
         raise
     project = await _authorize(project, authorize)
+    await external_review_store.ensure_schema(db)
     cid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"relay:external-pr:{pr['repo_id']}:{pr['number']}"))
     def work(conn):
         linked = conn.execute("SELECT id FROM conversations WHERE lower(rtrim(pr_url,'/'))=lower(?) AND id<>? LIMIT 1",
@@ -342,7 +346,7 @@ async def register(db, project, body, who, *, authorize=None):
                      (cid, project["slug"], "closed" if closed else "open", stamp, stamp,
                       actor["github_login"], who, pr["url"], issue_number, json.dumps(task), title,
                       stamp if closed else None))
-        return snapshot(task)
+        return _save(conn, task, project)
     return await _transaction(db, work)
 
 
@@ -359,6 +363,7 @@ async def refresh(db, project, cid, who, *, authorize=None):
         await _failed_read(db, initial, actor)
         raise
     project = await _authorize(project, authorize)
+    await external_review_store.ensure_schema(db)
     def work(conn):
         task = _load(conn, cid)
         # Optimistic lease across remote I/O: a slower refresh cannot overwrite a newer one.
@@ -376,6 +381,9 @@ async def add_evidence(db, project, cid, body, who, *, authorize=None):
     sha = body.get("head_sha", "")
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         raise ValueError("head_sha debe ser un commit completo")
+    target = body.get("target", "pr")
+    if not isinstance(target, str) or target not in {"pr", "issue"}:
+        raise ValueError("target debe ser pr o issue")
     # Observe the remote head before accepting a new declaration. An idempotent
     # retry of an existing declaration returns its original record, even if stale.
     initial = await db.get_conversation_task(cid)
@@ -391,17 +399,31 @@ async def add_evidence(db, project, cid, body, who, *, authorize=None):
                     raise
     actor = await actor_identity(who)
     project = await _authorize(project, authorize)
+    from . import external_review_publish
+    await external_review_publish.ensure_schema(db)
     def work(conn):
         task = _load(conn, cid)
         previous = next((e for e in task["evidence"] if e["request_id"] == key and e["actor"]["relay_actor"] == who), None)
         if previous:
             if previous["summary"] != summary or previous["head_sha"] != sha or previous["actor"]["github_id"] != actor["github_id"]:
                 raise ValueError("request_id ya fue usado con otra evidencia o identidad")
+            if "publication_target" in previous and previous["publication_target"] != target:
+                raise ValueError("request_id ya fue usado con otro destino de publicación")
             return snapshot(task, project)
         if sha != task["external_pr"]["head_sha"]:
             raise ValueError("El commit cambió; actualiza y declara evidencia para el head vigente")
-        entry = {"request_id": key, "summary": summary, "head_sha": sha, "actor": actor, "at": now(), "kind": "declared"}
+        number = task["external_pr"]["number"]
+        if target == "issue":
+            link = task.get("issue_link") or {}
+            if (link.get("repo_id") != task["external_pr"]["repo_id"]
+                    or type(link.get("number")) is not int):
+                raise ValueError("Selecciona una issue canónica vinculada al mismo repositorio")
+            number = link["number"]
+        entry = {"request_id": key, "summary": summary, "head_sha": sha, "actor": actor, "at": now(), "kind": "declared",
+                 "publication_target": target, "publish_requested": True}
         task["evidence"].append(entry)
         task["history"].append({"kind": "declared_evidence", "at": entry["at"], "actor": actor, "evidence": entry})
+        external_review_publish.enqueue_in_transaction(conn, cid, "evidence", key, sha,
+            {"summary": summary, "target": {"kind": target, "number": number}}, who)
         return _save(conn, task, project)
     return await _transaction(db, work)

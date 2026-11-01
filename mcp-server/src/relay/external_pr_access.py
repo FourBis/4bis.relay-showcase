@@ -1,30 +1,103 @@
-"""Keep external PR receipts within the current project's authorized team."""
+"""Project work-register access; it never grants access to ordinary chat routes."""
 from __future__ import annotations
 
-from aiohttp import web
+import json
 
-from . import identity
-from .app_state import DB_KEY
+from . import conversation_access, identity
 
 
+def _project_tx(db, conn, slug, actor):
+    user = conversation_access.user_tx(conn, actor)
+    row = conn.execute("SELECT * FROM projects WHERE slug=? COLLATE NOCASE", (slug,)).fetchone()
+    if not row:
+        raise LookupError("No existe el proyecto")
+    project = db._parse_project(row)
+    defaults = project["defaults_json"]
+    if (not user or not project["enabled"] or not isinstance(defaults, dict) or defaults.get("read_only")
+            or not identity.user_can_write_project(user, project["slug"])):
+        raise PermissionError("Proyecto no autorizado para tu cuenta")
+    return project, user
+
+
+async def require_project(db, slug, actor):
+    return await conversation_access.transaction(db, lambda conn: _project_tx(db, conn, slug, actor))
+
+
+def _record_tx(db, conn, cid, actor):
+    row = conn.execute("SELECT project_slug,task_json FROM conversations WHERE id=?", (cid,)).fetchone()
+    if not row:
+        raise LookupError("No existe la tarea")
+    try:
+        task = json.loads(row["task_json"] or "{}")
+    except (ValueError, TypeError):
+        task = {}
+    if not isinstance(task, dict) or task.get("mode") != "external_pr" or task.get("mcp_private"):
+        raise ValueError("La tarea no es un PR externo")
+    project, user = _project_tx(db, conn, row["project_slug"], actor)
+    return project, task, user
+
+
+async def require_record(db, cid, actor):
+    return await conversation_access.transaction(db, lambda conn: _record_tx(db, conn, cid, actor))
+
+
+async def authorize_route(db, cid, actor, path, method):
+    """Only these explicit register operations use project membership, never chat ACL."""
+    allowed = {
+        "/conversations/{id}/task": {"GET", "HEAD"},
+        "/conversations/{id}/external-pr": {"POST"},
+        "/conversations/{id}/external-pr/images": {"GET", "HEAD", "POST"},
+        "/conversations/{id}/external-pr/images/{draft_id}": {"GET", "HEAD"},
+        "/conversations/{id}/external-pr/images/{draft_id}/confirm": {"POST"},
+        "/conversations/{id}/issue": {"POST"},
+        "/conversations/{id}/issue-sync": {"GET", "HEAD", "POST"},
+    }
+    if method not in allowed.get(path, set()):
+        return False
+    try:
+        await require_record(db, cid, actor)
+    except (LookupError, ValueError):
+        return False
+    return True  # PermissionError deliberately propagates, including to creators/admins.
+
+
+async def snapshot(db, cid, actor):
+    """Read local state only and recheck fresh access before exposing it."""
+    from . import external_pr, external_review_view
+    project, task, user = await require_record(db, cid, actor)
+    state = await external_review_view.enrich(db, external_pr.snapshot(task, project),
+                                            can_configure=user["role"] == "owner")
+    _, _, current = await require_record(db, cid, actor)
+    if current["role"] != "owner":
+        state.pop("review_configuration", None)
+        state["allowed_actions"] = [action for action in state.get("allowed_actions", [])
+                                    if action != "external_review_configure"]
+    return state
+
+
+# Compatibility with the public candidate's middleware registration. Ordinary
+# conversations retain their own handlers; this shim grants no register writes.
 async def can_read(request, db, conversation):
-    if identity.role_of(request) == identity.OWNER_ROLE:
-        return True
     task = await db.get_conversation_task(conversation["id"])
     if not isinstance(task, dict) or task.get("mode") != "external_pr":
         return True
-    project = await db.get_project(conversation.get("project_slug", ""))
-    return identity.can_write_project(request, project)
+    try:
+        await require_record(db, conversation["id"], identity.requester(request))
+    except (LookupError, ValueError, PermissionError):
+        return False
+    return True
 
 
 async def visible_records(request, db, records):
     return [row for row in records if await can_read(request, db, row)]
 
 
+from aiohttp import web
+from .app_state import DB_KEY
+
+
 @web.middleware
 async def guard(request, handler):
-    # Restrict only external registrations; existing chat permission rules stay
-    # in their handlers. Check before rendering detail, history, diff or task.
     cid = request.match_info.get("id")
     db = request.app.get(DB_KEY)
     if db is not None and cid and request.path.startswith("/conversations/"):
