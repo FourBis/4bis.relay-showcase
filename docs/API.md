@@ -277,3 +277,22 @@ heredados. Al procesar o resumir un transcript, el recibo conserva el resultado 
 para reintentar sólo su persistencia dentro del proceso. El guardado de
 transcripts es atómico. No acredita reintentos idempotentes del ASR ni
 recuperación poskill.
+
+## Contratos del candidato de paridad
+
+Las rutas se componen en `server_app.py` y los módulos de cada función.
+Las respuestas de acceso/recuperación no deben usarse como una autorización
+permanente; los handlers vuelven a consultar la identidad y sus permisos.
+
+| Área | Rutas y documentación |
+| --- | --- |
+| Creación y mensajes inciertos | [Contrato de creación](CONVERSATION_REQUESTS.md) y [recuperación de la UI](REQUEST_RECOVERY.md). |
+| Compartir un hilo | `GET /conversations/{id}/shares`, `PUT`/`DELETE /conversations/{id}/shares/{email}`; [acceso](CONVERSATION_ACCESS.md). |
+| Revisión y notificaciones de PR externos | [Revisión externa](EXTERNAL_REVIEW.md); conserva identidad del actor, SHA y política vigente. |
+| Evidencia PNG | `GET`/`POST /conversations/{id}/external-pr/images`, `GET /conversations/{id}/external-pr/images/{draft_id}`, `POST /conversations/{id}/external-pr/images/{draft_id}/confirm`. Confirmar verifica autor, marcador y bytes del comentario ya publicado manualmente; no sube ni publica la imagen. |
+| Consultas MCP personales | `POST /mcp/relay` sólo si se habilitó al crear la app; [protocolo y límites](GENERIC_MCP.md). |
+| Salud con identidad del proceso | `/health` y `/admin/api/health` sólo agregan metadatos con opt-in y rol Admin actual; [recibos](DEPLOYMENT_RECEIPTS.md). |
+
+Los endpoints de generación multimedia de la revisión posterior no están
+registrados en esta tanda. Un campo contractual `media_only:false` no anuncia
+soporte de generación. La [evidencia local](qa/parity-2026-11-01.md) es estática.

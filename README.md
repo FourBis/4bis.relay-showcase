@@ -1,5 +1,13 @@
 # FourBis Relay
 
+Esta rama prepara una ampliación local revisable: compartir conversaciones,
+recuperar solicitudes inciertas, revisión opcional de PR externos, archivo de
+cuentas y consultas MCP personales con alcance por proyecto. Su
+[recibo de paridad](docs/qa/parity-2026-11-01.md) distingue código, demo y
+validación pendiente. Todavía no acredita integración ni despliegue remoto.
+La demo modificada en esta rama usa sólo datos sintéticos; la URL publicada
+puede seguir mostrando una versión anterior.
+
 **Español** · [English](README.en.md) · [Demo interactiva](https://fourbis.github.io/4bis.relay-showcase/) · [Instalación](docs/SETUP.md)
 
 ## Tu equipo, tus repositorios y la IA trabajando sobre el mismo proyecto
@@ -374,3 +382,21 @@ FourBis · Jeremías Badilla. Código bajo [licencia MIT](LICENSE); [avisos de t
 El [candidato de mantenimiento del 1 de noviembre](docs/qa/maintenance-2026-11-01.md)
 documenta correcciones locales de UI, seguridad y continuidad, sus exclusiones
 y la validación estática realizada. Aún no acredita publicación ni despliegue.
+
+## Funciones del candidato de paridad
+
+| Recorrido | Guía y límite principal |
+| --- | --- |
+| Mis conversaciones y Compartidas conmigo | [Acceso](docs/CONVERSATION_ACCESS.md): invitación explícita; colaborar exige escritura vigente. |
+| Recuperar un envío sin duplicarlo | [Borradores y recibos](docs/REQUEST_RECOVERY.md): conserva el ID original; el borrador local se pierde al recargar. |
+| Revisar PR externos por commit | [Revisión](docs/EXTERNAL_REVIEW.md): política apagada por defecto, publicación e inbox con estados separados. |
+| Archivar una cuenta | [Equipo](docs/TEAM_ACCESS.md): conserva asignaciones; restaurar no reactiva el acceso. |
+| Consultar por MCP personal | [Interfaz opcional](docs/GENERIC_MCP.md): apagada globalmente y por proyecto; sin skills globales. |
+| Recuperar trabajo y cerrar un plan | [Recuperación](docs/DURABLE_RECOVERY.md): distingue resultado, persistencia y verificación final. |
+| Saber qué proceso está instalado | [Recibos locales](docs/DEPLOYMENT_RECEIPTS.md): opt-in del operador, sin despliegue automático. |
+| Explorar estos recorridos | [Demo](docs/DEMO.md): simulación en memoria, sin cuentas ni servicios reales. |
+
+Los adjuntos existentes y la evidencia PNG de PR externos son recorridos
+distintos. Esta tanda no incorpora generación o edición nativa de imágenes,
+audio o vídeo ni la revisión posterior de su interfaz. Tampoco se verificaron
+proveedores ni se ejecutó el navegador, la aplicación o las suites.

@@ -66,3 +66,27 @@ tardías de filtros en **Informe/Métricas**, estados de carga/vacío/error del
 grafo y focos/controles táctiles más accesibles. En **Equipo**, editar datos de
 un perfil manteniendo su rol y selección conserva las asignaciones ausentes
 del catálogo. Cambiar de rol aplica sus reglas de escritura. Los formularios de PR externo mantienen su payload mientras se envía.
+
+## Conversaciones y equipo en el candidato de paridad
+
+El chat distingue **Mis conversaciones** y **Compartidas conmigo**. **Compartir**
+consulta personas elegibles y permisos antes de guardar. El servidor determina
+si puedes leer, enviar, controlar o compartir; un selector de proyecto no concede
+esas acciones. Consulta [Acceso](CONVERSATION_ACCESS.md).
+
+Cada proyecto conserva su borrador durante la carga de la página. Ante un envío
+sin confirmación, el chat conserva el pedido original y ofrece reconciliarlo;
+no empieza otro automáticamente. Los [recibos](REQUEST_RECOVERY.md) explican qué
+conserva la página y qué conserva el servidor.
+
+La revisión de PR externos tiene política, revisión por commit e inbox con
+estados propios. En **Declarar evidencia**, **Guardar y solicitar publicación**
+registra una solicitud sujeta a permisos y política actuales; no indica que ya
+se haya publicado. La evidencia PNG tiene otro recorrido: preparas una copia,
+la subes manualmente en GitHub y Relay verifica después el comentario publicado. En **Equipo** puedes archivar y restaurar cuentas. Restaurar conserva las asignaciones y deja el acceso deshabilitado; revisa el
+perfil antes de activarlo explícitamente.
+
+Los selectores de modelos muestran las opciones permitidas para cada rol del
+chat. Informe y Métricas convierten el intervalo de fechas local a UTC. La
+identidad del proceso en Estado es opcional, reservada a Admin y no despliega
+código. No hay comprobación visual nueva de este bloque: [recibo](qa/parity-2026-11-01.md).

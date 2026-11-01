@@ -54,7 +54,25 @@ operativo ni precarga cuentas de una organización.
 El candidato de mantenimiento conserva también los slugs asignados que ya no
 aparecen en el catálogo de proyectos. Cambiar sólo el nombre, manteniendo rol y selección, no reenvía asignaciones.
 Cambiar de rol aplica sus reglas de escritura y puede actualizar esa lista. La decisión sobre qué rol admite
-escritura usa el rol efectivo del formulario. Esto no incorpora archivo de
-usuarios ni amplía el acceso a proyectos.
+escritura usa el rol efectivo del formulario. Esa corrección de mantenimiento no ampliaba el acceso a proyectos; el archivo
+de cuentas del candidato posterior se describe a continuación.
 
 Revisión estática y límites: [recibo de mantenimiento](qa/maintenance-2026-11-01.md).
+
+## Archivar y restaurar una cuenta
+
+En el candidato de paridad, **Archivar** retira el acceso de una cuenta sin
+atribuir su historial a otra persona. Las lecturas, nuevas admisiones de trabajo
+y operaciones externas comprueban su estado vigente. No detiene por la fuerza
+un comando o una operación remota que ya fue admitida.
+
+**Archivar** conserva las asignaciones para mantener el contexto administrativo.
+**Restaurar** también las conserva, pero deja el acceso deshabilitado. El Admin
+debe revisar rol y proyectos y activar el perfil explícitamente antes de habilitar
+nuevo trabajo. El backend conserva
+la regla de al menos un Admin activo; no permite eludirla archivando al último.
+El selector puede incluir archivados para gestionarlos, sin tratarlos como
+destinatarios elegibles de una invitación o notificación nueva.
+
+Compartir un hilo tampoco asigna el proyecto: [contrato de acceso](CONVERSATION_ACCESS.md).
+La revisión de este cambio es [estática](qa/parity-2026-11-01.md).

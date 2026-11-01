@@ -69,3 +69,37 @@ puede atribuirse se retiene con un error explícito para solicitar lecturas
 individuales. No se transforma una fuente ordinaria censurada en archivo apto
 para editar. Estos controles no autentican productores desconocidos ni
 identifican todos los secretos posibles.
+
+## Fronteras del candidato de paridad
+
+Las conversaciones usan invitaciones explícitas y permisos actuales. Los listados,
+proyecciones de tarea, memoria e historial no deben convertir la asignación de
+un proyecto en lectura de todos sus hilos. Las lecturas compuestas usan una
+instantánea coherente de la cuenta y del acceso; las acciones revalidan su
+admisión. Compartir no concede escritura ni permiso para publicar.
+
+La revisión automática de PR externos parte deshabilitada. Antes de reservar
+durablemente un intento de publicación, se vuelven a comprobar cuenta, conexión
+personal, proyecto, política, commit y efecto esperado en una transacción. Una
+revocación posterior no puede retirar un POST ya admitido. Una respuesta incierta
+no autoriza repetirlo a ciegas. Los borradores PNG requieren consentimiento para la copia temporal. La persona
+publica manualmente la imagen en GitHub y Relay verifica después el comentario;
+este recorrido no genera imágenes ni las sube automáticamente.
+
+Las consultas MCP personales están apagadas globalmente y por proyecto. Sólo
+admiten su actor personal, encargo y repositorio autorizados. No adjuntan
+`read_skill`, skills globales ni inyección automática de skills; no heredan
+raíces adicionales, shell nativa, SQL o catálogos MCP externos de escritura.
+Los archivos del proyecto siguen sujetos al lector y filtros permitidos.
+Su aislamiento es un control de aplicación, no de procesos del host.
+
+El candidato conserva los vendors públicos de Mermaid estricto y DOMPurify,
+el whitelist de metadatos de miembros, los controles de loopback, las URLs Git
+saneadas y los presupuestos finitos. La identidad opcional del runtime empieza
+apagada y sólo la ve un Admin actual; no confirma automáticamente otro PID ni
+atestigua criptográficamente la máquina.
+
+La demo ampliada usa datos sintéticos, no almacena cuentas y no hace solicitudes
+de red. Las funciones multimedia posteriores y sus cambios de UI quedan fuera.
+El [recibo](docs/qa/parity-2026-11-01.md) declara la revisión estática y los límites
+de ejecución, CI y confidencialidad; no certifica una instancia desplegada.

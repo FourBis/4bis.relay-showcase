@@ -1,5 +1,13 @@
 # FourBis Relay
 
+This branch prepares a reviewable local extension: conversation sharing,
+recovery of uncertain requests, optional external PR review, account archival,
+and personal MCP consultations scoped to a project. The
+[parity receipt](docs/qa/parity-2026-11-01.md) separates code, demo, and pending
+validation. It does not establish remote integration or deployment. The demo
+changes on this branch use synthetic data; the published URL may still show
+an earlier version.
+
 [Español](README.md) · **English** · [Interactive demo](https://fourbis.github.io/4bis.relay-showcase/) · [Setup](docs/SETUP.md)
 
 ## Your team, repositories, and AI working on the same project
@@ -375,3 +383,19 @@ The [November 1 maintenance candidate](docs/qa/maintenance-2026-11-01.md)
 records local UI, safety and continuity fixes, exclusions and static review.
 It does not establish publication or deployment; functional and visual
 validation remain pending.
+
+## Features in the parity candidate
+
+The Spanish guides cover [conversation access](docs/CONVERSATION_ACCESS.md),
+[uncertain requests](docs/REQUEST_RECOVERY.md),
+[external PR review](docs/EXTERNAL_REVIEW.md),
+[account archival](docs/TEAM_ACCESS.md),
+[personal MCP consultations](docs/GENERIC_MCP.md),
+[durable recovery](docs/DURABLE_RECOVERY.md),
+[local deployment receipts](docs/DEPLOYMENT_RECEIPTS.md), and the
+[synthetic demo](docs/DEMO.md).
+
+Existing attachments and external PR PNG evidence are separate workflows.
+This batch does not include native image generation or editing, audio/video
+generation, or the later review of that interface. No browser, application,
+provider, or test suite was run for this candidate.

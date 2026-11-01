@@ -1,5 +1,14 @@
 # Validación de la versión de portafolio
 
+## Candidato de paridad del 1 de noviembre de 2026
+
+El [recibo de paridad](qa/parity-2026-11-01.md) describe la segunda tanda local:
+conversaciones, recuperación, revisión externa, cuentas, MCP opcional y demo
+sintética. Sólo hay análisis estático y compilación CSS con herramienta existente.
+No se ejecutaron suites, aplicación, DB, navegador ni proveedores. No se acredita
+CI, integración remota ni despliegue. La evidencia histórica de esta página
+corresponde a sus versiones y no valida este candidato.
+
 ## Candidato del 1 de noviembre de 2026
 
 La [tanda de mantenimiento](qa/maintenance-2026-11-01.md) sólo tiene revisión

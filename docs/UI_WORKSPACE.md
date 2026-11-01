@@ -145,3 +145,18 @@ error del sondeo de actividad no demuestra por sí solo que Relay se haya caído
 
 Estos cambios tienen revisión estática; la comprobación visual de esta rama
 sigue pendiente. Consulta el [recibo de mantenimiento](qa/maintenance-2026-11-01.md).
+
+## Acceso y solicitudes del candidato de paridad
+
+Los filtros personales y compartidos, **Compartir** y las capacidades de cada
+hilo se describen en [Acceso a conversaciones](CONVERSATION_ACCESS.md).
+El borrador de cada proyecto y los envíos pendientes permanecen en memoria de
+la página; sus [recibos de recuperación](REQUEST_RECOVERY.md) no prometen
+persistir ese texto al recargar. La UI conserva la identidad del pedido mientras
+consulta un resultado incierto y separa una nueva edición de ese intento.
+
+La revisión externa, su evidencia PNG y el inbox tienen sus propios estados y
+permisos. La [demo ampliada](DEMO.md) permite explorar recorridos sintéticos;
+no se conecta al servidor ni verifica su funcionamiento. Los cambios de esta
+rama sólo tienen [revisión estática](qa/parity-2026-11-01.md); no se comprobaron
+geometría, foco o superposiciones en un navegador.
