@@ -10,13 +10,14 @@
 
 import { $, $$, api, apiRoot, escape, _dbg, onClick } from "./api.js";
 import { modalLoad, toast } from "./ui.js";
-import { dtView } from "./ui-table.js";
+import { dtView, updateTablePager } from "./ui-table.js";
 
 const ISSUE_SKILL = "create-github-issue-from-transcript";
 
 // Estado local de orden. La tabla se recarga on-click (no hay poller)
 // pero el orden lo conservamos entre refreshes. Default: fecha desc.
 const _voiceState = { sortKey: 1, sortDir: "desc", page: 0 };
+let _voiceGeneration = 0;
 const _VOICE_COLUMNS = [
   { key: "id", label: "trx_id", value: (t) => t.id || "" },
   { key: "ts", label: "fecha", className: "whitespace-nowrap",
@@ -30,6 +31,7 @@ const _VOICE_COLUMNS = [
 ];
 
 export async function loadVoice() {
+  const generation = ++_voiceGeneration;
   const tbody = $("#voice-table tbody");
   try {
     // Filtrar la skill del listado general. Si no existe, deshabilita
@@ -43,7 +45,11 @@ export async function loadVoice() {
     }
 
     const r = await apiRoot("/voice/transcripts");
+    if (generation !== _voiceGeneration) return;
     const items = r.transcripts || [];
+    const view = dtView(_VOICE_COLUMNS, {..._voiceState,rows:items,query:""}, 25);
+    _voiceState.page = view.page;
+    updateTablePager($("#voice-table"), view, page => { _voiceState.page = page; return loadVoice(); });
     $("#voice-summary").textContent =
       `${items.length} transcripts`
       + (skillAvailable ? "" : ` · ⚠ skill "${ISSUE_SKILL}" no instalada`);
@@ -53,13 +59,7 @@ export async function loadVoice() {
         o /join + /leave (grabación VC) desde Discord.</td></tr>`;
       return;
     }
-    const { slice } = dtView(_VOICE_COLUMNS, {
-      rows: items,
-      query: "",
-      sortKey: _voiceState.sortKey,
-      sortDir: _voiceState.sortDir,
-      page: _voiceState.page,
-    }, items.length > 25 ? 25 : 0);
+    const { slice } = view;
     tbody.innerHTML = slice.map((t) => {
       const skillTitle = skillAvailable
         ? "Crear issue / historia de usuario desde este transcript"
@@ -94,6 +94,8 @@ export async function loadVoice() {
           : "none");
     });
   } catch (e) {
+    if (generation !== _voiceGeneration) return;
+    updateTablePager($("#voice-table"), {page:0,pages:1,all:[]}, () => {});
     _dbg("loadVoice ERROR", e.message);
     $("#voice-summary").textContent = "error: " + e.message;
     tbody.innerHTML = `<tr><td colspan="7" class="empty fail">

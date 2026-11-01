@@ -134,15 +134,22 @@ export async function openExternalRegistration({ projectSlug = "", onRegistered 
         if (values.get("actor_label")) body.actor_label = String(values.get("actor_label")).trim();
         try { Object.assign(body, optionalIssuePayload(values.get("issue"))); }
         catch (error) { formError(error.message); return; }
-        button.disabled = true; button.textContent = "Verificando en GitHub…"; formError("");
+        const fields = [...form.elements].map(control => [control, control.disabled]);
+        fields.forEach(([control]) => { control.disabled = true; });
+        button.textContent = "Verificando en GitHub…"; formError("");
         try {
           const result = await apiRoot(`/projects/${encodeURIComponent(values.get("project"))}/external-pr`, {method:"POST",body});
-          if (session !== modalSession || !isModalOpen(MODAL)) return;
+          if (session !== modalSession || !isModalOpen(MODAL) || !form.isConnected) return;
           issuePicker.destroy(); closeModal(MODAL); toast("PR externo registrado", "ok");
           await onRegistered?.(result);
         } catch (error) {
-          if (session === modalSession && isModalOpen(MODAL)) formError(`No se pudo registrar: ${error.message}. Conservamos los datos para reintentar.`);
-        } finally { button.disabled = false; button.textContent = "Registrar PR"; }
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) formError(`No se pudo registrar: ${error.message}. Conservamos los datos para reintentar.`);
+        } finally {
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+            fields.forEach(([control, disabled]) => { control.disabled = disabled; });
+            button.textContent = "Registrar PR";
+          }
+        }
       };
     },
   });
@@ -166,16 +173,23 @@ export async function openExternalEvidence({ convId, task, onSaved } = {}) {
         if (button.disabled) return;
         const summary = form.querySelector("textarea").value.trim();
         if (!summary) { formError("Describe las pruebas y sus resultados."); return; }
-        button.disabled = true; button.textContent = "Guardando…"; formError("");
+        const fields = [...form.elements].map(control => [control, control.disabled]);
+        fields.forEach(([control]) => { control.disabled = true; });
+        button.textContent = "Guardando…"; formError("");
         try {
           const result = await apiRoot(`/conversations/${encodeURIComponent(convId)}/external-pr`, {
             method:"POST",body:externalEvidencePayload(convId,headSha,summary),
           });
-          if (session !== modalSession || !isModalOpen(MODAL)) return;
+          if (session !== modalSession || !isModalOpen(MODAL) || !form.isConnected) return;
           closeModal(MODAL); toast("Evidencia declarada guardada", "ok"); await onSaved?.(result);
         } catch (error) {
-          if (session === modalSession && isModalOpen(MODAL)) formError(`No se pudo guardar: ${error.message}. El texto se conserva para reintentar.`);
-        } finally { button.disabled = false; button.textContent = "Guardar declaración"; }
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) formError(`No se pudo guardar: ${error.message}. El texto se conserva para reintentar.`);
+        } finally {
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+            fields.forEach(([control, disabled]) => { control.disabled = disabled; });
+            button.textContent = "Guardar declaración";
+          }
+        }
       };
     },
   });

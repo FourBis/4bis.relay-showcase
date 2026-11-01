@@ -36,6 +36,7 @@ test('seleccionar B mientras A carga mantiene B aunque A llegue último', async 
   const pending = {}, opened = [], errors = [];
   const context = {
     apiRoot: path => new Promise(resolve => { pending[path] = resolve; }),
+    $: () => null, invalidateQuestions() {},
     setChatDrawer() {}, openConversation: async meta => opened.push(meta.id),
     toast: error => errors.push(error),
   };

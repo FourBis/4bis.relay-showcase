@@ -96,7 +96,10 @@ export function restoreFiltersFromUrl() {
   }
 }
 
+let _loadId = 0;
+
 export async function loadMetrics() {
+  const loadId = ++_loadId;
   const win = currentWindow();
   const status = $("#metrics-status");
   const filters = currentFilters();
@@ -117,6 +120,7 @@ export async function loadMetrics() {
       api(`metrics/summary?${q}`),
       api(`metrics/trends?${qt}`),
     ]);
+    if (loadId !== _loadId) return;
     renderMetrics(summary, trends);
     syncUrl(win, filters);
     const n = Object.keys(filters).length;
@@ -132,7 +136,7 @@ export async function loadMetrics() {
     const rclear = $("#metrics-range-clear");
     if (rclear) rclear.hidden = !win.hasRange;
   } catch (e) {
-    if (status) status.textContent = "error: " + e.message;
+    if (loadId === _loadId && status) status.textContent = "error: " + e.message;
   }
 }
 
@@ -141,7 +145,9 @@ async function fillFilterOptions(summary) {
   const provSel = $("#metrics-provider");
   if (provSel) {
     const keep = provSel.value;
-    const provs = (summary.by_provider || []).map((p) => p.provider);
+    const provs = [...new Set([
+      ...(summary.by_provider || []).map((p) => p.provider), ...(keep ? [keep] : []),
+    ])];
     provSel.innerHTML = '<option value="">todos</option>'
       + provs.map((p) => `<option value="${escape(p)}">${escape(p)}</option>`).join("");
     if (keep && provs.includes(keep)) provSel.value = keep;

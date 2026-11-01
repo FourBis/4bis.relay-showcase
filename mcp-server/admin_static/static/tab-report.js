@@ -12,6 +12,7 @@ import { barChart, fillDays } from "./ui-chart.js";
 let _days = 30;
 let _project = "";
 let _loaded = false;
+let _loadId = 0;
 
 export function initReport() {
   $("#report-days").addEventListener("change", (e) => {
@@ -26,14 +27,17 @@ export function initReport() {
 }
 
 export async function loadReport() {
+  const loadId = ++_loadId;
   const grid = $("#report-kpis");
   try {
     const q = `report?days=${_days}`
       + (_project ? `&project=${encodeURIComponent(_project)}` : "");
     const data = await api(q);
+    if (loadId !== _loadId) return;
     _render(data);
     if (!_loaded) { _loaded = true; _fillProjectFilter(); }
   } catch (e) {
+    if (loadId !== _loadId) return;
     grid.innerHTML = `<p class="fail text-sm col-span-full">error: ${escape(e.message)}</p>`;
   }
 }

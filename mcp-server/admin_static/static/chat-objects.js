@@ -226,6 +226,9 @@ export async function restoreChatObject(reference) {
   const response = await apiRoot(
     `/conversations/${encodeURIComponent(reference.conversationId)}/messages`
     + "?max_turns=2000&content_cap=100000", null, 30_000);
+  if (!reference.signature) {
+    throw new Error('Vuelve a abrir el objeto desde su respuesta en la conversación.');
+  }
   const message = response?.messages?.[reference.messageIndex];
   if (!message || message.role !== "assistant") {
     throw new Error("La respuesta de la conversación ya no está disponible");

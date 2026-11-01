@@ -16,6 +16,18 @@ export function canEditTeamUser(actor, user) {
   return actor.role === "owner" || (actor.role === "subadmin" && user.role === "member");
 }
 
+export function assignmentChoices(projects, user) {
+  const choices = [...projects];
+  for (const slug of user?.project_slugs || []) {
+    if (!choices.some(project => project.slug === slug)) choices.push({slug, name:slug, unavailable:true});
+  }
+  return choices;
+}
+
+export function sameProjectSelection(left = [], right = []) {
+  return left.length === right.length && left.every(slug => right.includes(slug));
+}
+
 export function projectAccessLabel(role, projectSlugs = []) {
   if (role === "owner") return "Todos los proyectos";
   if (role === "finance") return "Sin escritura";
@@ -67,12 +79,12 @@ function formMarkup(user = null) {
   const email = user
     ? `<input id="team-email" class="input" type="email" value="${escape(user.email)}" readonly>`
     : '<input id="team-email" class="input" type="email" autocomplete="off" placeholder="correo confirmado">';
+  const roleHasProjectWrites = ["member", "subadmin"].includes(user?.role || defaultRole);
   const projects = snapshot.can_assign_projects
-    ? `<fieldset class="field min-w-0"><legend class="field-label">Proyectos con escritura</legend><p class="field-hint">Puede editar y ejecutar compilaciones y pruebas en los proyectos marcados. No incluye publicar ni integrar PR. Admin siempre tiene acceso a todos; Finanzas no tiene escritura.</p><div class="mt-2 grid gap-2 sm:grid-cols-2">${(snapshot.projects || []).map((project) => {
-      const roleHasProjectWrites = !["owner", "finance"].includes(user?.role);
+    ? `<fieldset class="field min-w-0"><legend class="field-label">Proyectos con escritura</legend><p class="field-hint">Puede editar y ejecutar compilaciones y pruebas en los proyectos marcados. No incluye publicar ni integrar PR. Admin siempre tiene acceso a todos; Finanzas no tiene escritura.</p><div class="mt-2 grid gap-2 sm:grid-cols-2">${assignmentChoices(snapshot.projects || [], user).map((project) => {
       const checked = roleHasProjectWrites && (user?.project_slugs || []).includes(project.slug) ? " checked" : "";
       const disabled = roleHasProjectWrites ? "" : " disabled";
-      return `<label class="flex min-w-0 items-start gap-2 text-sm text-zinc-300"><input class="mt-1" type="checkbox" name="team-project" value="${escape(project.slug)}"${checked}${disabled}><span>${escape(project.name || project.slug)} <code class="text-xs text-zinc-500">${escape(project.slug)}</code></span></label>`;
+      return `<label class="flex min-w-0 items-start gap-2 text-sm text-zinc-300"><input class="mt-1" type="checkbox" name="team-project" value="${escape(project.slug)}"${checked}${disabled}><span>${escape(project.name || project.slug)} <code class="text-xs text-zinc-500">${escape(project.slug)}</code>${project.unavailable ? ' <span class="muted text-xs">No disponible; se conserva hasta que lo quites.</span>' : ""}</span></label>`;
     }).join("") || '<span class="muted text-sm">No hay proyectos disponibles.</span>'}</div></fieldset>`
     : "";
   return `<div class="field"><label class="field-label" for="team-name">Nombre</label><input id="team-name" class="input" value="${escape(user?.display_name || "")}" autocomplete="name" placeholder="Nombre visible"></div>
@@ -177,7 +189,8 @@ async function saveTeamUser() {
       : Array.from(document.querySelectorAll('#team-form input[name="team-project"]:checked'), (input) => input.value);
     await api("users", { method: "PUT", body: teamUserPayload({
       email, display_name, role, enabled: !current || isEnabled(current),
-      projectSlugs, canAssignProjects: snapshot.can_assign_projects === true,
+      projectSlugs, canAssignProjects: snapshot.can_assign_projects === true
+        && (!current || current.role !== role || !sameProjectSelection(projectSlugs, current.project_slugs)),
     }) });
     toast(current ? "Integrante actualizado" : "Integrante agregado", "ok");
     message.textContent = "";

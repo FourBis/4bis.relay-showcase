@@ -32,6 +32,7 @@ function harness(responses, filter = '', apiRoot = async () => ({})) {
     escape: (s) => s, getEmbeddedConversation: () => '', toast: (message) => node('#toast').textContent = message,
     apiRoot,
     setTaskWorkspaceContext() {}, showMainView: () => { opened++; }, renderConvList() {}, detachGrafo() {},
+    invalidateQuestions() {},
     renderDraftMode() {}, setBusy() {}, matchCommand: () => null, renderSuggestions() {},
     renderAttachTray() {}, appendOptimisticUser() {}, pokeGrafo: async () => {}, pollChat: async () => {},
     renderHeader() {}, loadChats() {}, newRequestId: () => 'fake-request-id',
