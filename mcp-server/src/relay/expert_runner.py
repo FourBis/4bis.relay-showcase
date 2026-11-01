@@ -31,6 +31,37 @@ from .task_workspace import resolved_project
 logger = logging.getLogger("relay.experts")
 
 
+async def require_model_admission(db, conversation_id, *, write_required=False):
+    """Recheck current actor and live conversation policy after preparation."""
+    if db is None or not conversation_id:
+        return
+    from . import conversation_access, user_accounts
+    from .task_service import STOPPED
+    import json
+
+    bound = user_accounts.current_actor.get()
+    if not bound or bound[0].db is not db or not bound[1]:
+        raise PermissionError("La ejecución requiere la cuenta que la solicitó")
+    actor = bound[1]
+
+    def check(conn):
+        access = conversation_access.require_tx(conn, conversation_id, actor, "send")
+        row = conn.execute("SELECT status,task_json FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+        try:
+            state = json.loads(row["task_json"] or "{}") if row else {}
+        except (TypeError, ValueError):
+            raise PermissionError("La política de la conversación no es válida") from None
+        if (not row or row["status"] != "open" or not isinstance(state, dict)
+                or state.get("state") in STOPPED or state.get("mode") == "external_pr"):
+            raise PermissionError("La conversación está cerrada o la tarea está detenida")
+        if (write_required or state.get("mode") == "write") and not access["can_collaborate"]:
+            raise PermissionError("Ya no tienes permiso para ejecutar cambios en este proyecto")
+
+    await conversation_access.transaction(db, check)
+    if conversation_id in getattr(db, "_task_cancellations", {}):
+        raise PermissionError("La cancelación de la tarea está en curso")
+
+
 async def run_expert(
     project: dict, user: str, *, skills_block: str = "",
     system_extra: str = "", model_override: str = "",
@@ -45,6 +76,7 @@ async def run_expert(
     bitacora_json: str = "",
     deadline_pedido: float = 0.0,
     image_artifacts: Optional[dict] = None,
+    before_executor: Any = None,
 ) -> dict:
     """Ejecuta un turno con herramientas, historial y recuperación de cortes.
 
@@ -128,11 +160,14 @@ async def run_expert(
         pony = ponytail or ""
         sysp = project.get("system_prompt") or ""
         instructions = "\n\n".join(p for p in (pony, sysp) if p)
-    if db is not None and not _is_notes and defaults.get("facts_always_on"):
+    if db is not None and conversation_id and not _is_notes and defaults.get("facts_always_on"):
         try:
             from . import memory as memory_mod
+            from . import user_accounts
+            _actor = user_accounts.current_actor.get()
+            _who = _actor[1] if _actor and _actor[0].db is db else None
             _facts = await db.list_facts(
-                project["slug"], limit=200, status="approved")
+                project["slug"], limit=200, status="approved", actor=_who, source_conversation=conversation_id)
             _fb = memory_mod.build_facts_block(_facts)
             if _fb:
                 instructions = f"{instructions}\n\n{_fb}"
@@ -243,7 +278,7 @@ async def run_expert(
             expert_toolsets.CappedToolset(wrapped=FunctionToolset(
                 all_tools, max_retries=3,
                 timeout=state._mcp_tool_to + expert_toolsets._TOOL_OVERRUN_GRACE_S),
-                image_artifacts=image_artifacts,
+                image_artifacts=None if defaults.get("mcp_private") else image_artifacts,
                 vision=expert_models.has_vision(state.spec))
         ] if all_tools else []
         # ponytail: tres reintentos; recalibrar si cambia el proveedor.
@@ -347,7 +382,16 @@ async def run_expert(
             state.cache_prev += state.usage.cache_read_tokens or 0
         state.usage = None
 
+    executor_admitted = False
     while True:
+        if before_executor is not None and not executor_admitted:
+            admission = await before_executor(deadline=deadline)
+            if not admission.get("execute"):
+                return {"feedback_skipped": True, "feedback_skip_reason": admission.get("reason", ""),
+                        "phase_at_end": "cancelled"}
+            executor_admitted = True
+            deadline = min(deadline, admission["deadline"])
+            state.task_token_limit = min(state.task_token_limit or float("inf"), admission["token_limit"])
         checkpoint()
         if state.task_usage is not None:
             used_requests = state.task_usage.requests
@@ -383,6 +427,14 @@ async def run_expert(
             if uc is not None:
                 extra.append(uc)
         agent = _build_agent(extra)
+        if before_executor is None:
+            # Feedback uses its own final transactional gate; do not put an
+            # extra await after that reservation and before its executor.
+            await require_model_admission(db, conversation_id,
+                write_required=project.get("_task_mode") == "write")
+        if before_executor is not None and deadline <= time.monotonic():
+            state.last_phase = "hard_timeout"
+            break
         try:
             executor_attempted = True
             await asyncio.wait_for(

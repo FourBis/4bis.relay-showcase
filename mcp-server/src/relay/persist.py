@@ -176,6 +176,7 @@ async def _write_completed(operation):
     if cancelled:
         raise asyncio.CancelledError
 
+
 async def append_jsonl(target: str, role: str, content: str, **extra) -> None:
     """Append de un evento al JSONL del target. Best-effort."""
     d = config.jsonl_dir()
@@ -246,6 +247,7 @@ async def write_chat_artifacts(
     filename: str | None = None,
     escribir_jsonl: bool = True,
     messages_json: str | None = None,
+    result_metadata: dict | None = None,
 ) -> str:
     """Escribe .md + JSONL del chat. Devuelve el md_path.
 
@@ -262,6 +264,8 @@ async def write_chat_artifacts(
 
     `messages_json` puede viajar en el payload durable de un nodo cancelado.
     Permanece en la base; no se publica como texto crudo en .md ni JSONL.
+    `result_metadata` conserva bitácora, uso y procedencia de capturas del
+    ejecutor en la base. Tampoco se renderiza ni concede acceso a un archivo.
 
     ponytail: si algún día aparece un tercer camino que cierre chats,
     viene acá; si no, queda en 2 callers.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 from typing import Optional
@@ -11,6 +12,44 @@ from . import grafo as G
 from . import finalization
 
 logger = logging.getLogger("relay.orquestador")
+
+
+async def _settle_node_operation(operation):
+    """Do not leave a node's committed IO behind when its caller is cancelled."""
+    worker = asyncio.create_task(operation)
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    try:
+        result = worker.result()
+    except Exception as exc:
+        if cancelled:
+            raise asyncio.CancelledError from exc
+        raise
+    return result, cancelled
+
+
+def _node_outcome(result, chat_id, model, verify):
+    phase = result.get("phase_at_end") or ""
+    broken = phase in G.FASES_INCOMPLETAS
+    verdict = result.get("verifier_verdict") or ""
+    missing = verify and not result.get("question_id") and verdict != "complete"
+    error = f"el nodo terminó en {phase!r}" if broken else ""
+    if missing and not error:
+        error = (f"el verificador del nodo terminó en {verdict!r}: "
+                 f"{(result.get('verifier_feedback') or 'sin veredicto válido')[:300]}")
+    if not error and result.get("question_id"):
+        error = f"el nodo abrió una pregunta al humano ({result['question_id']}) y quedó en pausa"
+    return dict(ok=not broken and not missing and not result.get("question_id"),
+        resultado=(result.get("content") or "").strip(), error=error,
+        chat_id=chat_id or result.get("chat_id") or "", modelo=result.get("model") or model,
+        pregunta=result.get("question_id") or "", verifier_verdict=verdict,
+        verifier_feedback=result.get("verifier_feedback") or "")
 
 async def _intentar_autosplit(
     db, proyecto: dict, grafo_row: dict, tarea: dict, resultado_parcial: str,
@@ -147,10 +186,10 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
     Tres decisiones que hacen que un nodo sea corto de verdad, que es de
     lo que depende todo lo demás:
 
-    1. El plan ya existe: es el grafo. El runner por etapas reutiliza
-       ese plan, omite planificación/documentación y exige `complete`
-       para aceptar el nodo. `graph_verifier=False` conserva el
-       ejecutor de un solo turno.
+    1. El plan YA existe — es el grafo. Con verificación habilitada, el
+       runner staged reutiliza ese plan, omite planificación/documentación
+       y exige `complete` antes de aceptar el nodo. `graph_verifier=False`
+       conserva el camino de un solo turno.
     2. **Sin historial del hilo.** El nodo recibe su objetivo y el
        resultado de sus dependencias, no la conversación entera. Es lo
        que lo hace barato y lo que evita que el contexto crezca turno a
@@ -168,6 +207,7 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
     24/8: veinte minutos de un nodo trabajando sin una sola señal.
     """
     from . import experts
+    config_mod = config
     verificar_nodo = (proyecto.get("defaults_json") or {}).get(
         "graph_verifier", True)
 
@@ -180,22 +220,32 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
         if resume_context:
             prompt += "\n\n## Resultado del intento anterior\n" + resume_context
         chat_id = ""
-        if hasattr(db, "create_chat"):
-            chat_id = await db.create_chat(
-                project_slug=proyecto.get("slug"), source="grafo",
-                author="orquestador", target=proyecto.get("slug"),
-                conversation_id=grafo_row.get("conversation_id"),
-                # El título de la tarea y no `prompt`: el prompt del nodo
-                # lo arma `_prompt_de_tarea` y trae el objetivo entero del
-                # grafo, que como título de una fila no dice cuál nodo es.
-                user_prompt=tarea.get("titulo") or "")
-        # Asocia el chat a la tarea desde el arranque, no al cerrar: la
-        # ventana en la que se mira el trabajo en vuelo es justamente
-        # esta, y sin `chat_id` la fila no permite saltar al chat.
-        # Idempotente: al cerrar, `_terminar_tarea` reescribe el mismo
-        # campo sobre la misma fila.
-        if chat_id:
-            await db.update_task(tarea["id"], chat_id=chat_id)
+        node_task = asyncio.current_task()
+        close_context = dict(target=proyecto.get("slug") or "_orphan",
+            user=tarea.get("titulo") or prompt, conversation_id=grafo_row.get("conversation_id"),
+            graph_id=tarea["graph_id"], task_id=tarea["id"], verify=verificar_nodo)
+        created = {}
+        async def prepare_chat():
+            from .user_accounts import current_actor
+            actor = current_actor.get()
+            if hasattr(db, "create_chat"):
+                created["id"] = await db.create_chat(
+                    project_slug=proyecto.get("slug"), source="grafo", author="orquestador",
+                    target=proyecto.get("slug"), conversation_id=grafo_row.get("conversation_id"),
+                    requested_by=actor[1] if actor and actor[0].db is db else None,
+                    user_prompt=tarea.get("titulo") or "")
+                await db.update_task(tarea["id"], chat_id=created["id"])
+        try:
+            _, cancelled = await _settle_node_operation(prepare_chat())
+            chat_id = created.get("id", "")
+            if cancelled:
+                raise asyncio.CancelledError
+        except BaseException as exc:
+            chat_id = created.get("id", "")
+            if chat_id and hasattr(db, "finish_chat"):
+                await _cerrar_chat(db, chat_id, "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                    "interrumpido al preparar el nodo", {"messages_json": history}, context=close_context)
+            raise
         # Después de crear el chat: el callback se ata a ese id.
         on_progress = None
         if progreso_de is not None and chat_id:
@@ -210,8 +260,6 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             run = (experts.run_expert_staged if verificar_nodo
                    else experts.run_expert)
             stage_kwargs = (dict(
-                # Los resultados de dependencias y del intento anterior son
-                # contexto del pedido, no instrucciones de sistema del plan.
                 existing_plan=("1. Completa los criterios de este nodo:\n"
                                f"{tarea.get('titulo') or tarea['id']}\n"
                                f"{tarea.get('detalle') or ''}"),
@@ -219,26 +267,39 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             ) if verificar_nodo else {})
             res = await run(
                 proyecto, prompt, db=db, model_override=modelo,
-                message_history_json=history,
                 chat_id=chat_id,
                 conversation_id=grafo_row.get("conversation_id") or "",
                 on_progress=on_progress,
                 steer=getattr(on_progress, "steer", None),
                 rescue=rescue,
                 archivos_reservados=reservados,
+                **({"message_history_json": history} if history else {}),
                 **stage_kwargs)
         except asyncio.CancelledError:
             rescue.setdefault("duration_ms", int(
                 (asyncio.get_running_loop().time() - started) * 1000))
-            rescue.update(content="run cancelado", phase_at_end="cancelled")
+            rescue.update(content=rescue.get("content") or "run cancelado", phase_at_end="cancelled")
+            node_task._relay_node_result = _node_outcome(rescue, chat_id, modelo, verificar_nodo)
             if chat_id and hasattr(db, "finish_chat"):
-                await _cerrar_chat(db, chat_id, "cancelled", "cancelado", rescue)
+                await _cerrar_chat(db, chat_id, "cancelled", "cancelado", rescue, context=close_context)
             raise
         except Exception as e:  # noqa: BLE001 — un nodo roto no voltea el grafo
+            rescue["phase_at_end"] = "error"
+            outcome = _node_outcome(rescue, chat_id, modelo, verificar_nodo)
+            outcome.update(ok=False, error=f"{type(e).__name__}: {e}")
+            node_task._relay_node_result = outcome
             if chat_id and hasattr(db, "finish_chat"):
-                await _cerrar_chat(db, chat_id, "error", str(e))
-            return {"ok": False, "error": f"{type(e).__name__}: {e}",
-                    "chat_id": chat_id, "modelo": modelo}
+                await _cerrar_chat(db, chat_id, "error", str(e), rescue, context=close_context)
+            return outcome
+
+        # Publish the full result and known completion before autosplit/closing IO.
+        res = deepcopy(res)
+        rescue.clear()
+        rescue.update(res)
+        node_task._relay_node_result = _node_outcome(res, chat_id, modelo, verificar_nodo)
+        checkpoint = _node_checkpoint(chat_id, "ok" if node_task._relay_node_result["ok"] else "error",
+            node_task._relay_node_result["error"], res, close_context)
+        node_task._relay_node_checkpoint = checkpoint
 
         fase = res.get("phase_at_end") or ""
         # La lista canónica vive en `grafo` (ver `FASES_INCOMPLETAS`): acá
@@ -260,7 +321,8 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
                         res.get("content") or "")
                 except asyncio.CancelledError:
                     await _cerrar_chat(db, chat_id, "cancelled", "cancelado al subdividir",
-                                      {**res, "phase_at_end": "cancelled"})
+                                      {**res, "phase_at_end": "cancelled"}, context=close_context,
+                                      checkpoint=checkpoint)
                     raise
                 except Exception as e:  # noqa: BLE001 — falla segura
                     logger.exception(
@@ -285,7 +347,8 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             error = (f"subdividido en {len(subdivididas)} subtareas: "
                      + ", ".join(subdivididas))
         salida = {
-            "ok": not roto and not falta_verificacion and not res.get("question_id"),
+            "ok": not roto and not falta_verificacion
+                  and not res.get("question_id"),
             "resultado": (res.get("content") or "").strip(),
             "error": error,
             "chat_id": chat_id or res.get("chat_id") or "",
@@ -294,9 +357,10 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             "verifier_verdict": veredicto,
             "verifier_feedback": res.get("verifier_feedback") or "",
         }
+        node_task._relay_node_result = deepcopy(salida)
         if chat_id and hasattr(db, "finish_chat"):
-            # El chat falla por una ejecución rota o una verificación
-            # incompleta, no por `salida["ok"]`. `ok` mezcla dos preguntas
+            # Status del chat: SOLO depende de `roto` (nodo realmente
+            # roto), no de `salida["ok"]`. `ok` mezcla dos preguntas
             # distintas —¿el grafo sigue avanzando? y ¿esto salió bien?—
             # y para la primera un nodo que abrió una pregunta también
             # es `False` (correcto: no está `hecho`, el grafo lo espera).
@@ -305,51 +369,76 @@ def ejecutor_minimax(db, proyecto: dict, grafo_row: dict, *,
             # sobre relay.db: camino UI 79 preguntas → 79 `ok`; camino
             # grafo 32 preguntas → 32 `error`. Misma tool, misma pausa,
             # etiqueta opuesta según qué código cierra el chat.
-            await _cerrar_chat(db, chat_id, "error" if roto or falta_verificacion else "ok",
-                               salida["error"], res)
+            await _cerrar_chat(
+                db, chat_id, "error" if roto or falta_verificacion else "ok",
+                               salida["error"], res, context=close_context, checkpoint=checkpoint)
         return salida
 
     return ejecutar
 
 
+def _node_checkpoint(chat_id, status, error, result, context):
+    from .server_expert_jobs import _preserve_completed_result
+    checkpoint = {}
+    snapshot = deepcopy(result or {"content": "", "phase_at_end": status})
+    _preserve_completed_result(checkpoint, result=snapshot, chat_id=chat_id,
+        # Node history belongs to this chat output, never the shared graph thread.
+        conv_id=None, history="", user=context.get("user") or "?",
+        target=context.get("target") or "_orphan", source="grafo", author="orquestador",
+        model=snapshot.get("model") or "", status=status, error=error or None,
+        started=asyncio.get_running_loop().time())
+    if context.get("task_id") and context.get("graph_id"):
+        checkpoint["artifact"]["result_metadata"]["graph_node"] = dict(
+            task_id=context["task_id"], graph_id=context["graph_id"],
+            project_slug=context.get("target"), conversation_id=context.get("conversation_id"),
+            complete=_node_outcome(snapshot, chat_id, "", context.get("verify", True))["ok"] is True)
+    return checkpoint
+
+
 async def _cerrar_chat(db, chat_id: str, status: str, error: str = "",
-                       res: Optional[dict] = None) -> None:
-    """Mismo cierre durable que HTTP: los artefactos se pueden reintentar."""
-    from . import finalization
-    from .server_expert_jobs import _stages_json
+                       res: Optional[dict] = None, *, context=None, checkpoint=None) -> None:
+    """Snapshot synchronously; settle all closing IO before propagating cancel."""
+    from .server_expert_jobs import _bind_generated_images
     if status != "ok" and not error:
         error = f"cerrado como {status!r} sin motivo declarado (bug del caller)"
-    r = res or {}
-    fields = dict(
-        status=status, error=error or None,
-        tokens_in=r.get("tokens_in"), tokens_out=r.get("tokens_out"),
-        cache_read_tokens=r.get("cache_read_tokens"), tool_calls=r.get("tool_calls"),
-        phase_at_end=r.get("phase_at_end"), duration_ms=r.get("duration_ms"),
-        model=r.get("model"), last_tool=r.get("last_tool"),
-        progress_events=json.dumps(r.get("progress_events") or []),
-        stages_json=_stages_json(r))
-    try:
-        row = await db.get_chat(chat_id)
-        if row is None:
-            await db.finish_chat(chat_id, **fields)
-            return
-        artifact = dict(
-            target=row.get("target") or row.get("project_slug") or "_orphan",
-            chat_id=chat_id, user=row.get("user_prompt") or row.get("author") or "?",
-            content=r.get("content") or "", source=row.get("source") or "grafo",
-            author=row.get("author") or "", model=r.get("model") or "",
-            status=status, duration_ms=r.get("duration_ms") or 0,
-            error=error or None, events=r.get("progress_events") or [])
-        if r.get("messages_json") and (
-                status == "cancelled"
-                or r.get("verifier_verdict") != "complete"
-                or r.get("phase_at_end") in G.FASES_INCOMPLETAS):
-            # Historial del nodo, no del hilo compartido: conservarlo en
-            # chat_outputs sin sobrescribir la conversación del grafo.
-            artifact["messages_json"] = r["messages_json"]
-        await finalization.finish(db, chat_id, artifact=artifact, **fields)
-    except Exception:
-        logger.exception("no pude cerrar el chat %s del nodo", chat_id)
+    context, r = context or {}, deepcopy(res or {})
+    saved = _node_checkpoint(chat_id, status, error, r, context)
+    if checkpoint is None:
+        checkpoint = saved
+    elif not checkpoint.get("durable"):
+        checkpoint.update(saved)
+    owner = asyncio.current_task()
+    owner._relay_node_checkpoint = checkpoint
+
+    async def close():
+        interrupted = False
+        if not checkpoint.get("durable"):
+            try:
+                row = await db.get_chat(chat_id)
+                if row:
+                    artifact = checkpoint["artifact"]
+                    artifact.update(target=row.get("target") or row.get("project_slug") or artifact["target"],
+                        user=row.get("user_prompt") or row.get("author") or artifact["user"])
+                    cid = context.get("conversation_id") or row.get("conversation_id")
+                    if r.get("image_artifacts") and cid:
+                        from . import conversation_access
+                        from .user_accounts import current_actor
+                        actor = current_actor.get()
+                        if actor and actor[0].db is db and actor[1]:
+                            await conversation_access.require(db, cid, actor[1], "read")
+                            await _bind_generated_images(db, chat_id, cid, r)
+                        # Unknown provenance keeps private refs, never invents a grant.
+            except (asyncio.CancelledError, Exception) as exc:
+                interrupted = isinstance(exc, asyncio.CancelledError)
+                checkpoint["artifact"]["result_metadata"]["capture_error"] = type(exc).__name__
+                logger.warning("metadatos/capturas del nodo %s pendientes (%s)", chat_id, type(exc).__name__)
+            await finalization.finish(db, chat_id, artifact=checkpoint["artifact"],
+                checkpoint=checkpoint, status=status, **checkpoint["fields"])
+        if interrupted:
+            raise asyncio.CancelledError
+    _, cancelled = await _settle_node_operation(close())
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 def _prompt_de_tarea(grafo_row: dict, tarea: dict, todas: list) -> str:

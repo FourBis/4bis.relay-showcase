@@ -26,6 +26,18 @@ from .task_workspace import resolved_project
 logger = logging.getLogger("relay.experts")
 
 
+def _valid_correction(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return (expert_verdicts._validate_plan_correction(value) is None
+                and all(isinstance(step.get(k), str) and step[k].strip()
+                        for step in value["revised_steps"]
+                        for k in ("id", "description", "expected_output")))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
 async def run_expert_staged(
     project: dict, user: str, **kwargs: Any,
 ) -> dict:
@@ -113,6 +125,11 @@ async def run_expert_staged(
         result["stage_errors"] = {}
         return result
 
+    async def authorize_stage():
+        await expert_runner.require_model_admission(kwargs.get("db"),
+            kwargs.get("conversation_id") or "",
+            write_required=project.get("_task_mode") == "write")
+
     on_progress = kwargs.get("on_progress")
     ponytail = await expert_models.read_ponytail()
     planner_spec = (etapas.get("planner") or defaults.get("planner_model")
@@ -134,6 +151,7 @@ async def run_expert_staged(
         if defaults.get("planner_reasoning", True) and not es_continuacion:
             planner_toolsets = await expert_planning._reasoning_toolset(
                 kwargs.get("db"), project, kwargs.get("mcp_pool"))
+        await authorize_stage()
         plan, planner_usage, planner_err = await expert_stages._run_planner(
             user=user, project=project, model_spec=planner_spec,
             ponytail=ponytail, on_progress=on_progress,
@@ -229,6 +247,7 @@ async def run_expert_staged(
 
     async def _supervisar(parcial: dict) -> str:
         try:
+            await authorize_stage()
             v_tuple = await expert_stages._run_verifier(
                 user=user_original, plan=plan,
                 executor_result={
@@ -329,6 +348,7 @@ async def run_expert_staged(
         if completed_runs and (exhausted() or limite_pedido - time.monotonic() < expert_stage_prompts.RESERVA_CIERRE_S):
             corte_por_presupuesto = True
             break
+        continuation_correction = None
         verdict, feedback = "", ""
         project_for_run = project
         if (
@@ -454,6 +474,7 @@ async def run_expert_staged(
             )
             _rev_usage = {}
             try:
+                await authorize_stage()
                 (rev_plan, _rev_usage, rev_err) = await expert_stages._run_planner(
                     user=revised_user, project=project,
                     model_spec=planner_spec, ponytail=ponytail,
@@ -558,6 +579,7 @@ async def run_expert_staged(
                     result.get("messages_json") or ""))
             if ver_enabled:
                 try:
+                    await authorize_stage()
                     v_tuple = await expert_stages._run_verifier(
                         user=user_original, plan=plan, executor_result=result,
                         model_spec=verifier_spec, ponytail=ponytail,
@@ -595,6 +617,9 @@ async def run_expert_staged(
                     kwargs["bitacora_json"] = bitacora.volcar()
                     result["bitacora_json"] = kwargs["bitacora_json"]
                     result["plan_steps_done"] = {str(k): v for k, v in bitacora.pasos.items()}
+                correction = verifier_usage.get("plan_correction")
+                if verdict == "needs_more" and _valid_correction(correction):
+                    continuation_correction = correction
                 if ver_err:
                     stage_errors["verifier"] = ver_err
             else:
@@ -652,11 +677,23 @@ async def run_expert_staged(
                 "forzada (verdict del verificador: %s)",
                 len(rondas) + 1, max_rondas + 1, verdict or "(sin verificar)")
         else:
-            user = (
-                "Continúa la tarea. El verificador revisó lo que hiciste y dice "
-                f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
-                "cierra con el resumen final. Si al mirarlo descubres que ya "
-                "estaba cubierto, dilo y no rehagas el trabajo.")
+            if continuation_correction is not None:
+                pending = "\n".join(
+                    f"- {step['description']}: {step['expected_output']}"
+                    for step in continuation_correction["revised_steps"]
+                    if step["status"] != "done")
+                user = (
+                    "Revisa el estado actual y continúa esta misma tarea desde "
+                    "su historial. Conserva los efectos ya realizados y completa "
+                    "los criterios pendientes, dentro de los límites vigentes:\n\n"
+                    f"{continuation_correction['feedback_to_executor'][:2000]}\n"
+                    f"{pending[:2000]}")
+            else:
+                user = (
+                    "Continúa la tarea. El verificador revisó lo que hiciste y dice "
+                    f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
+                    "cierra con el resumen final. Si al mirarlo descubres que ya "
+                    "estaba cubierto, dilo y no rehagas el trabajo.")
             logger.info(
                 "run_expert_staged: needs_more → ronda %d/%d sola (feedback: %s)",
                 len(rondas) + 1, max_rondas + 1, (feedback or "")[:120])
@@ -684,6 +721,7 @@ async def run_expert_staged(
                                            time.gmtime()),
             })
             try:
+                await authorize_stage()
                 doc, documenter_usage, doc_err = await expert_stages._run_documenter(
                     user=user_original, plan=plan, executor_result=result,
                     verdict=verdict or "(sin verificar)", feedback=feedback,

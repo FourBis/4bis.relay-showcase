@@ -19,6 +19,7 @@ from . import logctx
 from . import mcp_pool
 from . import notify
 from . import progress
+from .secret_redaction import redact_data, redact_text
 from .db import Database
 from .mcp_pool import McpPool
 from .notify import NotifyClient
@@ -227,6 +228,123 @@ def _stages_json(result: dict) -> Optional[str]:
     return json.dumps(out, ensure_ascii=False)
 
 
+async def _bind_generated_images(db, chat_id, conv_id, result):
+    """Link only captures produced by this server run, never IDs quoted in text."""
+    from .user_accounts import current_actor
+    context = current_actor.get()
+    images = result.get("image_artifacts")
+    if not conv_id or not isinstance(images, dict) or not images:
+        return []
+    chat = await db.get_chat(chat_id)
+    conv = await db.get_conversation(conv_id)
+    if (not context or context[0].db is not db or not context[1] or not chat or not conv
+            or chat.get("conversation_id") != conv_id or chat.get("project_slug") != conv.get("project_slug")
+            or str(chat.get("requested_by") or "").lower() != context[1]):
+        logger.warning("Capturas sin vínculo verificado con el run %s", chat_id)
+        return []
+    scope = attachments_mod.scope_dir(conv_id).resolve()
+    storage = attachments_mod.attachments_dir().resolve()
+    linked = []
+    for aid, name in images.items():
+        blob = attachments_mod.resolve(aid) if isinstance(aid, str) else None
+        if (blob is None or not isinstance(name, str) or name != blob.name or blob.is_symlink()
+                or blob.resolve().parent != storage):
+            continue
+        try:
+            worker = asyncio.create_task(asyncio.to_thread(
+                attachments_mod.materializar, conv_id, blob))
+            try:
+                path = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelar el await no detiene el IO. Cerrar después de que
+                # termine su worker, sin soltar una escritura todavía viva.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not worker.cancelled():
+                    worker.exception()  # recoger fallo; se conserva la cancelación original.
+                raise
+            if path.is_file() and not path.is_symlink() and path.resolve().parent == scope:
+                linked.append(aid)
+            else:
+                logger.warning("Captura del run %s sin archivo en su conversación", chat_id)
+        except OSError:
+            logger.warning("No se pudo vincular una captura del run %s", chat_id)
+    return linked
+
+
+def _redact_result_logs(result):
+    """Sanitize new display/log fields, preserving inherited durable history.
+
+    New console tool returns are redacted at their producer before they enter
+    messages_json. Historical model context/bitacora are not a retroactive
+    repair target; authorized readers receive sanitized copies separately.
+    """
+    retained = {key: result[key] for key in ("messages_json", "bitacora_json") if key in result}
+    return {**redact_data({key: value for key, value in result.items() if key not in retained}), **retained}
+
+
+def _preserve_completed_result(checkpoint, *, result, chat_id, conv_id, history,
+                               user, target, source, author, model, status, error, started):
+    """Publicar sin await los datos de cierre antes de cualquier post-proceso."""
+    if checkpoint is None or not result:
+        return
+    # The rescue checkpoint is itself a future persistence source. Keep its
+    # log/history copy sanitized even when later post-processing is cancelled.
+    result = _redact_result_logs(result)
+    error = redact_text(error)
+    raw_images = result.get("image_artifacts")
+    images = {aid: name for aid, name in (raw_images if isinstance(raw_images, dict) else {}).items()
+              if isinstance(aid, str) and _ATT_ID_RE.fullmatch(aid)
+              and isinstance(name, str) and "/" not in name and "\\" not in name}
+    content = result.get("content") or ""
+    if images and not all(f"/attachments/{aid}" in content for aid in images):
+        content += "\n\n" + attachments_mod.generated_markdown(images)
+    duration = result.get("duration_ms")
+    if duration is None:
+        duration = int((time.monotonic() - started) * 1000)
+    history_json = result.get("messages_json")
+    bitacora_json = result.get("bitacora_json")
+    requests = result.get("requests")
+    phase = result.get("phase_at_end")
+    metadata = {
+        "image_artifacts": images,
+        "bitacora_json": bitacora_json if isinstance(bitacora_json, str) else "",
+        "requests": requests if type(requests) is int and requests >= 0 else None,
+        "executor_phase_at_end": phase if isinstance(phase, str) else None,
+    }
+    for steer in result.get("steer_texts") or []:
+        if isinstance(steer, str):
+            user += f"\n\nCorrección en vivo: {steer}"
+    artifact = dict(target=target, chat_id=chat_id, user=user, content=content,
+        source=source, author=author, model=result.get("model") or model,
+        status=status, duration_ms=duration, error=error,
+        events=result.get("progress_events"),
+        messages_json=history_json if isinstance(history_json, str) else "",
+        result_metadata=metadata)
+    try:
+        events_json = json.dumps(result.get("progress_events") or [])
+        tools_json = json.dumps(result["tool_meter"]) if result.get("tool_meter") else None
+        stages_json = _stages_json(result)
+    except (TypeError, ValueError):
+        events_json, tools_json, stages_json = "[]", None, None
+    artifact["events"] = json.loads(events_json)
+    trimmed = result.get("trimmed_turns")
+    fields = dict(tokens_in=result.get("tokens_in"), tokens_out=result.get("tokens_out"),
+        cache_read_tokens=result.get("cache_read_tokens"), tool_calls=result.get("tool_calls"),
+        error=error, phase_at_end=result.get("phase_at_end"), last_tool=result.get("last_tool"),
+        duration_ms=duration, model=result.get("model") or model or None,
+        progress_events=events_json,
+        trimmed_turns=trimmed if type(trimmed) is int and trimmed >= 0 else 0,
+        tool_bytes=tools_json, stages_json=stages_json)
+    checkpoint.update(artifact=artifact, fields=fields, conversation_id=conv_id,
+                      history_before=history)
+
+
 @finalization.supervise
 async def _run_expert_bg(
     *, db: Database, notify: NotifyClient, running: dict,
@@ -238,13 +356,15 @@ async def _run_expert_bg(
     mcp_with: Optional[list] = None, mcp_pool: Optional[McpPool] = None,
     images: Optional[list] = None,
     app: Optional[web.Application] = None,
+    _close_checkpoint: Optional[dict] = None,
+    before_executor=None, deadline_pedido=0.0,
 ) -> None:
     """Ciclo de vida completo de un run de experto en background.
 
     ADR-024: el HTTP ya respondió 202; acá corremos, persistimos
-    (.md + JSONL + finish_chat + historial de la conversación) y
-    avisamos al bot por /notify con kind response|error|cancelled y
-    la metadata que necesita para postear en el hilo correcto.
+    (.md + JSONL + finish_chat + historial de la conversación).
+    El resultado se consulta en Relay; no se publica a una audiencia
+    externa no verificable a partir de ids del caller o del proyecto.
     """
     # Correlación (2026-07-25): de acá en más, TODA línea que se loguee
     # en esta task —y en las que cree, watchdog y callbacks incluidos—
@@ -252,9 +372,13 @@ async def _run_expert_bg(
     # reconstruirlo a mano desde la DB. Va primero: si algo revienta en
     # el setup, queremos que ese error también quede atribuido.
     logctx.bind(chat_id, project.get("slug", ""))
+    if isinstance(source, str) and source.strip().lower() == "discord":
+        # Defensa para callers directos/antiguos además del ingreso y cola.
+        # supervise cierra la fila durable sin iniciar modelo o consumo.
+        raise RuntimeError("Puente Discord sin audiencia verificable; continúa desde tu cuenta en Relay.")
 
     conv_id = conversation["id"] if conversation else None
-    thread_id = conversation.get("discord_thread_id") if conversation else None
+    private = bool((project.get("defaults_json") or {}).get("mcp_private"))
     history_json = (conversation.get("messages_json") or "") if conversation else ""
     # Lo que el experto verificó en turnos anteriores (2026-08-26). Va
     # aparte del historial porque sobrevive a cosas distintas: un corte
@@ -265,7 +389,9 @@ async def _run_expert_bg(
     # Fase 1: progress store + callback. Si run_expert no acepta
     # on_progress (versión vieja), el callback es noop — best-effort.
     progress_cb = experts.make_progress_callback(
-        store=progress, notify=notify,
+        # Ni source='discord' ni ids del payload prueban la audiencia del
+        # resultado, que puede incluir memoria privada. Pasos sólo en Relay.
+        store=progress, notify=None,
         chat_id=chat_id, target=target,
         model=model_override or (project.get("defaults_json") or {}).get("model") or "",
     )
@@ -304,8 +430,19 @@ async def _run_expert_bg(
             # 2026-08-16: `ask_human` necesita saber a qué chat y a qué
             # hilo pertenece la pregunta que registra.
             chat_id=chat_id, conversation_id=conv_id or "",
+            **({"before_executor": before_executor, "deadline_pedido": deadline_pedido,
+                "three_stage": False} if before_executor is not None else {}),
         )
-        if result.get("phase_at_end") == "planned":
+        if before_executor is not None and result.get("feedback_skipped") is True:
+            # The trusted gate already cancelled the exact event/chat in SQL.
+            # No model result exists to export, reconcile or classify uncertain.
+            status, error = "cancelled", result.get("feedback_skip_reason") or "Feedback omitido antes del modelo"
+            return False
+        _preserve_completed_result(_close_checkpoint, result=result, chat_id=chat_id,
+            conv_id=conv_id, history=history_json, user=user, target=target,
+            source=source, author=author, model=model_override, status=status,
+            error=error, started=t0)
+        if result.get("phase_at_end") == "planned" and not private:
             result = await _grafo_en_vez_de_proponer(
                 app, db, project, user, conv_id, result)
     except experts.ModelUnavailable as e:
@@ -315,6 +452,15 @@ async def _run_expert_bg(
         result = {**result, **rescue, "phase_at_end": "timeout"}
         error, status = "timeout total del experto", "error"
     except asyncio.CancelledError:
+        admission = getattr(before_executor, "admission", {}) if before_executor is not None else {}
+        if (before_executor is not None and not getattr(before_executor, "started", False)
+                and not admission.get("started") and not admission.get("uncertain")):
+            if await before_executor.cancel_before_start():
+                # Only preparation ran: do not merge rescue/history or export
+                # a synthetic executor response. SQL cancellation is durable
+                # before supervise marks progress finished.
+                status, error = "cancelled", "Feedback cancelado antes de su admisión al ejecutor"
+                return {"feedback_preparation_cancelled": True}
         # Cancelar usa el mismo cierre durable que éxito/error; incluso si
         # todavía no había historial, la fila y los artefactos quedan cerrados.
         status = "cancelled"
@@ -343,6 +489,29 @@ async def _run_expert_bg(
                 rp.tokens_in = ti
             if to is not None:
                 rp.tokens_out = to
+
+    # Redact before history/artifact/event writes. Preserve the original
+    # history_json CAS token: it identifies the version we started from.
+    result = _redact_result_logs(result)
+    error = redact_text(error)
+    admission = getattr(before_executor, "admission", {}) if before_executor is not None else {}
+    if (before_executor is not None and not getattr(before_executor, "started", False)
+            and not admission.get("started") and not admission.get("uncertain")
+            and status == "error"):
+        # Preparation itself can reject a freshly revoked account before the
+        # model gate. Recheck without spending an iteration; preserve genuine
+        # model/preparation errors when policy is still eligible.
+        admission = await before_executor(check_only=True)
+        if not admission["execute"]:
+            rp = progress.get(chat_id)
+            if rp is not None:
+                rp.phase, rp.error = "cancelled", admission.get("reason", "")
+            return False
+    _preserve_completed_result(_close_checkpoint, result=result, chat_id=chat_id,
+        conv_id=conv_id, history=history_json, user=user, target=target,
+        source=source, author=author, model=model_override, status=status,
+        error=error, started=t0)
+    await _bind_generated_images(db, chat_id, conv_id, result)
 
     # ADR-025: persistir el historial de la conversación. Va ANTES de
     # prender `finished` (bug 2026-07-27): la UI poll-ea /experts/status y
@@ -414,12 +583,11 @@ async def _run_expert_bg(
         # esto, el .md solo tiene pedido + respuesta — ver el bug de los
         # 790.142 tokens / 61 tool calls / .md de 1 KB.
         events=result.get("progress_events"),
-        # Preserve recovered history in the durable output if the conversation
-        # CAS refused it. Export keeps this metadata out of Markdown/JSONL.
         messages_json=result.get("messages_json") or "",
+        result_metadata=(_close_checkpoint or {}).get("artifact", {}).get("result_metadata"),
     )
     md_path = await finalization.finish(
-        db, chat_id, status=status, artifact=artifact,
+        db, chat_id, status=status, artifact=artifact, checkpoint=_close_checkpoint,
         tokens_in=result.get("tokens_in"), tokens_out=result.get("tokens_out"),
         cache_read_tokens=result.get("cache_read_tokens"),
         tool_calls=result.get("tool_calls"), error=error,
@@ -448,11 +616,12 @@ async def _run_expert_bg(
         rp.finished = True
         if error:
             rp.error, rp.phase = error, "error"
+    if private:
+        return  # El cliente consulta SQLite; no se publica el resultado privado en Discord.
     # Sugerencias de continuación (2026-07-26): 2-3 próximos pasos que
-    # la UI y Discord pintan como botones. Van DESPUÉS de finish_chat
+    # la UI pinta como botones. Van DESPUÉS de finish_chat
     # (el run ya está cerrado y persistido: si el turno extra falla o
-    # tarda, no se pierde nada) y ANTES del notify, para que el bot
-    # pinte los botones en el MISMO mensaje de la respuesta.
+    # tarda, no se pierde nada).
     suggestions = await _suggest_followups(
         db, user=user, answer=content,
         run_model=result.get("model") or model_override or "",
@@ -464,87 +633,9 @@ async def _run_expert_bg(
         except Exception as e:  # noqa: BLE001
             logger.warning("no pude guardar sugerencias de %s: %r", chat_id, e)
 
-    kind = "cancelled" if status == "cancelled" else ("error" if error else "response")
-    # Iter 10.0: bridge Discord↔UI. Si la conversación tiene
-    # discord_user_id (autor Discord original), se lo pasamos al bot en
-    # el notify para que sepa a quién mandarle el reply — sin este campo
-    # el bot no puede rutear la respuesta a Discord cuando el chat nació
-    # en la UI. discord_thread_id es para hilos existentes (auto-attach);
-    # discord_user_id es para chats UI→Discord (este bridge nuevo).
-    notify_discord_user_id = (
-        conversation.get("discord_user_id") if conversation else None)
-    notify_discord_author = (
-        conversation.get("discord_author") if conversation else None)
-    # Iter 10.1: guard soft. Si el run vino de Discord y el proyecto
-    # NO tiene discord_channel_id seteado, marcamos el notify para que
-    # el bot sepa que tiene que preguntar al admin qué canal elegir.
-    # El run corre normal (no rompemos nada). El flag NO se manda si:
-    #   - source != "discord" (UI/CLI no necesitan canal — tienen su
-    #     propio panel)
-    #   - el proyecto ya tiene canal (comportamiento actual)
-    missing_channel = (
-        source == "discord"
-        and not (project.get("discord_channel_id") or "").strip())
-    if missing_channel:
-        logger.warning(
-            "experts/run: source=discord pero proyecto %r sin "
-            "discord_channel_id (chat_id=%s conv_id=%s) — el bot "
-            "preguntará al admin qué canal usar",
-            target, chat_id, conv_id)
-    # El runner agrega los adjuntos recibidos al texto aun si el modelo
-    # no cita sus ids. Conservamos también las menciones de uploads manuales.
-    run_attachments = [
-        aid for aid in dict.fromkeys(_ATT_ID_RE.findall(content or ""))
-        if attachments_mod.resolve(aid) is not None
-    ]
-    if run_attachments:
-        logger.info("experts/run: chat=%s adjunta %d archivo(s) generados: %s",
-                    chat_id, len(run_attachments), ", ".join(run_attachments))
-
-    await notify.send(
-        agent_id=f"chat:{chat_id}",
-        kind=kind,
-        message=error if error else content,
-        metadata={
-            "chat_id": chat_id,
-            "conversation_id": conv_id,
-            "discord_thread_id": thread_id,
-            **({"attachments": run_attachments} if run_attachments else {}),
-            # Iter 10.0: campos nuevos para bridge bidireccional
-            "discord_user_id": notify_discord_user_id,
-            "discord_author": notify_discord_author,
-            # Canal default del proyecto: si está seteado, el bot postea la
-            # respuesta ahí (aunque el run haya nacido en la UI/CLI). Sin
-            # esto el bot no sabía el canal vinculado y no podía responder.
-            # El bot arbitra la precedencia (thread existente > canal).
-            "discord_channel_id": (project.get("discord_channel_id") or None),
-            "target": target,
-            "source": source,
-            "status": status,
-            "resultado": _resultado_del_trabajo(result),
-            "verifier_verdict": result.get("verifier_verdict") or "",
-            "verifier_feedback": result.get("verifier_feedback") or "",
-            "verifier_error": (result.get("stage_errors") or {}).get("verifier") or "",
-            "model": result.get("model", model_override),
-            "tokens_in": result.get("tokens_in"),
-            "cache_read_tokens": result.get("cache_read_tokens"),
-            "tokens_out": result.get("tokens_out"),
-            "tool_calls": result.get("tool_calls"),
-            "duration_ms": duration_ms,
-            # Medidor de contexto: el aviso ya va en el texto; esto es
-            # para que el bot/UI puedan pintarlo aparte si quieren.
-            **({"context_tokens": ctx["base_tokens"],
-                "context_limit": ctx["limit"],
-                "context_pct": ctx["pct"]} if ctx else {}),
-            # Iter 10.1: el bot usa esto para decidir si pregunta al
-            # admin qué canal elegir (solo si source=discord y el
-            # proyecto no tiene canal).
-            **({"missing_discord_channel": True} if missing_channel else {}),
-            # El bot los pinta como botones; el custom_id lleva el
-            # índice y resuelve el texto con GET /chats/{chat_id}.
-            **({"suggestions": suggestions} if suggestions else {}),
-        },
-    )
+    # No verified Discord audience is associated with this run. Keep results,
+    # usage and artifacts in Relay, including stateless runs that may retrieve
+    # private knowledge. Body IDs and project channels never authorize delivery.
 
 
 # Tope del turno extra que propone los próximos pasos. Corto a
