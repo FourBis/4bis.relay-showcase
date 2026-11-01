@@ -155,6 +155,7 @@ async def _merge_defaults(db, project: dict, patch: dict) -> None:
     await db.patch_project_defaults(project["slug"], patch)
 
 _PROJECT_FLAGS: dict = {
+    "mcp_consultations": ("bool", False, "Permitir consultas MCP personales de solo lectura; requiere habilitación global y una cuenta autorizada"),
     "native_files": ("bool", True,
                      "Tools de archivo nativas (read/write/edit/list/search)"),
     "native_shell": ("bool", True, "Tool `shell` nativa"),

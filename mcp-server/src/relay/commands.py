@@ -160,6 +160,8 @@ async def show_logs(args: dict, ctx: CommandContext) -> str:
     name = args.get("name")
     limit = int(args.get("limit", 10))
     chats = await ctx.db.list_chats(project_slug=name, limit=limit)
+    chats = [c for c in chats if not c.get("conversation_id") or not
+             (await ctx.db.get_conversation_task(c["conversation_id"])).get("mcp_private")]
     if not chats:
         return f"Sin chats registrados{f' para {name!r}' if name else ''}."
     lines = []
@@ -242,7 +244,11 @@ async def memoria(args: dict, ctx: CommandContext) -> str:
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
         raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
-    hits = await ctx.db.search_memories(project["slug"], query, limit=5)
+    from .user_accounts import current_actor
+    bound = current_actor.get()
+    actor = (bound[1] if bound and bound[0].db is ctx.db
+             and bound[1] not in {"owner", "anonymous", ""} else None)
+    hits = await ctx.db.search_memories(project["slug"], query, limit=5, actor=actor)
     from .memory import format_memory_hits
     text = format_memory_hits(hits)
     if not text:
@@ -257,7 +263,11 @@ async def fact(args: dict, ctx: CommandContext) -> str:
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
         raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
-    facts = await ctx.db.list_facts(project["slug"], limit=50)
+    from .user_accounts import current_actor
+    bound = current_actor.get()
+    actor = (bound[1] if bound and bound[0].db is ctx.db
+             and bound[1] not in {"owner", "anonymous", ""} else None)
+    facts = await ctx.db.list_facts(project["slug"], limit=50, actor=actor)
     if not facts:
         return f"Sin hechos registrados para {project['slug']}."
     lines = [f"• {f['fact']}" for f in facts]
@@ -339,8 +349,9 @@ _TEST_SUMMARY_RE = re.compile(
 
 
 async def _run_dotnet(verb: str, repo_path: str) -> tuple[int, str]:
+    from .night_plan import resolve_cwd_for_cmd
     proc = await asyncio.create_subprocess_exec(
-        "dotnet", verb, cwd=repo_path,
+        "dotnet", verb, cwd=resolve_cwd_for_cmd(repo_path, f"dotnet {verb}"),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     try:

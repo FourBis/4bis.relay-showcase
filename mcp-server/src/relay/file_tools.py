@@ -94,8 +94,8 @@ def permisos_del_run(project: dict, defaults: dict, *, conversation_id: str,
     emita quien tiene el logger del run, y para poder probar la política
     sin armar siete tools.
     """
-    feedback = bool(defaults.get("task_feedback"))
-    abierto, por_que = (False, "") if feedback else sandbox_abierto(defaults)
+    project_only = bool(defaults.get("task_feedback") or defaults.get("mcp_private"))
+    abierto, por_que = (False, "") if project_only else sandbox_abierto(defaults)
     # La VISTA de adjuntos de este run, no el store entero. La
     # derivación vive en `attachments.scope_for` porque el handler
     # arma con ella las rutas que le nombra al experto: si los dos
@@ -123,7 +123,7 @@ def permisos_del_run(project: dict, defaults: dict, *, conversation_id: str,
         # Es la VISTA y no el store entero: el store es plano y lo
         # comparten todos los proyectos, así que darlo completo ponía
         # los adjuntos del cliente B delante de un run del cliente A.
-        extras=[] if feedback else [*rutas_extra(defaults), vista_adjuntos],
+        extras=[] if project_only else [*rutas_extra(defaults), vista_adjuntos],
         # …y de solo lectura. Los archivos de la vista son hardlinks
         # al blob real: escribir sobre uno modifica el contenido que
         # ven TODAS las conversaciones que citaron ese sha256, sin

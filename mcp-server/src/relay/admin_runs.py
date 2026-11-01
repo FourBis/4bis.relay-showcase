@@ -83,6 +83,8 @@ async def api_zombies_list(request: web.Request) -> web.Response:
     rows = await db.list_zombie_chats(
         older_than_s=older_than_s, limit=limit)
     rows = [row for row in rows if await _zombie_idle_project(request, row)]
+    from .private_mcp_access import visible_rows
+    rows = await visible_rows(request, rows)
     return web.json_response({
         "zombies": redact_data([dict(r) for r in rows]),
         "older_than_s": older_than_s,
@@ -193,6 +195,8 @@ async def api_notes_list(request: web.Request) -> web.Response:
         "tokens_in, tokens_out, duration_ms, error "
         "FROM chats WHERE target=? ORDER BY started_at DESC LIMIT ? OFFSET ?",
         ("notes", limit, offset))
+    from .private_mcp_access import visible_rows
+    rows = await visible_rows(request, rows)
     return web.json_response({
         "notes": redact_data([dict(r) for r in rows]),
         "count": len(rows),

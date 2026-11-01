@@ -14,6 +14,8 @@ from pathlib import Path
 # Metadatos compartidos por runtime y panel. Los valores se guardan como
 # texto en system_config; ``type`` define validación y presentación.
 PANEL_SETTINGS: dict[str, dict[str, object]] = {
+    "RELAY_RUNTIME_IDENTITY_ENABLED": {"label": "Identidad del proceso instalado", "group": "Servidor", "type": "boolean", "default": "0", "restart": True},
+    "RELAY_PRIVATE_MCP_ENABLED": {"label": "Consultas MCP personales", "group": "Integraciones", "type": "boolean", "default": "0", "restart": True},
     "RELAY_HOST": {"label": "Host", "group": "Servidor", "type": "text", "default": "127.0.0.1", "options": ["127.0.0.1", "0.0.0.0"], "restart": True},
     "RELAY_PORT": {"label": "Puerto", "group": "Servidor", "type": "number", "default": "8413", "min": 1, "max": 65535, "restart": True},
     "RELAY_API_KEY": {"label": "API key", "group": "Servidor", "type": "secret", "default": ""},
@@ -615,3 +617,29 @@ def repos_root() -> str:
 
 
 _load_runtime_config_sync()
+
+
+def private_mcp_enabled() -> bool:
+    """Explicit opt-in; a route never grants project or account access."""
+    return get("RELAY_PRIVATE_MCP_ENABLED") == "1"
+
+
+def runtime_identity_enabled() -> bool:
+    """Optional process identity; no deployment or runtime change by default."""
+    return get("RELAY_RUNTIME_IDENTITY_ENABLED") == "1"
+
+
+def private_mcp_boot_enabled() -> bool:
+    """Read the durable opt-in without creating a DB or reusing cached state."""
+    raw = os.environ.get("FOURBIS_DB_PATH", "")
+    path = Path(raw).expanduser() if raw else Path.home() / ".4bis" / "relay.db"
+    try:
+        if not path.is_file():
+            return False
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+            row = conn.execute("SELECT value FROM system_config WHERE key=?",
+                               ("RELAY_PRIVATE_MCP_ENABLED",)).fetchone()
+        return bool(row and row[0] == "1")
+    except (sqlite3.Error, OSError, ValueError):
+        return False

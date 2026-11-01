@@ -263,4 +263,5 @@ async def api_admin_restart(request: web.Request) -> web.Response:
     })
 
 # Compatibilidad de imports históricos; el dominio Equipo vive en admin_users.
-from .admin_users import api_me, api_users_list, api_user_upsert, api_user_delete  # noqa: F401,E402
+from .admin_users import (api_me, api_users_list, api_user_upsert, api_user_delete,
+                         api_user_archive, api_user_restore)  # noqa: F401,E402

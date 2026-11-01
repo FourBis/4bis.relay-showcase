@@ -1,6 +1,5 @@
 """Rutas de estado operativo: assets, health, métricas, logs y búsqueda."""
 from __future__ import annotations
-from datetime import datetime
 import collections
 import logging
 import time
@@ -135,9 +134,17 @@ async def api_health(request: web.Request) -> web.Response:
     except Exception:  # noqa: BLE001
         drafts_pending = 0
 
+    deployment = {}
+    if relay_config.runtime_identity_enabled():
+        from . import conversation_access, deployment_metadata
+        candidate = await deployment_metadata.health_payload(request.app)
+        current = await conversation_access.current_user(db, identity.requester(request))
+        if current.get("role") == identity.OWNER_ROLE and relay_config.runtime_identity_enabled():
+            deployment = candidate
     return web.json_response({
         "ok": True,
         "relay_version": RELAY_VERSION,
+        **deployment,
         "projects_total": len(projects),
         "projects_indexed": indexed_count,
         "vscode_sessions_live": sessions_count,
@@ -147,19 +154,22 @@ async def api_health(request: web.Request) -> web.Response:
     })
 
 async def api_report(request: web.Request) -> web.Response:
-    """GET /admin/api/report?days=N&project=slug — informe de uso.
+    """GET /admin/api/report?from=YYYY-MM-DD&to=YYYY-MM-DD — informe.
 
     UI 2026-07-20: agregados de tokens/runs por día, proyecto y autor.
     El GROUP BY vive en SQL (ver Database.report_usage) porque /chats
     capea en 200 filas. Read-only.
     """
     db = request.app[DB_KEY]
-    try:
-        days = min(max(int(request.query.get("days", "30")), 1), 365)
-    except ValueError:
-        days = 30
+    win = parse_window(request.query, default_days=30,
+                       days_min=1, days_max=365)
+    if "error" in win:
+        return web.json_response({"ok": False, "error": win["error"]},
+                                 status=400)
     project = request.query.get("project") or None
-    data = await db.report_usage(days, project_slug=project)
+    data = await db.report_usage(
+        win["days"], project_slug=project,
+        from_date=win["from_date"], to_date=win["to_date"], tz=win["tz"])
     return web.json_response(data)
 
 _METRICS_STATUSES = ("ok", "error", "running", "cancelled", "split")
@@ -185,48 +195,13 @@ def _parse_metrics_window(query: Mapping[str, str]) -> dict:
     no tiene reloj de negocio, y "sin datos en ese día" ya es la
     respuesta correcta.
     """
-    f = (query.get("from") or "").strip()
-    t = (query.get("to") or "").strip()
-    if f or t:
-        # Si solo viene uno de los dos, el usuario a medio completar
-        # inputs: mejor 400 que devolver un rango silencioso.
-        if not f or not t:
-            return {"error": web.json_response(
-                {"ok": False, "error": "from y to deben venir juntos"},
-                status=400)}
-        try:
-            f_date = datetime.strptime(f, "%Y-%m-%d").date()
-            t_date = datetime.strptime(t, "%Y-%m-%d").date()
-        except ValueError:
-            return {"error": web.json_response(
-                {"ok": False,
-                 "error": "from/to deben ser YYYY-MM-DD"},
-                status=400)}
-        if t_date < f_date:
-            return {"error": web.json_response(
-                {"ok": False,
-                 "error": "to no puede ser anterior a from"},
-                status=400)}
-        # Amplitud inclusiva: from=01/01 to=01/01 es 1 día, no 0. El
-        # cap en días se hace comparando la diferencia de fechas; el
-        # límite de 366 ya cubre el peor caso de año bisiesto.
-        span = (t_date - f_date).days + 1
-        if span > _METRICS_RANGE_MAX_DAYS:
-            return {"error": web.json_response(
-                {"ok": False,
-                 "error": f"rango máximo {_METRICS_RANGE_MAX_DAYS} días"},
-                status=400)}
-        return {"from_date": f, "to_date": t, "days": None}
-    # Fallback a `days`. Misma lista blanca que ya tenía summary: 1..90,
-    # y un valor fuera de rango se ignora silenciosamente (dashboard,
-    # no API de escritura). `days=0` o negativo cae al default.
-    raw = (query.get("days") or "").strip()
-    try:
-        d = int(raw) if raw else 7
-    except ValueError:
-        d = 7
-    d = min(max(d, 1), 90)
-    return {"from_date": "", "to_date": "", "days": d}
+    result = parse_window(query, default_days=7, days_min=1, days_max=90,
+                          range_max_days=_METRICS_RANGE_MAX_DAYS,
+                          needs_previous=True)
+    if "error" in result:
+        return {"error": web.json_response(
+            {"ok": False, "error": result["error"]}, status=400)}
+    return result
 
 async def api_metrics_summary(request: web.Request) -> web.Response:
     """GET /admin/api/metrics/summary — KPIs y distribuciones.
@@ -250,6 +225,7 @@ async def api_metrics_summary(request: web.Request) -> web.Response:
         win["days"],
         from_date=win["from_date"],
         to_date=win["to_date"],
+        tz=win["tz"],
         project=q.get("project", "").strip(),
         status=status if status in _METRICS_STATUSES else "",
         provider=q.get("provider", "").strip(),
@@ -280,6 +256,7 @@ async def api_metrics_trends(request: web.Request) -> web.Response:
         win["days"],
         from_date=win["from_date"],
         to_date=win["to_date"],
+        tz=win["tz"],
         project=q.get("project", "").strip(),
         status=status if status in _METRICS_STATUSES else "",
     ))
@@ -302,8 +279,12 @@ async def api_search(request: web.Request) -> web.Response:
         limit = 8
     db = request.app[DB_KEY]
     data = await db.global_search(q, limit=limit)
-    from .external_pr_access import visible_records
-    data["conversations"] = await visible_records(request, db, data["conversations"])
+    from .private_mcp_access import _visible_groups
+    data.update(await _visible_groups(request, {
+        "projects": ("project", data["projects"]),
+        "chats": ("chat", data["chats"]),
+        "conversations": ("conversation", data["conversations"]),
+    }, project_query=q, project_limit=limit))
     return web.json_response(data)
 
 _LOG_BUFFER: collections.deque = collections.deque(maxlen=2000)

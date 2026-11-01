@@ -24,6 +24,16 @@ async def api_projects(request: web.Request) -> web.Response:
     """GET /admin/api/projects — lista con estado de index."""
     db = request.app[DB_KEY]
     projects = await db.list_projects(enabled_only=False)
+    if request.query.get("capability") == "chat":
+        # The chat picker needs names and current capabilities, not repository
+        # inspection, index statistics or connection configuration.
+        can_consult = identity.role_of(request) in {"owner", "member", "subadmin"}
+        return web.json_response({"projects": [
+            {"slug": p["slug"], "name": p["name"], "enabled": True,
+             "can_create_read": can_consult,
+             "can_create_write": can_consult and p["slug"].lower() != "notes"
+                 and identity.can_write_project(request, p)}
+            for p in projects if p.get("enabled", True)]})
     if request.query.get("capability") == "external_pr":
         eligible = []
         for project in projects:
@@ -385,6 +395,17 @@ async def api_projects_patch(request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
     changes = {"slug": project["slug"]}
     policy_updates = {}
+    if "external_pr_review_policy" in body:
+        if identity.role_of(request) != "owner":
+            return web.json_response({"error": "Sólo el administrador puede configurar revisión automática"}, status=403)
+        from .external_review_config import validate
+        try:
+            review_policy = validate(body["external_pr_review_policy"],
+                model_specs={row["spec"] for row in await db.list_models() if row.get("enabled", True)},
+                users=await db.list_users())
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=422)
+        policy_updates["external_pr_review_policy"] = review_policy
     if "external_pr_policy" in body:
         try:
             policy = _external_pr_policy(body["external_pr_policy"])
