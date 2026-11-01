@@ -1,17 +1,31 @@
 """Eventos de herramientas, salidas de consola y redacción de secretos."""
 from __future__ import annotations
 import json
+import hashlib
 import logging
 import re
 from pydantic_ai.messages import ToolReturnPart
 from typing import Any, Optional
 from . import expert_history
+from .secret_redaction import _SECRETOS_RE, redact_text as _redactar
 
 logger = logging.getLogger("relay.experts")
 
 
 _STEP_DIFF_MAX_LINES = 40
 _STEP_DIFF_MAX_CHARS = 1600
+
+_EVIDENCE_TIMESTAMPS_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b")
+_EVIDENCE_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/)[^\s:'\"]+")
+_EVIDENCE_DURATION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:ms|msec|s|sec|secs|seconds?)\b", re.I)
+_SHELL_EXIT_RE = re.compile(r"\(exit=(-?\d+)\)\s*$", re.I)
+_EVIDENCE_FAILURE_RE = re.compile(
+    r"^(?:error\b|failed\b|failure\b|traceback\b|exception\b|"
+    r"❌|✖\s*error\b|command failed\b|tool error\b)", re.I)
+_MUTATING_TOOLS = {"write_file", "edit_file", "move_file", "delete_file"}
 
 
 def _args_de_part(part: Any) -> dict:
@@ -33,71 +47,9 @@ def _args_de_part(part: Any) -> dict:
     return {}
 
 
-#: Credenciales que los expertos pasan por línea de comandos y que, sin
-#: esto, quedaban guardadas para siempre. Barrido del 2026-09-02 sobre
-#: `relay.db` + los 1240 `.md` de chats: 1 token de GitHub (94 copias del
-#: mismo), 22 headers `Authorization`, 22 `password=`, 8 connection
-#: strings, 7 passwords en URL, 3 `api_key` y 1 AWS access key, en siete
-#: proyectos de clientes.
-#:
-#: Se redacta SOLO el secreto y se conserva la etiqueta: `Password=[…]`
-#: sigue diciendo que había un password ahí, que es lo que necesita quien
-#: lee el log para entender qué pasó. Un `[REDACTED]` que se come la línea
-#: entera vuelve el timeline inútil.
-_SECRETOS_RE: tuple[tuple[re.Pattern, str], ...] = (
-    # Header Authorization: se guarda el esquema, se tapa el valor.
-    (re.compile(r"(Authorization\s*:\s*(?:Bearer|token|Basic)\s+)\S+", re.I),
-     r"\1[REDACTED]"),
-    # Tokens con prefijo reconocible: el prefijo dice de qué era.
-    (re.compile(r"\b(gh[pousr]_)[A-Za-z0-9]{20,}"), r"\1[REDACTED]"),
-    (re.compile(r"\b(github_pat_)[A-Za-z0-9_]{30,}"), r"\1[REDACTED]"),
-    (re.compile(r"\b(sk-(?:ant-)?)[A-Za-z0-9_\-]{20,}"), r"\1[REDACTED]"),
-    (re.compile(r"\b(xox[baprs]-)[A-Za-z0-9\-]{10,}"), r"\1[REDACTED]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY]"),
-    # Credenciales en URL: `postgres://user:pass@host` → tapa solo `pass`.
-    (re.compile(r"([a-z][a-z0-9+.\-]*://[^\s:/@]+:)([^\s@]{3,})(@)"),
-     r"\1[REDACTED]\3"),
-    # `password=`, `pwd=`, `api_key=`, `secret=` y compañía. La comilla
-    # de apertura va DENTRO del grupo que se conserva: sin eso,
-    # `PASSWORD='secreto'` no matcheaba —la clase excluye comillas, así
-    # que el valor no arrancaba nunca— y se filtraban 3 de 17 connection
-    # strings del corpus real (medido 2026-09-02).
-    (re.compile(r"((?:password|passwd|pwd|api[_-]?key|apikey|secret|"
-                r"access[_-]?key|client[_-]?secret)\s*[=:]\s*['\"]?)"
-                r"(?!\[REDACTED)([^\s;,'\"]{3,})", re.I),
-     r"\1[REDACTED]"),
-    # Clave privada PEM: se tapa el cuerpo entero, no solo la cabecera.
-    (re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?"
-                r"(-----END [A-Z ]*PRIVATE KEY-----)"),
-     r"\1[REDACTED]\2"),
-)
-
-
-def _redactar(texto: Optional[str]) -> Optional[str]:
-    """Tapa credenciales en un string que va a persistirse o mostrarse.
-
-    Se aplica en `_format_tool_step`, que es el productor ÚNICO de las
-    cadenas que terminan en `chats.progress_events` (y de ahí en los
-    `.md` y en el contexto que se le re-inyecta al LLM). Redactar acá
-    cubre los dos `_emit_progress` y los dos callers sin tocarlos.
-
-    Es seguro porque estas cadenas son SOLO display: el comando que se
-    ejecuta viaja por los args de la tool, no por acá. Verificado
-    2026-09-02: el `cmd` persistido solo se asigna a `turn["cmd"]`,
-    `step["cmd"]` y `paso["cmd"]`, nunca se ejecuta.
-
-    Lo que NO hace: el secreto sigue existiendo en memoria mientras el
-    comando corre, y en la salida del proceso si la herramienta lo
-    imprime. Esto corta la ACUMULACIÓN, que es lo que convertía un uso
-    puntual en un archivo permanente.
-    """
-    if not texto:
-        return texto
-    for rx, repl in _SECRETOS_RE:
-        texto = rx.sub(repl, texto)
-    return texto
-
-
+#: Redacta credenciales de las copias persistidas o mostradas. La etiqueta se
+#: conserva para que el diagnóstico siga siendo legible; los archivos originales
+#: y los argumentos que ejecuta la herramienta no se reescriben aquí.
 def _clasificar_partes(mr: Any) -> tuple[list, list[str], list[str]]:
     """Parte un `ModelResponse` en (tools pedidas, textos a narrar, bitácora).
 
@@ -258,7 +210,8 @@ def _console_tool_outputs(node) -> list[tuple[str, str, str]]:
     try:
         req = getattr(node, "request", None)
         for part in getattr(req, "parts", []) or []:
-            if not isinstance(part, ToolReturnPart):
+            retry = type(part).__name__ == "RetryPromptPart"
+            if not isinstance(part, ToolReturnPart) and not retry:
                 continue
             name = getattr(part, "tool_name", None) or ""
             if name not in expert_history._CONSOLE_TOOLS:
@@ -266,7 +219,7 @@ def _console_tool_outputs(node) -> list[tuple[str, str, str]]:
             content = getattr(part, "content", "")
             text = content if isinstance(content, str) else repr(content)
             out.append((name, expert_history._cap_text(
-                text.strip() or "(sin salida)",
+                _redactar(text.strip()) or "(sin salida)",
                 _STEP_OUT_MAX, keep_tail=_STEP_OUT_TAIL),
                 getattr(part, "tool_call_id", "") or ""))
     except Exception as e:  # noqa: BLE001
@@ -275,12 +228,82 @@ def _console_tool_outputs(node) -> list[tuple[str, str, str]]:
 
 
 def _tool_loop_detected(recent: "deque[str]") -> bool:
-    """Ventana llena de tool calls idénticas (tool + args) = loop.
+    """Detecta una ventana de fallas repetidas, aun con args distintos."""
+    return len(recent) == recent.maxlen and all(
+        item == "falla-repetida" for item in recent)
 
-    Es el gate del auto-continue de presupuesto (2026-07-20c): si las
-    últimas N llamadas son exactamente la misma operación, extender el
-    presupuesto solo alarga el loop. Tools variadas = trabajo real.
-    ponytail: heurística naive — no ve loops alternados (A,B,A,B…);
-    subir a detección con período si aparece ese caso real.
+
+def _tool_stalled(recent: "deque[str]") -> bool:
+    """Detecta resultados repetidos; las lecturas/polls no cuentan como avance."""
+    return len(recent) == recent.maxlen and all(
+        item in ("sin-progreso", "falla-repetida") for item in recent)
+
+
+def _progress_signature(evidence: Any) -> str:
+    """Firma evidencia estructurada para comparar dos puntos del run."""
+    value = evidence if isinstance(evidence, str) else json.dumps(
+        evidence, sort_keys=True, default=str, ensure_ascii=False)
+    value = _EVIDENCE_TIMESTAMPS_RE.sub("<timestamp>", value.strip())
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _tool_result_evidence(node: Any, call_args: dict[str, tuple[str, dict]]) -> list[str]:
+    """Firmas estables de resultados MCP para decidir si el run avanzó.
+
+    Las fallas se comparan por resultado, no por comando/args, para que
+    variar el comando no oculte una repetición del mismo error. Escrituras
+    confirmadas incluyen sus argumentos: `write_file` suele responder con
+    el mismo texto aunque haya guardado contenido distinto.
     """
-    return len(recent) == recent.maxlen and len(set(recent)) == 1
+    evidence = []
+    try:
+        req = getattr(node, "request", None)
+        for part in getattr(req, "parts", []) or []:
+            retry = type(part).__name__ == "RetryPromptPart"
+            if not isinstance(part, ToolReturnPart) and not retry:
+                continue
+            call_id = getattr(part, "tool_call_id", "") or ""
+            tool, args = call_args.get(call_id, (
+                getattr(part, "tool_name", None) or "?", {}))
+            content = getattr(part, "content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True, default=str,
+                                     ensure_ascii=False)
+            content = _EVIDENCE_TIMESTAMPS_RE.sub("<timestamp>", content.strip())
+            outcome = str(getattr(part, "outcome", "") or "").lower()
+            raw_content = getattr(part, "content", None)
+
+            def _has_error(value: Any) -> bool:
+                if isinstance(value, dict):
+                    return bool(value.get("isError") or value.get("is_error")
+                                or value.get("error")) or any(
+                                    _has_error(v) for v in value.values())
+                if isinstance(value, (list, tuple)):
+                    return any(_has_error(v) for v in value)
+                return bool(getattr(value, "isError", False)
+                            or getattr(value, "is_error", False))
+
+            is_error = _has_error(raw_content)
+            exit_match = _SHELL_EXIT_RE.search(content)
+            shell_failed = bool(exit_match and int(exit_match.group(1)) != 0)
+            failed = (retry or outcome not in ("", "success")
+                      or is_error or shell_failed
+                      or bool(_EVIDENCE_FAILURE_RE.match(content)))
+            if failed:
+                # Rutas y timestamps variables no convierten el mismo error
+                # en evidencia nueva. El mensaje/causa sí se conserva.
+                normalized = _EVIDENCE_PATH_RE.sub("<path>", content)
+                normalized = _EVIDENCE_DURATION_RE.sub("<duration>", normalized)
+                material = f"error:{tool}:{normalized}"
+            else:
+                material = f"ok:{tool}:{content}"
+                if tool in _MUTATING_TOOLS:
+                    material += ":" + json.dumps(
+                        args, sort_keys=True, default=str, ensure_ascii=False)
+            evidence.append(("error:" if failed else "ok:") +
+                            _progress_signature(material))
+    except Exception as e:  # noqa: BLE001 — best-effort, nunca frena el run
+        logger.warning("no pude calcular evidencia de progreso: %r", e)
+        return ["error:" + _progress_signature(
+            f"evidence-extraction-failed:{type(e).__name__}")]
+    return evidence

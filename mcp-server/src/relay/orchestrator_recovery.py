@@ -53,8 +53,16 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
                 and all(states[d] not in (G.FALLADO, G.BLOQUEADO) for d in deps)):
             states[tid] = G.PENDIENTE
             reopened.add(tid)
-    projected = [G.Nodo.desde_fila(dict(t, estado=states[t["id"]]), t.get("deps") or ())
-                 for t in graph["tasks"]]
+    # Preview the same explicit grant that the transaction below persists.
+    # Eligibility checks the durable attempt limit; leaving the old limit in
+    # this projection would reject an otherwise authorized budget resume.
+    projected = []
+    for task in graph["tasks"]:
+        row = dict(task, estado=states[task["id"]])
+        if task["id"] in reopened:
+            previous_limit = int(2 if task.get("max_intentos") is None else task["max_intentos"])
+            row["max_intentos"] = max(previous_limit, int(task.get("intentos") or 0) + 1)
+        projected.append(G.Nodo.desde_fila(row, task.get("deps") or ()))
     if not G.listas(projected) and not any(n.estado == G.CORRIENDO for n in projected):
         return []  # Otra dependencia aún impide ejecutar: conservar todo el estado.
     statements = []

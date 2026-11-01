@@ -1,5 +1,6 @@
 """Resultado durable primero; exportación recuperable después, sin repetir el LLM."""
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import time
@@ -182,9 +183,26 @@ async def export(db, chat_id: str, artifact: dict | str, *, reintento: bool = Fa
 
 
 async def finish(db, chat_id: str, *, artifact: dict, **fields):
-    # Una transacción conserva el resultado y el estado terminal. Si el
-    # disco de exportación falla, el chat sigue terminado y se puede leer.
-    await db.finish_chat(chat_id, artifact=artifact, **fields)
+    # Preserve the exact produced result while its commit settles. Cancellation
+    # must not release the caller while SQLite can still change its outcome.
+    artifact, fields = deepcopy(artifact), deepcopy(fields)
+    writer = asyncio.create_task(db.finish_chat(chat_id, artifact=artifact, **fields))
+    cancelled = False
+    while not writer.done():
+        try:
+            await asyncio.shield(writer)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    try:
+        writer.result()
+    except Exception as exc:
+        if cancelled:
+            raise asyncio.CancelledError from exc
+        raise
+    if cancelled:
+        raise asyncio.CancelledError
     return await export(db, chat_id, artifact)
 
 

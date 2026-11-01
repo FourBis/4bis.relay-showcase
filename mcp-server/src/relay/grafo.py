@@ -118,7 +118,8 @@ class Nodo:
             deps=tuple(deps), estado=fila.get("estado") or PENDIENTE,
             idempotente=bool(fila.get("idempotente")),
             intentos=int(fila.get("intentos") or 0),
-            max_intentos=int(fila.get("max_intentos") or 2),
+            # An explicit zero is a persisted limit, not a missing value.
+            max_intentos=int(2 if fila.get("max_intentos") is None else fila["max_intentos"]),
             detalle=fila.get("detalle") or "", orden=int(fila.get("orden") or 0),
             archivos=archivos, parent_id=fila.get("parent_id"),
         )
@@ -245,7 +246,7 @@ def capas(nodos: list[Nodo]) -> list[list[str]]:
 def listas(nodos: list[Nodo]) -> list[Nodo]:
     """Las tareas que se pueden lanzar AHORA.
 
-    Pendientes con todas sus dependencias en `hecho`. Devuelve varias
+    Pendientes con intentos disponibles y todas sus dependencias en `hecho`. Devuelve varias
     porque el punto del DAG es poder lanzarlas juntas; quien llama decide
     cuántas toma según su presupuesto de paralelismo.
     """
@@ -253,6 +254,7 @@ def listas(nodos: list[Nodo]) -> list[Nodo]:
     salida = [
         n for n in nodos
         if n.estado == PENDIENTE
+        and n.intentos < n.max_intentos
         and all(por_id[d].estado == HECHO for d in n.deps if d in por_id)
     ]
     return sorted(salida, key=lambda n: (n.orden, n.id))

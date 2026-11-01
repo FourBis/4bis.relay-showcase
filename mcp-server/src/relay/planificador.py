@@ -236,7 +236,7 @@ def parsear_tareas(texto: str, *, max_tareas: int = MAX_TAREAS) -> list[dict]:
             # Default `False` a propósito, igual que en el grafo: un
             # campo que el modelo no puso no es un permiso para
             # reintentar solo algo que ya pudo tener efecto.
-            "idempotente": bool(t.get("idempotente")),
+            "idempotente": t.get("idempotente") is True,
             "orden": i,
         })
     return salida
