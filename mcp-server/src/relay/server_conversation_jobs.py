@@ -221,8 +221,8 @@ async def _autoclose_sweeper(app: web.Application) -> None:
     """Cierra conversaciones abiertas sin actividad > N horas y las
     compacta (ADR-025). N = FOURBIS_CONV_AUTOCLOSE_H (default 24).
 
-    No hace falta chequear runs vivos: touch_conversation se llama al
-    INICIO de cada run, y un run dura <= expert_timeout << 24h.
+    El cierre revalida la inactividad y conserva grafos activos o preguntas
+    abiertas; la consulta previa no autoriza cerrar un estado que ya cambió.
     """
     from . import config as relay_config
     db: Database = app[DB_KEY]
@@ -234,7 +234,7 @@ async def _autoclose_sweeper(app: web.Application) -> None:
                 project = await db.get_project(conv["project_slug"])
                 if project and coordination.busy(db, project):
                     continue
-                if await db.close_conversation(conv["id"]):
+                if await db.close_stale_conversation(conv["id"], hours):
                     logger.info("auto-close conv=%s (> %sh sin actividad)",
                                 conv["id"][:8], hours)
                     if conv.get("messages_json"):

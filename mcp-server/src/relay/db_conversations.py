@@ -7,6 +7,18 @@ from typing import Optional
 
 from .db_support import now_iso
 
+
+_AUTOCLOSE_ELIGIBLE = (
+    "c.status='open' AND c.last_activity_at < ? "
+    "AND COALESCE(json_extract(c.task_json, '$.mode'), '') <> 'external_pr' "
+    "AND COALESCE(json_extract(c.task_json, '$.workspace_path'), '') = '' "
+    "AND NOT EXISTS (SELECT 1 FROM task_graphs g "
+    "WHERE g.conversation_id=c.id AND g.estado='activo') "
+    "AND NOT EXISTS (SELECT 1 FROM expert_questions q "
+    "LEFT JOIN chats h ON h.id=q.chat_id WHERE q.status='open' "
+    "AND (q.conversation_id=c.id OR h.conversation_id=c.id))"
+)
+
 class DatabaseConversationsMixin:
 
     async def global_search(self, q: str, limit: int = 8) -> dict:
@@ -308,14 +320,23 @@ class DatabaseConversationsMixin:
             (summary, conv_id))
 
     async def stale_open_conversations(self, hours: float) -> list[dict]:
-        """Conversaciones abiertas sin actividad hace > `hours` (sweeper)."""
+        """Inactivas y sin trabajo o decisiones pendientes para el sweeper."""
         cutoff = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
         return await self.run(
-            "SELECT id, project_slug, messages_json FROM conversations "
-            "WHERE status='open' AND last_activity_at < ? "
-            "AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
-            "AND COALESCE(json_extract(task_json, '$.workspace_path'), '') = ''", (cutoff,))
+            "SELECT c.id, c.project_slug, c.messages_json, c.requested_by FROM conversations c "
+            f"WHERE {_AUTOCLOSE_ELIGIBLE}", (cutoff,))
+
+
+    async def close_stale_conversation(self, conv_id: str, hours: float) -> bool:
+        """Revalida al cerrar: una pregunta o grafo nuevos ganan al temporizador."""
+        cutoff = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+        rows = await self.run(
+            "UPDATE conversations AS c SET status='closed', closed_at=? "
+            f"WHERE c.id=? AND {_AUTOCLOSE_ELIGIBLE} RETURNING id",
+            (now_iso(), conv_id, cutoff))
+        return bool(rows)
 
     # ---- facts (ADR-026: hechos atómicos, append-only + supersede soft) ----
 
