@@ -78,7 +78,7 @@ class _Index:
         """
         return tuple(s for s in self.skills if s.enabled and s.manual)
 
-def _parse_skill_md(path: Path, dir_name: str) -> Optional[Skill]:
+def _parse_skill_md(path: Path, dir_name: str, *, text: Optional[str] = None) -> Optional[Skill]:
     """Lee un SKILL.md y devuelve Skill, o None si está roto.
 
     Saltea con warning si:
@@ -86,11 +86,12 @@ def _parse_skill_md(path: Path, dir_name: str) -> Optional[Skill]:
     - no tiene frontmatter
     - el frontmatter está vacío y no podemos derivar nada
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        logger.warning("skills: no pude leer %s: %r (salteando)", path, e)
-        return None
+    if text is None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("skills: no pude leer %s: %r (salteando)", path, e)
+            return None
 
     m = _FRONTMATTER_RE.match(text)
     if not m:

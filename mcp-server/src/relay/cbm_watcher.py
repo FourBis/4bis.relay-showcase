@@ -124,7 +124,10 @@ async def _run(app) -> None:
         def on_any_event(self, event) -> None:  # noqa: ANN001 — watchdog event
             if getattr(event, "is_directory", False):
                 return
-            if is_noise(getattr(event, "src_path", "") or ""):
+            # Un renombrado puede traer código desde un temporal ignorado.
+            paths = (getattr(event, "src_path", ""),
+                     getattr(event, "dest_path", ""))
+            if not any(path and not is_noise(path) for path in paths):
                 return
             pending[self.slug] = time.monotonic()
 

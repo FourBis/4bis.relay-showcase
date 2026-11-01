@@ -372,43 +372,30 @@ def _looks_like_cmd(cmd: str) -> bool:
         or _CMD_WIN_FLAG_RE.search(cmd))
 
 
-#: Una ruta Windows absoluta DENTRO del comando: `C:\\Users\\x`. Corta en
-#: espacio, comilla o metacaracter de shell, que es donde termina el
-#: argumento.
-_RUTA_WIN_EN_CMD_RE = re.compile(r"""([A-Za-z]):(\\[^\s"'|&;<>]*)""")
+# Sólo el primer comando puede tener un operando de directorio inequívoco.
+# No buscar cd/pushd tras separadores: también aparecen como datos de arrays
+# o como nombres/argumentos después de una redirección.
+_BASH_CD_WIN_PATH_RE = re.compile(
+    r"""\A[ \t]*(?:cd|pushd)[ \t]+(?:--[ \t]+)?"""
+    r"""(?P<path>[A-Za-z]:\\[^\x00\s"'`|&;<>()$#*?\[\]{}!~]*)"""
+    r"""[ \t]*(?=$|&&|;)""")
 
 
 def _rutas_para_bash(cmd: str) -> str:
-    """`cd C:\\Users\\x && …` → `cd C:/Users/x && …`.
+    """Adapta sólo un cd/pushd inicial simple, sin interpretar el resto.
 
-    2026-09-04, medido: `_looks_like_sh` es la ÚNICA de las cuatro
-    heurísticas de ruteo sin la guarda de `\\`; las otras tres la
-    tienen. Así que un comando que mezcla ruta Windows con utilidad unix
-    —`cd C:\\repo && dotnet build | tail -40`, que es exactamente la
-    forma en que el modelo pide el final de una compilación— se va
-    entero a bash, y bash trata cada `\\` como escape del carácter
-    siguiente:
-
-        cd C:\\Users\\demo\\source\\repos\\FourBis\\4bis.relay && git ls-files
-        → cd: C:UsersdemosourcereposFourBis4bis.relay: No such file or directory
-
-    El directorio existe: el modelo lee "no existe" de una ruta que él
-    escribió bien y no tiene cómo saber que el problema es el escaping.
-    Medido sobre el historial: 54 comandos con esta forma, 9 de los
-    cuales todavía rutean a `sh`, y un chat que pegó 4 veces seguidas
-    contra esto variando el pipe del final.
-
-    Se convierte en vez de mandar el comando a `cmd.exe` porque `cmd`
-    no tiene `tail`: la guarda arreglaría la ruta rompiendo el pipe. Git
-    Bash entiende `C:/Users/x` igual que `/c/Users/x`.
-
-    ponytail: sustitución textual, así que también toca una ruta que
-    estuviera adentro de comillas simples (`grep 'C:\\temp'`). Hoy ese
-    caso ya está roto —bash se come las barras igual—, así que no hay
-    nada que preservar; si aparece uno real, hace falta tokenizar.
+    Saltos de línea, agrupaciones, redirecciones y backticks se dejan intactos.
+    Otros argumentos, citas y payloads no se buscan como posibles comandos.
     """
-    return _RUTA_WIN_EN_CMD_RE.sub(
-        lambda m: f"{m.group(1)}:{m.group(2).replace(chr(92), '/')}", cmd)
+    if any(char in cmd for char in "\r\n<>(){}`"):
+        return cmd
+    match = _BASH_CD_WIN_PATH_RE.match(cmd)
+    if match is None:
+        return cmd
+    start, end = match.span("path")
+    if cmd[end - 1] == "\\":
+        return cmd  # Puede escapar el espacio/operador: no inferir un límite.
+    return cmd[:start] + cmd[start:end].replace("\\", "/") + cmd[end:]
 
 
 def build_argv(cmd: str, *, shell_kind: str = "auto") -> tuple[list[str], str]:
@@ -429,6 +416,7 @@ def build_argv(cmd: str, *, shell_kind: str = "auto") -> tuple[list[str], str]:
         que el $PROFILE de PowerShell.
     """
     kind = (shell_kind or "auto").lower()
+    automatic = kind == "auto"
     if kind == "auto":
         if shell_environment.IS_WINDOWS:
             # Primero de todo: si el modelo ya envolvió el comando en un
@@ -466,12 +454,10 @@ def build_argv(cmd: str, *, shell_kind: str = "auto") -> tuple[list[str], str]:
     if kind == "cmd":
         exe = os.environ.get("COMSPEC") or "cmd.exe"
         return ([exe, "/d", "/s", "/c", cmd], kind)
-    # Ya está decidido que va a bash: las rutas Windows que traiga el
-    # comando se pasan a barra normal o bash se come los backslashes
-    # (ver `_rutas_para_bash`). Va acá y no en el `auto` para que las
-    # heurísticas de ruteo sigan viendo el comando tal como lo escribió
-    # el modelo, y para que también cubra un `shell_kind="sh"` explícito.
-    if shell_environment.IS_WINDOWS:
+    # Un intérprete explícito recibe el command original. En auto se
+    # adapta sólo el operando de directorio inequívoco, después de elegir
+    # el shell; patrones, scripts y strings no son rutas a normalizar.
+    if automatic and shell_environment.IS_WINDOWS:
         cmd = _rutas_para_bash(cmd)
     shell = shell_environment.bash_exe() or "/bin/sh"
     if shell.lower().endswith("bash.exe") or shell.endswith("bash"):

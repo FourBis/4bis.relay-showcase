@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 from . import git_branches, git_process
+from .night_gate_process import GateCleanupError
 
 logger = logging.getLogger("relay.git_flow")
 
@@ -243,7 +244,7 @@ async def finalize_conversation_pr(
     repo: str, branch: str, *, title: str, body: str,
     body_builder: Optional[Callable[[str, str], Awaitable[tuple[str, bool]]]] = None,
 ) -> dict:
-    """/cerrar: auto-commit pendiente → ensure develop → push → PR a develop.
+    """/cerrar legacy: auto-commit pendiente → verificar develop → push → PR.
 
     `body_builder(stat, diff)` (opcional) se llama una vez que la rama
     tiene commits propios y devuelve `(texto, draft)`: el texto se
@@ -261,7 +262,18 @@ async def finalize_conversation_pr(
         if not await git_branches.is_git_repo(repo):
             result["error"] = f"{repo} no es un repo git"
             return result
-        base = await git_branches.detect_base_branch(repo)
+        # El flujo legacy de /cerrar publica a develop. No reemplazarla por
+        # main/master ni crearla aquí: el operador debe preparar la base.
+        if await git_branches._branch_exists(
+                repo, f"origin/{git_process.DEVELOP_BRANCH}"):
+            base = f"origin/{git_process.DEVELOP_BRANCH}"
+        elif await git_branches._branch_exists(repo, git_process.DEVELOP_BRANCH):
+            base = git_process.DEVELOP_BRANCH
+        else:
+            result["error"] = (
+                "no existe la base develop (local ni origin/develop); "
+                "no puedo contar cambios ni abrir el PR")
+            return result
         # Cambios sin commitear del experto → commit determinista del relay.
         had_pending = not (await git_branches.working_tree_clean(repo))[0]
         err = await _autocommit_pending(repo, branch, title)
@@ -283,16 +295,17 @@ async def finalize_conversation_pr(
             stat, diff = await branch_diff(repo, base, branch)
             try:
                 built, result["draft"] = await body_builder(stat, diff)
+            except GateCleanupError as error:
+                # A failed verification process may still be writing here.
+                # Do not downgrade this to a missing PR description and push.
+                result.update(error=f"GateCleanupError: {error}", manual_recovery=True, draft=True)
+                logger.error("git_flow: publicación detenida por limpieza de gate incierta")
+                return result
             except Exception:  # noqa: BLE001
                 logger.exception("body_builder rompió (uso body base)")
                 built = ""
             if built:
                 body = f"{built}\n\n---\n{body}"
-        # develop trunk.
-        err = await _ensure_develop(repo, base)
-        if err:
-            result["error"] = err
-            return result
         # push de la rama de la conversación.
         rc, out = await git_process._git(repo, "push", "-u", "origin", branch,
                              timeout=git_process.PUSH_TIMEOUT_S)

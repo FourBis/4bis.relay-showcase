@@ -310,4 +310,13 @@ async def discord_attachments_download(request: web.Request) -> web.Response:
     if path is None:
         return web.json_response(
             {"error": f"attachment {attach_id!r} no encontrado"}, status=404)
-    return web.FileResponse(path)
+    # Only passive image formats render in the authenticated origin.
+    image_type = attachments_mod.image_mime(path)
+    disposition = "inline" if image_type else "attachment"
+    return web.FileResponse(path, headers={
+        "Content-Type": image_type or "application/octet-stream",
+        "Content-Disposition": f'{disposition}; filename="{path.name}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'",
+        "Cache-Control": "private, no-store",
+    })

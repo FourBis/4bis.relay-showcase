@@ -17,8 +17,8 @@ def sql_tools(db, policy: ExecutionPolicy, *, perm=None) -> list[Tool]:
         """
         try:
             return dbtool.describir(await db.list_db_connections())
-        except Exception as e:  # noqa: BLE001
-            return f"error listando conexiones: {e}"
+        except Exception:  # noqa: BLE001
+            return "error listando conexiones: no se pudo leer el catálogo."
 
     async def db_query(conexion: str, sql: str, limite: int = 0) -> str:
         """Ejecuta una consulta SQL y devuelve las filas.
@@ -52,8 +52,10 @@ def sql_tools(db, policy: ExecutionPolicy, *, perm=None) -> list[Tool]:
         try:
             dsn, solo_lectura = await dbtool.resolver(
                 db, conexion, relay_db_path=str(getattr(db, "path", "")))
-        except dbtool.ConexionDesconocida as e:
-            return f"error: {e}"
+        except dbtool.ConexionDesconocida:
+            return "error: no se pudo resolver la conexión. Usa db_connections para consultar sus alias."
+        except Exception:  # noqa: BLE001 - no devolver errores del catálogo con posibles DSN
+            return "error: no se pudo leer la conexión registrada."
         solo_lectura = solo_lectura or policy.sql_read_only
         if perm is not None and dbtool.motor(dsn) == "sqlite":
             try:
@@ -64,8 +66,8 @@ def sql_tools(db, policy: ExecutionPolicy, *, perm=None) -> list[Tool]:
                     perm.exigir_escribible(path)
                     perm.exigir_libre(path)
                 dsn = str(path)
-            except (files.FueraDelRepo, files.SinPermiso) as exc:
-                return f"error: {exc}"
+            except (files.FueraDelRepo, files.SinPermiso, ValueError, OSError):
+                return "error: la base SQLite no está disponible con los permisos de este run."
         if limite and limite > 0:
             sql = sql.rstrip().rstrip(";")
             if " limit " not in sql.lower():

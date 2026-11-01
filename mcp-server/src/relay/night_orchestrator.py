@@ -371,6 +371,8 @@ class NightOrchestrator:
                 self.current_task = f"{task.id}: {task.title}"
                 result = await self.worker.work_one(task)
                 self.results.append(result)
+                if getattr(self.worker, "_manual_recovery", ""):
+                    raise RuntimeError(self.worker._manual_recovery)
                 if result.status == "done":
                     task.status = "done"
                     # En el modelo de rama única, `pr_url` lo asigna

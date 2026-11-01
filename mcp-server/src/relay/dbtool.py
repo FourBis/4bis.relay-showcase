@@ -48,6 +48,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("relay.dbtool")
 
@@ -83,11 +84,31 @@ def redactar(dsn: str) -> str:
     para siempre y viaja a cada llamada del modelo.
     """
     s = (dsn or "").strip()
-    m = re.match(r"^(?P<esquema>\w+)://(?:[^@/]*@)?(?P<resto>.*)$", s)
-    if not m:
-        return Path(s).name or "(local)"
-    resto = m.group("resto")
-    return f"{m.group('esquema')}://…@{resto}"
+    if not s:
+        return "(local)"
+    # Información de ubicación permitida; query, fragmento y userinfo se
+    # descartan completos, sin depender de cómo se llamen sus secretos.
+    def safe_name(value):
+        name = Path(value).name
+        return name if re.fullmatch(r"[\w. -]{1,128}", name) else "(base)"
+    if "://" not in s:
+        local = s.split("?", 1)[0].split("#", 1)[0]
+        return safe_name(local) if local.lower().endswith((".db", ".sqlite", ".sqlite3")) else "(conexión)"
+    try:
+        uri = urlsplit(s)
+        if uri.scheme not in {"postgres", "postgresql", "sqlite"}:
+            return "(conexión)"
+        if uri.scheme == "sqlite":
+            return "sqlite:///" + safe_name(uri.path)
+        host = uri.hostname or ""
+        if not re.fullmatch(r"[\w.:-]+", host):
+            return "(conexión)"
+        host = f"[{host}]" if ":" in host else host
+        port = f":{uri.port}" if uri.port is not None else ""
+        database = "/" + safe_name(uri.path) if uri.path.strip("/") else ""
+        return f"{uri.scheme}://…@{host}{port}{database}"
+    except (ValueError, TypeError):
+        return "(conexión)"
 
 
 def motor(dsn: str) -> str:
@@ -323,10 +344,13 @@ async def consultar(dsn: str, sql: str, *, params: Optional[list] = None,
         return (f"error: la consulta pasó {QUERY_TIMEOUT_S:.0f}s y se cortó. "
                 "Agregá un LIMIT, filtrá por índice, o pedile al humano que "
                 "suba FOURBIS_SQL_TIMEOUT.")
-    except FileNotFoundError as e:
-        return f"error: {e}"
+    except FileNotFoundError:
+        return "error: no se encontró la base local. Revisa la conexión registrada."
     except Exception as e:  # noqa: BLE001 — el error del motor es la respuesta
-        return f"error de {kind}: {type(e).__name__}: {e}"
+        # Los drivers pueden repetir DSN o parámetros decodificados. El
+        # mensaje crudo no debe entrar al historial ni a los logs.
+        return (f"error de {kind}: {type(e).__name__}. No se pudo completar la consulta; "
+                "revisa la conexión y la consulta sin pegar credenciales en el chat.")
     if not cols:
         return "(la consulta no devolvió columnas)"
     return _formatear(cols, filas, truncado=truncado)

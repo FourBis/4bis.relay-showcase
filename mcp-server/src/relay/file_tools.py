@@ -14,6 +14,7 @@ descripción que ve el modelo, no comentarios: se mueven verbatim.
 import os
 import tempfile
 import asyncio
+from contextlib import suppress
 
 from pydantic_ai import Tool
 from pydantic_ai.messages import BinaryContent
@@ -21,6 +22,8 @@ from pydantic_ai.messages import BinaryContent
 from . import attachments as attachments_mod
 from . import config
 from . import files as files_mod
+from .shell import is_background_log_path
+from .secret_redaction import redact_text
 
 
 def rutas_extra(defaults: dict) -> list:
@@ -128,7 +131,9 @@ def permisos_del_run(project: dict, defaults: dict, *, conversation_id: str,
         # para escribir ahí —si necesita una versión modificada,
         # copia al repo—, así que se lo sacamos en vez de confiar en
         # que no se le ocurra.
-        solo_lectura=[vista_adjuntos],
+        # Una raíz de trabajo amplia no vuelve escribibles los blobs canónicos
+        # ni las vistas de otras conversaciones que cuelgan del mismo store.
+        solo_lectura=[attachments_mod.attachments_dir(), vista_adjuntos],
         abierto=abierto,
         # F2: archivos que otra tarea del grafo tiene tomados. El run
         # los puede LEER pero no escribir — es lo que impide que dos
@@ -140,7 +145,7 @@ def permisos_del_run(project: dict, defaults: dict, *, conversation_id: str,
 def file_tools(perm) -> list[Tool]:
     """Tools de archivo e imágenes atadas a un `Permisos` ya resuelto."""
 
-    def _fs(fn, *a, **kw) -> str:
+    def _fs_sync(fn, *a, **kw):
         """Corre una operación de archivo traduciendo los errores.
 
         El modelo recibe un mensaje accionable en vez de un traceback:
@@ -154,10 +159,27 @@ def file_tools(perm) -> list[Tool]:
         except OSError as e:
             return f"error de filesystem: {e}"
 
+    async def _fs(fn, *a, **kw):
+        worker = asyncio.create_task(asyncio.to_thread(_fs_sync, fn, *a, **kw))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # El hilo no se cancela. No liberar la reserva del run mientras una
+            # escritura/movimiento todavía puede modificar el filesystem.
+            while not worker.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(worker)
+            with suppress(asyncio.CancelledError, Exception):
+                worker.result()
+            raise
+
     _rutas_txt = "\n".join(f"  - {r}" for r in perm.raices)
 
     async def read_file(path: str, desde: int = 0, hasta: int = 0) -> str:
         """Lee un archivo.
+
+        Valores sensibles pueden aparecer como [REDACTED]. Para edit_file usa
+        un contexto exacto sin valores ocultados; nunca reescribas sus marcadores.
 
         Args:
             path: relativa a la raíz del repo, o absoluta si cae en
@@ -165,7 +187,13 @@ def file_tools(perm) -> list[Tool]:
             desde: primera línea (1-based). 0 = desde el principio.
             hasta: última línea. 0 = hasta el final.
         """
-        return _fs(files_mod.leer, path, desde=desde, hasta=hasta)
+        def read_for_model(perm):
+            source = perm.resolve(path)
+            raw = files_mod.leer(perm, str(source), desde=desde, hasta=hasta)
+            # Only the model-visible log copy is console data. files.leer and
+            # edit_file retain their original exact-content filesystem contract.
+            return redact_text(raw) if is_background_log_path(source) else raw
+        return await _fs(read_for_model)
 
     async def read_image(path: str):
         """Entrega una imagen al modelo. Usa esto después de capturar con filename.
@@ -173,22 +201,19 @@ def file_tools(perm) -> list[Tool]:
         Respeta las mismas rutas y vetos que read_file. Leer el PNG como
         texto o comprobar su tamaño no permite inspeccionarlo visualmente.
         """
-        try:
+        def read_bounded(perm):
             source = perm.resolve(path)
             mime = attachments_mod.image_mime(source)
             if not mime:
                 return "error: se requiere PNG, JPEG, GIF o WebP"
             if source.stat().st_size > attachments_mod.max_attachment_bytes():
                 return "error: imagen excede ATTACHMENT_MAX_BYTES"
-            def read_bounded():
-                with source.open("rb") as f:
-                    return f.read(attachments_mod.max_attachment_bytes() + 1)
-            data = await asyncio.to_thread(read_bounded)
+            with source.open("rb") as f:
+                data = f.read(attachments_mod.max_attachment_bytes() + 1)
             if len(data) > attachments_mod.max_attachment_bytes():
                 return "error: imagen excede ATTACHMENT_MAX_BYTES"
             return BinaryContent(data=data, media_type=mime)
-        except (files_mod.FueraDelRepo, files_mod.SinPermiso, OSError) as exc:
-            return f"error: {exc}"
+        return await _fs(read_bounded)
 
     async def rutas_habilitadas() -> str:
         """Dónde puedes leer y escribir con las tools de archivo.
@@ -212,7 +237,7 @@ def file_tools(perm) -> list[Tool]:
 
     async def write_file(path: str, content: str) -> str:
         """Escribe un archivo (lo crea o lo sobrescribe entero)."""
-        return _fs(files_mod.escribir, path, content)
+        return await _fs(files_mod.escribir, path, content)
 
     async def edit_file(path: str, old: str, new: str) -> str:
         """Reemplaza la PRIMERA ocurrencia de `old` por `new`.
@@ -220,15 +245,15 @@ def file_tools(perm) -> list[Tool]:
         Si el fragmento aparece más de una vez, falla y te lo dice:
         agrega contexto alrededor hasta que sea único.
         """
-        return _fs(files_mod.editar, path, old, new)
+        return await _fs(files_mod.editar, path, old, new)
 
     async def move_file(src: str, dst: str) -> str:
         """Mueve o renombra. Los dos extremos van en rutas habilitadas."""
-        return _fs(files_mod.mover, src, dst)
+        return await _fs(files_mod.mover, src, dst)
 
     async def list_dir(path: str = "", max_depth: int = 3) -> str:
         """Árbol del directorio. Respeta .gitignore y saltea build dirs."""
-        return _fs(files_mod.arbol, path, max_depth=max_depth)
+        return await _fs(files_mod.arbol, path, max_depth=max_depth)
 
     async def search_files(pattern: str, glob: str = "*",
                            en: str = "") -> str:
@@ -240,7 +265,7 @@ def file_tools(perm) -> list[Tool]:
             en: subdirectorio o raíz habilitada donde buscar.
                 Vacío = el repo del proyecto.
         """
-        return _fs(files_mod.buscar, pattern, glob=glob, en=en)
+        return await _fs(files_mod.buscar, pattern, glob=glob, en=en)
 
     return [Tool(f, takes_ctx=False) for f in
             (read_file, read_image, write_file, edit_file, move_file, list_dir,
