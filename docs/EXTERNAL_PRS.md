@@ -38,3 +38,11 @@ La issue opcional se verifica por identidad y repositorio, y puede compartirse c
 La demo pública usa personas, repositorio, PR y commits ficticios. Sus botones solo cambian un escenario local; no consultan GitHub, no ejecutan pruebas y no representan una instalación conectada. La instalación local utiliza las cuentas y permisos que configures.
 
 Las pruebas de esta función usan datos sintéticos y GitHub simulado. No acreditan reglas de protección, required checks, permisos o movimientos en una cuenta real.
+
+## Revalidación del candidato de mantenimiento
+
+Los snapshots comprueban que base y head pertenecen al mismo repositorio; un
+fork se rechaza también al actualizar evidencia. Se vuelve a consultar la
+identidad del remote para evitar usar una entrada de caché anterior. El envío
+del formulario conserva su payload hasta recibir respuesta. Esto no incorpora
+revisión automática ni publicación automática de evidencia.

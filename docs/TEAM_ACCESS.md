@@ -48,3 +48,13 @@ controlada. Las métricas de costos son estimaciones, no facturas.
 
 La demo pública usa personas y proyectos ficticios. No contiene un roster
 operativo ni precarga cuentas de una organización.
+
+## Asignaciones conservadas al editar un perfil
+
+El candidato de mantenimiento conserva también los slugs asignados que ya no
+aparecen en el catálogo de proyectos. Cambiar sólo el nombre, manteniendo rol y selección, no reenvía asignaciones.
+Cambiar de rol aplica sus reglas de escritura y puede actualizar esa lista. La decisión sobre qué rol admite
+escritura usa el rol efectivo del formulario. Esto no incorpora archivo de
+usuarios ni amplía el acceso a proyectos.
+
+Revisión estática y límites: [recibo de mantenimiento](qa/maintenance-2026-11-01.md).

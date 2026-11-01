@@ -38,3 +38,10 @@ The optional issue is verified against its identity and repository and can be sh
 The public demo uses fictional people, repository, PRs and commits. Its controls only update a local scenario: no GitHub access, test execution or connected installation is implied. Local installations use the accounts and permissions you configure.
 
 Tests use synthetic data and simulated GitHub responses. They do not establish branch protection, required checks, permissions or real account changes.
+
+## Maintenance candidate revalidation
+
+Snapshots require base and head to belong to the same repository; forks are
+also rejected when refreshing evidence. Remote identity is refreshed instead
+of relying on an earlier cache entry. The form preserves its payload while
+submitting. This does not add automatic review or evidence publication.

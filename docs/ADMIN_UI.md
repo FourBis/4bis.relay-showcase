@@ -60,3 +60,9 @@ tampoco se elimina por la respuesta de un envío anterior.
 La [revisión de mantenimiento](qa/maintenance-2026-11-01.md) documenta el alcance
 y las comprobaciones estáticas; la UI de esta rama no se ejecutó ni verificó
 visualmente en esta tanda.
+
+La revisión final incluye paginación de transcripciones de **Voz**, respuestas
+tardías de filtros en **Informe/Métricas**, estados de carga/vacío/error del
+grafo y focos/controles táctiles más accesibles. En **Equipo**, editar datos de
+un perfil manteniendo su rol y selección conserva las asignaciones ausentes
+del catálogo. Cambiar de rol aplica sus reglas de escritura. Los formularios de PR externo mantienen su payload mientras se envía.

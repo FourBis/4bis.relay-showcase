@@ -61,3 +61,11 @@ no aíslan otros procesos con los mismos permisos del sistema operativo.
 
 El [recibo del candidato](docs/qa/maintenance-2026-11-01.md) conserva límites
 pendientes y distingue revisión estática de validación operativa.
+
+Los resultados MCP pasan por redacción antes de incorporarse al historial o
+aplicar sus límites de presentación. Las lecturas de logs de fondo usan una
+copia contrastada con procedencia local; una lectura mixta sensible que no
+puede atribuirse se retiene con un error explícito para solicitar lecturas
+individuales. No se transforma una fuente ordinaria censurada en archivo apto
+para editar. Estos controles no autentican productores desconocidos ni
+identifican todos los secretos posibles.

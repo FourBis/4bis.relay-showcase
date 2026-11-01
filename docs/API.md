@@ -270,3 +270,10 @@ Consulta [SECURITY.md](../SECURITY.md) antes de configurar acceso remoto.
   no se modifica el archivo original ni se amplía el acceso.
 
 Alcance y límites de comprobación: [mantenimiento](qa/maintenance-2026-11-01.md).
+
+La lectura de mensajes aplica `max_turns` a los turnos más recientes de ambas
+fuentes de historial. No incorpora identidad estable de mensajes para objetos
+heredados. Al procesar o resumir un transcript, el recibo conserva el resultado conocido
+para reintentar sólo su persistencia dentro del proceso. El guardado de
+transcripts es atómico. No acredita reintentos idempotentes del ASR ni
+recuperación poskill.
