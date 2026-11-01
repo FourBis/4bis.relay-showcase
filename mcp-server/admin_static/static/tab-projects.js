@@ -11,6 +11,7 @@ import { refreshStatus } from "./tab-status.js";
 import { renderColumnas } from "./board-view.js";
 import { loadOrphans } from "./tab-orphans.js";
 import { taskWorkspaceQuery, captureTaskWorkspaceContext } from "./workspace.js";
+import { openProjectPRs } from "./project-external-pr.js";
 
 // ---- iconos de fila ----
 //
@@ -59,6 +60,20 @@ function actionGroup(buttons) {
 let _guildId = "";
 let _loadError = "";
 let _tabla = null;
+let _ownerProjects = false;
+
+export function projectPRButton(p) {
+  return `<button type="button" class="btn btn-xs project-pr-btn" data-slug="${escape(p.slug)}"
+    title="Registrar y revisar PR del repositorio de ${escape(p.slug)}"
+    aria-label="PR del proyecto ${escape(p.slug)}">PR</button>`;
+}
+
+export function projectColumns(owner = false) {
+  return owner ? COLUMNAS : [
+    COLUMNAS[0],
+    {key:"slug",label:"PR del proyecto",sortable:false,render:projectPRButton},
+  ];
+}
 
 function _celdaCanal(p) {
   const dcId = p.discord_channel_id || "";
@@ -131,6 +146,7 @@ const COLUMNAS = [
            aria-label="abrir el repo remoto de ${escape(p.slug)}">${_svg(ICONS.remoto)}</a>`,
       ] : []),
       iconBtn(ICONS.tablero, `seguimiento GitHub de ${p.slug}`, "github-btn", p.slug),
+      projectPRButton(p),
       iconBtn(ICONS.gear, `administrar ${p.slug}`, "admin-btn", p.slug),
       iconBtn(ICONS.correr, `correr experto sobre ${p.slug}`, "expert-btn", p.slug),
     ]) },
@@ -139,7 +155,7 @@ const COLUMNAS = [
 export async function loadProjects() {
   if (!_tabla) {
     _tabla = dataTable($("#projects-table"), {
-      columns: COLUMNAS,
+      columns: projectColumns(_ownerProjects),
       rows: [],
       pageSize: 25,
       sort: { key: 0, dir: "asc" },
@@ -153,6 +169,8 @@ export async function loadProjects() {
         ? { title: "No se pudieron cargar los proyectos",
             sub: _loadError,
             action: `<button class="btn" data-projects-retry>Reintentar</button>` }
+        : !_ownerProjects ? {title:"No hay proyectos habilitados para tu cuenta",
+            sub:"Se muestran los proyectos con acceso de escritura y un repositorio GitHub vinculado. Consulta al administrador si falta uno."}
         : { title: "Todavía no hay proyectos",
             sub: "Un proyecto es un experto sobre un repo: system_prompt + "
                + "mcp_servers. Creá el primero y va a poder invocarse vía "
@@ -164,7 +182,7 @@ export async function loadProjects() {
   _loadError = "";
   _tabla.setLoading(true);
   try {
-    const { projects, discord_guild_id: guildId } = await api("projects");
+    const { projects, discord_guild_id: guildId } = await api(_ownerProjects ? "projects" : "projects?capability=external_pr");
     _guildId = guildId || "";
     _tabla.setRows(projects || []);
   } catch (e) {
@@ -187,6 +205,7 @@ const _ACCIONES = {
   "admin-btn": (slug) => openAdminModal(slug),
   "expert-btn": (slug) => openExpertModal(slug),
   "github-btn": (slug) => openGithubModal(slug),
+  "project-pr-btn": (slug) => openProjectPRs(slug),
   "vscode-btn": async (slug) => {
     const r = await openProjectInVSCode(slug);
     if (!r.ok) toast("No se pudo abrir VS Code: " + r.error, "err");
@@ -196,15 +215,17 @@ const _ACCIONES = {
 function _wireTabla() {
   const el = $("#projects-table");
   el.addEventListener("click", (e) => {
-    if (e.target.closest("[data-projects-new]")) { $("#project-new").click(); return; }
+    if (_ownerProjects && e.target.closest("[data-projects-new]")) { $("#project-new").click(); return; }
     if (e.target.closest("[data-projects-retry]")) { loadProjects(); return; }
     const btn = e.target.closest("button[data-slug]");
     if (!btn) return;
+    if (!_ownerProjects && !btn.classList.contains("project-pr-btn")) return;
     for (const [cls, fn] of Object.entries(_ACCIONES)) {
       if (btn.classList.contains(cls)) { fn(btn.dataset.slug); return; }
     }
   });
   el.addEventListener("change", (e) => {
+    if (!_ownerProjects) return;
     const c = e.target;
     if (c.classList.contains("include-toggle")) togglePatch(e, "include_in_index");
     else if (c.classList.contains("night-toggle")) toggleNight(e);
@@ -259,6 +280,7 @@ async function togglePatch(e, field) {
 // ---- system prompt viewer ----
 
 function openPromptModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   const modal = $("#prompt-modal");
   modal.dataset.assembled = "";
   modalLoad({
@@ -1530,6 +1552,12 @@ function parseNightConfig(raw) {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
+
+
+
+
+
+
 function wireEditForm(slug, project) {
   // Iter 4.7: el botón guardar vive DENTRO del form renderizado
   // (#edit-save-inline), no en el footer estático del modal (#edit-save).
@@ -1618,6 +1646,7 @@ function wireEditForm(slug, project) {
 // ---- experto (corre /experts/run desde la UI) ----
 
 function openExpertModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   modalLoad({
     id: "expert-modal",
     title: `Experto · ${slug}`,
@@ -1814,11 +1843,16 @@ const ADMIN_TABS = [
 let _adminCtx = null;
 
 export function openProjectAdmin(slug) {
+  if (!_ownerProjects) {
+    toast("Administrar proyectos requiere una cuenta administradora.", "err");
+    return false;
+  }
   openAdminModal(slug);
   return true;
 }
 
 function openAdminModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   // UI 2026-07-20: sidepanel en vez de modal fullscreen. Mantiene
   // el contexto del tab visible (la lista de proyectos queda detrás).
   // Si el viewport es <md, sigue funcionando (el panel ocupa 92vw).
@@ -2391,7 +2425,7 @@ async function wsScaffold(slug, view = _wsView) {
     const rejectedRows = (r.rejected || []).map((p) =>
       `<li><code class="text-xs">${escape(p)}</code></li>`).join("");
     out.innerHTML = `
-      <p class="muted text-xs">Destino: ${escape(wsDestination(view))}. Al aplicar se generan los archivos de nuevo y el resultado puede cambiar respecto de esta vista previa.</p>
+      <p class="muted text-xs">Destino fijado: ${escape(wsDestination(view))}. Aplicar vuelve a generar los archivos; el preview no es una reserva inmutable.</p>
       <p class="muted text-xs mb-2"><strong>${escape(r.rationale || "(sin rationale)")}</strong></p>
       <table class="status-detail"><thead><tr>
         <th class="th">path</th><th class="th">size</th><th class="th"></th>
@@ -2540,7 +2574,16 @@ function wireWorkspace(slug, project) {
   });
 }
 
-export function initProjects() {
+export function initProjects(actor) {
+  _ownerProjects = actor?.role === "owner";
+  if ($("#project-new")) $("#project-new").hidden = !_ownerProjects;
+  if ($("#projects-orphans")) $("#projects-orphans").hidden = !_ownerProjects;
+  if (!_ownerProjects) {
+    const sub = document.querySelector("#tab-projects .panel-sub");
+    if (sub) sub.textContent = "Registra y sigue los PR del equipo en los repositorios de tus proyectos, sin iniciar un chat.";
+    onClick("#projects-refresh", loadProjects);
+    return;
+  }
   onClick("#project-new", openNewModal);
   onClick("#projects-refresh", loadProjects);
   onClick("#projects-orphans", () => {

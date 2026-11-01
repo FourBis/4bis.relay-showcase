@@ -12,7 +12,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 from unittest.mock import AsyncMock
 
-from relay import admin, server
+from relay import admin, identity, server
 
 
 @pytest.mark.skipif(
@@ -40,7 +40,8 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             "slug": "workspace-test", "name": "Workspace test",
             "repo_path": str(tmp_path),
         })
-        conv = await db.create_conversation(project_slug="workspace-test")
+        conv = await db.create_conversation(
+            project_slug="workspace-test", requested_by=identity.OWNER)
         secret = "SENSITIVE_RESPONSE_MUST_NOT_REACH_STORAGE"
         answer = (
             "Resultado verificable.\n\n"

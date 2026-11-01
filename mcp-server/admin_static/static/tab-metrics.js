@@ -2,11 +2,11 @@
 // KPI cards + distribuciones por modelo, proyecto, hora y errores.
 
 import { $, api, escape, fmtNum, onClick } from "./api.js";
-import { barChart } from "./ui-chart.js";
+import { barChart, fillDays } from "./ui-chart.js";
+import { localToday, dateRange } from "./date-range.js";
 import { dataTable } from "./ui-table.js";
 
-// Filtros del dashboard. `days` viaja también a trends; el resto solo
-// a summary, que es lo único que sabe desglosar.
+// Summary y trends comparten el rango de fechas y la zona horaria.
 const FILTERS = {
   project: "#metrics-project", status: "#metrics-state",
   provider: "#metrics-provider", role: "#metrics-role",
@@ -21,24 +21,11 @@ function currentFilters() {
   return out;
 }
 
-/** Ventana activa: rango absoluto (from+to) si ambos inputs tienen
- *  fecha, si no el atajo de días. `to` vacío se manda como hoy al
- *  backend, así que "desde" solo ya alcanza.
- *
- *  Devuelve además un flag `hasRange` para que la UI sepa si tiene que
- *  habilitar el botón "limpiar rango".
- */
 function currentWindow() {
-  const from = ($("#metrics-from")?.value || "").trim();
-  const to = ($("#metrics-to")?.value || "").trim();
-  const hasRange = !!(from && to);
-  return {
-    kind: hasRange ? "range" : "days",
-    days: parseInt($("#metrics-days")?.value || "7"),
-    from, to,
-    hasRange,
-  };
+  return dateRange($("#metrics-from").value, $("#metrics-to").value);
 }
+
+let _loadId = 0;
 
 // Querystring del hash tal como llegó al cargar la página. Se toma acá,
 // a nivel de módulo, porque showTab() hace replaceState("#/metrics")
@@ -57,12 +44,8 @@ const _bootQs = (() => {
  */
 function syncUrl(win, filters) {
   const p = new URLSearchParams();
-  if (win.kind === "range") {
-    p.set("from", win.from);
-    p.set("to", win.to);
-  } else {
-    p.set("days", String(win.days));
-  }
+  p.set("from", win.from);
+  p.set("to", win.to);
   for (const [k, v] of Object.entries(filters)) p.set(k, v);
   const window = $("#tab-metrics")?.closest('.workspace-window');
   if (window) {
@@ -79,8 +62,6 @@ export function restoreFiltersFromUrl() {
   const from = p.get("from"), to = p.get("to");
   if (from) { const f = $("#metrics-from"); if (f) f.value = from; }
   if (to)   { const t = $("#metrics-to");   if (t) t.value = to;   }
-  const d = $("#metrics-days");
-  if (d && p.get("days")) d.value = p.get("days");
   for (const [key, sel] of Object.entries(FILTERS)) {
     const el = $(sel);
     // El select de proyecto/proveedor puede no tener la opción todavía
@@ -96,45 +77,37 @@ export function restoreFiltersFromUrl() {
   }
 }
 
-let _loadId = 0;
-
 export async function loadMetrics() {
   const loadId = ++_loadId;
-  const win = currentWindow();
   const status = $("#metrics-status");
   const filters = currentFilters();
   if (status) status.textContent = "cargando...";
 
   try {
+    const win = currentWindow();
     // api() prepende /admin/api/. Los filtros van al backend como query
     // params: filtrar en el cliente un JSON que ya vino entero daría
     // números que no coinciden con lo que el servidor agregó.
-    const q = new URLSearchParams();
-    if (win.kind === "range") { q.set("from", win.from); q.set("to", win.to); }
-    else                       { q.set("days", String(win.days)); }
+    const q = new URLSearchParams({ from: win.from, to: win.to, tz: win.tz });
     for (const [k, v] of Object.entries(filters)) q.set(k, v);
-    // trends toma los mismos filtros de nivel run (project/status) que
-    // summary. provider/role no viajan: filtran turnos, no runs.
+    // Los filtros de turnos no aplican al total diario de ejecuciones.
     const qt = new URLSearchParams(q);
+    qt.delete("provider");
+    qt.delete("role");
     const [summary, trends] = await Promise.all([
       api(`metrics/summary?${q}`),
       api(`metrics/trends?${qt}`),
     ]);
     if (loadId !== _loadId) return;
-    renderMetrics(summary, trends);
+    renderMetrics(summary, trends, win);
     syncUrl(win, filters);
     const n = Object.keys(filters).length;
     if (status) {
-      const wLabel = win.kind === "range"
-        ? `rango ${win.from} → ${win.to}`
-        : `últimos ${win.days}d`;
-      status.textContent = wLabel
+      status.textContent = `${win.from} → ${win.to} · ${win.tz}`
         + (n ? ` · ${n} filtro${n > 1 ? "s" : ""} activo${n > 1 ? "s" : ""}` : "");
     }
     const clear = $("#metrics-clear");
     if (clear) clear.hidden = n === 0;
-    const rclear = $("#metrics-range-clear");
-    if (rclear) rclear.hidden = !win.hasRange;
   } catch (e) {
     if (loadId === _loadId && status) status.textContent = "error: " + e.message;
   }
@@ -165,7 +138,7 @@ async function fillFilterOptions(summary) {
   }
 }
 
-function renderMetrics(s, trends) {
+function renderMetrics(s, trends, win) {
   const t = s.totals || {};
   fillFilterOptions(s);
   // provider/role recortan el desglose pero NO los totales (un run usa
@@ -251,8 +224,8 @@ function renderMetrics(s, trends) {
   const secondary = $("#metrics-secondary");
   if (secondary) secondary.innerHTML = kpi.filter((_x, i) => ![0, 1, 4].includes(i)).map(metric).join('');
 
-  _renderTrend(trends, s.period_days || 7);
-  _renderHourly(s.hourly_distribution || []);
+  _renderTrend(trends, win);
+  _renderHourly(s.hourly_distribution || [], win.tz);
 
   // Por proveedor/modelo/proyecto/errores: dataTable() con mount lazy.
   // `t.priced` se congela en el primer mount — si cambia mid-session
@@ -432,31 +405,21 @@ const OK_HUE = "#059669";
 const ERR_HUE = "#d95926";
 
 /** Serie diaria de runs, partida en ok / con error. */
-function _renderTrend(trends, days) {
+function _renderTrend(trends, win) {
   const wrap = $("#metrics-trend");
   if (!wrap) return;
-  // Días sin actividad = barra 0. El backend solo devuelve los días que
-  // tuvieron runs, así que sin rellenar el eje se comprime y miente
-  // sobre el ritmo. (No se usa fillDays de ui-chart.js porque estas
-  // filas traen `date` y no `day`.)
-  const byDay = new Map((trends || []).map((d) => [d.date, d]));
-  const hoy = new Date();
-  const serie = [];
-  for (let i = days - 1; i >= 0; i--) {
-    const key = new Date(hoy.getTime() - i * 86400_000)
-      .toISOString().slice(0, 10);
-    const d = byDay.get(key) || {};
-    const runs = d.runs || 0;
-    const err = d.errors || 0;
-    serie.push({ ...d, date: key, runs, errors: err,
-      ok: d.ok ?? Math.max(runs - err - (d.running || 0) - (d.cancelled || 0) - (d.split || 0), 0) });
-  }
+  const serie = fillDays((trends || []).map((d) => ({ ...d, day: d.date })),
+    win.days, {}, win.to).map((d) => {
+      const runs = d.runs || 0, errors = d.errors || 0;
+      return { ...d, date: d.day, runs, errors,
+        ok: d.ok ?? Math.max(runs - errors - (d.running || 0) - (d.cancelled || 0) - (d.split || 0), 0) };
+    });
   barChart(wrap, {
     points: serie.map((d) => ({ label: d.date.slice(8, 10),
                                 values: [d.ok, d.errors], ...d })),
     series: [{ name: "ok", color: OK_HUE },
              { name: "con error", color: ERR_HUE }],
-    ariaLabel: `intentos ok y con error por día, últimos ${days} días; actividad, cancelaciones y subdivisiones en el detalle`,
+    ariaLabel: `intentos ok y con error por día, del ${win.from} al ${win.to}; actividad, cancelaciones y subdivisiones en el detalle`,
     onEmpty: "sin intentos ok o con error en el rango",
     tooltip: (d) => `<div class="font-medium text-zinc-100">${escape(d.date)}</div>
       <div>runs <span class="tabular-nums">${d.runs}</span></div>
@@ -467,7 +430,7 @@ function _renderTrend(trends, days) {
 }
 
 /** Distribución horaria: 24 columnas, una por hora del día. */
-function _renderHourly(rows) {
+function _renderHourly(rows, tz) {
   const wrap = $("#metrics-hourly");
   if (!wrap) return;
   // Mismo criterio que arriba: las horas sin runs son 0, no se saltean.
@@ -479,51 +442,25 @@ function _renderHourly(rows) {
       label: String(h), hour: h, value: byHour.get(h) || 0 })),
     labelEvery: 3,
     highlight: null,
-    ariaLabel: "runs por hora del día (UTC)",
+    ariaLabel: `runs por hora del día (${tz})`,
     onEmpty: "sin runs en el rango",
-    tooltip: (d) => `<div class="font-medium text-zinc-100">${d.hour}:00 UTC</div>
+    tooltip: (d) => `<div class="font-medium text-zinc-100">${d.hour}:00 ${escape(tz)}</div>
       <div>runs <span class="tabular-nums">${d.value}</span></div>`,
   });
 }
 
 export function initMetrics() {
   onClick("#metrics-refresh", loadMetrics);
-  const sel = $("#metrics-days");
-  if (sel) sel.onchange = loadMetrics;
+  const today = localToday();
+  $("#metrics-from").value = today;
+  $("#metrics-to").value = today;
+  for (const sel of ["#metrics-from", "#metrics-to"]) {
+    $(sel).onkeydown = (event) => { if (event.key === "Enter") loadMetrics(); };
+  }
   for (const s of Object.values(FILTERS)) {
     const el = $(s);
     if (el) el.onchange = loadMetrics;
   }
-  // Rango absoluto: se aplica con un click para no recargar en cada
-  // cambio de día (cambiar "desde" no tiene sentido disparar sin que
-  // el usuario termine). Escuchar `change` en ambos inputs le da ese
-  // mismo comportamiento: el input type=date dispara change al cerrar
-  // el calendario o al confirmar.
-  const fromEl = $("#metrics-from"), toEl = $("#metrics-to");
-  const onRangeChange = () => {
-    const f = fromEl?.value?.trim() || "";
-    const t = toEl?.value?.trim() || "";
-    if (f && t) loadMetrics();
-  };
-  if (fromEl) fromEl.onchange = onRangeChange;
-  if (toEl)   toEl.onchange   = onRangeChange;
-  onClick("#metrics-range-apply", () => {
-    const f = fromEl?.value?.trim() || "";
-    const t = toEl?.value?.trim() || "";
-    if (!f || !t) {
-      const status = $("#metrics-status");
-      if (status) status.textContent = "rango: completá desde y hasta";
-      return;
-    }
-    loadMetrics();
-  });
-  const rclear = $("#metrics-range-clear");
-  onClick("#metrics-range-clear", () => {
-    if (fromEl) fromEl.value = "";
-    if (toEl)   toEl.value = "";
-    rclear.hidden = true;
-    loadMetrics();
-  });
   onClick("#metrics-clear", () => {
     for (const s of Object.values(FILTERS)) {
       const el = $(s);

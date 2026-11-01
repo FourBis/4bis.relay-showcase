@@ -539,7 +539,9 @@ function pintar(g) {
   // desde la base los dos se ven igual. En un grafo sintético esos
   // botones no existen: no hay fila en la DB a la que pegarle.
   const vivo = g.corriendo === true;
-  const terminado = p.estado === "hecho" && evis !== "verificacion_pendiente";
+  const nodosTerminados = p.total > 0 && p.hechos === p.total;
+  const terminado = (p.estado === "hecho" || nodosTerminados)
+    && evis !== "verificacion_pendiente" && g.verification_pending !== true;
   const parar = $("#chat-grafo-parar");
   if (parar) parar.hidden = sintetico || !vivo;
   const seguir = $("#chat-grafo-seguir");

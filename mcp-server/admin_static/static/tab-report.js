@@ -1,6 +1,6 @@
 // Tab Informe (UI 2026-07-20): gasto de tokens como registro/informe.
 //
-// Fuente: GET /admin/api/report?days=N[&project=slug] — agregados SQL
+// Fuente: GET /admin/api/report?from=YYYY-MM-DD&to=YYYY-MM-DD&tz=IANA — agregados SQL
 // (daily / by_project / by_author). El chart de barras salió de acá y
 // ahora vive en ui-chart.js, compartido con el resto de los tabs; este
 // archivo solo aporta los datos, el rango y el tooltip. Tabla colapsable
@@ -8,17 +8,18 @@
 
 import { $, api, escape, fmtNum, fmtDuration, _dbg } from "./api.js";
 import { barChart, fillDays } from "./ui-chart.js";
+import { localToday, dateRange } from "./date-range.js";
 
-let _days = 30;
+let _loadId = 0;
 let _project = "";
 let _loaded = false;
-let _loadId = 0;
 
 export function initReport() {
-  $("#report-days").addEventListener("change", (e) => {
-    _days = Number(e.target.value);
-    loadReport();
-  });
+  const today = localToday();
+  for (const sel of ["#report-from", "#report-to"]) {
+    $(sel).value = today;
+    $(sel).onkeydown = (event) => { if (event.key === "Enter") loadReport(); };
+  }
   $("#report-project").addEventListener("change", (e) => {
     _project = e.target.value;
     loadReport();
@@ -28,17 +29,19 @@ export function initReport() {
 
 export async function loadReport() {
   const loadId = ++_loadId;
-  const grid = $("#report-kpis");
+  const status = $("#report-status");
+  status.textContent = "cargando...";
   try {
-    const q = `report?days=${_days}`
-      + (_project ? `&project=${encodeURIComponent(_project)}` : "");
-    const data = await api(q);
+    const win = dateRange($("#report-from").value, $("#report-to").value);
+    const q = new URLSearchParams({ from: win.from, to: win.to, tz: win.tz });
+    if (_project) q.set("project", _project);
+    const data = await api(`report?${q}`);
     if (loadId !== _loadId) return;
-    _render(data);
+    _render(data, win);
+    status.textContent = `${win.from} → ${win.to} · ${win.tz}`;
     if (!_loaded) { _loaded = true; _fillProjectFilter(); }
   } catch (e) {
-    if (loadId !== _loadId) return;
-    grid.innerHTML = `<p class="fail text-sm col-span-full">error: ${escape(e.message)}</p>`;
+    if (loadId === _loadId) status.textContent = "error: " + e.message;
   }
 }
 
@@ -56,7 +59,7 @@ async function _fillProjectFilter() {
   } catch (e) { _dbg("report: fill projects falló", e.message); }
 }
 
-function _render(data) {
+function _render(data, win) {
   const daily = data.daily || [];
   const tIn = daily.reduce((a, d) => a + (d.tokens_in || 0), 0);
   const tOut = daily.reduce((a, d) => a + (d.tokens_out || 0), 0);
@@ -81,7 +84,7 @@ function _render(data) {
     _kpi(String(notOk), "con error", notOk > 0 ? "!text-red-300" : ""),
   ].join("");
 
-  _renderChart(daily);
+  _renderChart(daily, win);
   _renderDailyTable(daily);
   _renderProjects(data.by_project || []);
   _renderAuthors(data.by_author || []);
@@ -94,15 +97,15 @@ function _kpi(v, k, vCls = "") {
 
 // ---- chart de barras diario (una serie: tokens_in) ----
 
-function _renderChart(daily) {
+function _renderChart(daily, win) {
   // fillDays: los días sin actividad son barra 0. Saltearlos comprime el
   // eje y miente sobre el ritmo de gasto.
-  const dias = fillDays(daily, _days, { runs: 0, tokens_in: 0, tokens_out: 0 });
+  const dias = fillDays(daily, win.days, { runs: 0, tokens_in: 0, tokens_out: 0 }, win.to);
   barChart("#report-chart", {
     // label corto para el eje X (día del mes); la fecha completa la pone
     // el tooltip, que tiene lugar.
     points: dias.map((d) => ({ label: d.day.slice(8, 10), value: d.tokens_in, ...d })),
-    ariaLabel: `tokens de entrada por día, últimos ${_days} días`,
+    ariaLabel: `tokens de entrada por día, del ${win.from} al ${win.to}`,
     onEmpty: "sin actividad en el rango",
     tooltip: (d) => `<div class="font-medium text-zinc-100">${escape(d.day)}</div>
       <div>entrada <span class="tabular-nums">${fmtNum(d.tokens_in)}</span></div>

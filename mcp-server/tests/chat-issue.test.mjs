@@ -7,6 +7,9 @@ globalThis.field = ({label,control,hint=""}) => `<div>${escape(label)}${control}
 globalThis.formSection = ({title,sub,body,actions}) => `<section>${escape(title)}${sub}${body}${actions}</section>`;
 let renderedModal = "";
 globalThis.modalLoad = async options => { renderedModal = options.render(await options.loader()); };
+const pickerSource = readFileSync(new URL("../admin_static/static/chat-repository-picker.js",import.meta.url),"utf8")
+  .replace(/^import .*$/gm,"");
+Object.assign(globalThis,await import("data:text/javascript,"+encodeURIComponent(pickerSource)));
 const source = readFileSync(new URL("../admin_static/static/chat-issue.js",import.meta.url),"utf8")
   .replace(/^import .*$/gm,"");
 const {parseIssueInput,optionalIssuePayload,issueLinkPayload,issueLinkHtml,issueSyncHtml,
@@ -34,7 +37,7 @@ assert.doesNotMatch(issueLinkHtml({...issue,url:"javascript:alert(1)"}),/href=|<
 assert.doesNotMatch(issueLinkHtml({...issue,repo:"other/repo"}),/href=/);
 assert.doesNotMatch(issueLinkHtml({...issue,number:43}),/href=/);
 assert.match(issuePickerHtml({id:"picker",value:'"><img src=x>'}),/value="&quot;&gt;&lt;img src=x&gt;"/);
-assert.match(issuePickerHtml({id:"picker"}),/<datalist/);
+assert.match(issuePickerHtml({id:"picker"}),/<select/);
 
 let html = issuePanelHtml({issue_link:issue,resolution_complete:false,allowed_actions:["link_issue","issue_sync"]});
 assert.match(html,/Trabajo parcial/);
@@ -77,19 +80,24 @@ function element(extra={}) {
 const deferred = () => { let resolve,reject; const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject}; };
 const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
 const status=element(),retry=element(),list=element(),input=element({value:"42"});
-input.parentElement={querySelector:selector=>selector.includes("status")?status:retry};
-const root={querySelector:selector=>selector==="#picker"?input:selector==="#picker-options"?list:null};
+const pickerNodes = new Map([["[data-picker-results]",list],["[data-issue-picker-status]",status],
+  ["[data-picker-retry]",retry]]);
+const pickerBox={querySelector:selector=>{
+  if (!pickerNodes.has(selector)) pickerNodes.set(selector,element());
+  return pickerNodes.get(selector);
+}};
+const root={querySelector:selector=>selector==="#picker"?input:selector==='[data-repository-picker="picker"]'?pickerBox:null};
 let requests=[];
 globalThis.apiRoot=(url,options)=>{const request=deferred();requests.push({url,options,...request});return request.promise;};
 let changed="";
 const picker=mountIssuePicker(root,{id:"picker",projectSlug:"first",onChange:value=>{changed=value;}});
-assert.equal(requests[0].url,"/projects/first/issues");
+assert.equal(requests[0].url,"/projects/first/issues?page=1&q=");
 picker.setProject("second");
-assert.equal(input.value,"");
+assert.equal(input.value,"42"); // La entrada manual se conserva al cambiar de proyecto.
 assert.equal(changed,"");
-requests[1].resolve({issues:[issue]}); await settle();
+requests[1].resolve({repo:"team/repo",issues:[issue]}); await settle();
 assert.match(list.innerHTML,/team\/repo\/issues\/42/);
-requests[0].resolve({issues:[{...issue,title:"stale-project"}]}); await settle();
+requests[0].resolve({repo:"team/repo",issues:[{...issue,title:"stale-project"}]}); await settle();
 assert.doesNotMatch(list.innerHTML,/stale-project/);
 input.value="https://github.com/team/repo/issues/42";input.fire("input");
 assert.equal(changed,input.value);
@@ -97,7 +105,7 @@ retry.fire("click");requests[2].reject(new Error("503"));await settle();
 assert.match(status.textContent,/503/);
 assert.equal(input.value,"https://github.com/team/repo/issues/42");
 assert.equal(retry.disabled,false);
-retry.fire("click");picker.destroy();requests[3].resolve({issues:[{...issue,title:"after-dispose"}]});await settle();
+retry.fire("click");picker.destroy();requests[3].resolve({repo:"team/repo",issues:[{...issue,title:"after-dispose"}]});await settle();
 assert.doesNotMatch(list.innerHTML,/after-dispose/);
 
 requests=[];
@@ -147,8 +155,8 @@ retryController.destroy();
 const modalInput=element({value:issue.url,focus() {}}),modalList=element(),modalStatus=element(),modalRetry=element();
 const completion=element({checked:true}),save=element(),output=element();
 modalInput.parentElement={querySelector:selector=>selector.includes("status")?modalStatus:modalRetry};
-const form={querySelector:selector=>selector==="#issue-link-input"||selector==='[name="issue"]'?modalInput
-  :selector==="#issue-link-input-options"?modalList:selector==='[name="resolution_complete"]'?completion:save};
+const form={isConnected:true,elements:[modalInput,completion,save],querySelector:selector=>selector==="#issue-link-input"||selector==='[name="issue"]'?modalInput
+  :selector.startsWith('[data-repository-picker=')?pickerBox:selector==='[name="resolution_complete"]'?completion:save};
 globalThis.document={getElementById:id=>id==="issue-link-form"?form:output};
 globalThis.modalLoad=async options=>{renderedModal=options.render(await options.loader());options.after();};
 globalThis.isModalOpen=()=>true;

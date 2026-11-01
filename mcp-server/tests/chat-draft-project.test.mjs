@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
+import { webcrypto } from 'node:crypto';
 
 const source = readFileSync(new URL('../admin_static/static/tab-chats.js', import.meta.url), 'utf8');
 const openDraft = source.match(/async function openNewChatDraft\([^]*?\n}/)[0];
@@ -9,12 +10,20 @@ const sendMessage = source.match(/async function sendCurrentMessage\([^]*?\n}/)[
 const createDraft = source.match(/async function createDraftConversation\([^]*?\n}/)[0];
 const newChatError = source.match(/function newChatErrorText\([^]*?\n}/)[0];
 
+const composerRequestHelpers = ['selectAttachmentContext', 'syncAttachmentContext', 'messageDraftSignature',
+  'forgetPendingMessage', 'resumeAcceptedMessage', 'reconcilePendingMessage', 'rememberChatDraft',
+  'recoverProjectDraft', 'draftCreationPayload', 'creationContentSignature', 'verifiedCreation',
+  'knownCreationRejection', 'creationPayloadHash'].map(name =>
+  source.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))[0]).join('\n');
+
 function harness(responses, filter = '', apiRoot = async () => ({})) {
   let options = [], selected = '', calls = 0, opened = 0;
+  const createdContracts = new Map();
   const ui = new Map();
   const node = (id) => {
-    if (!ui.has(id)) ui.set(id, { hidden: false, textContent: '', className: '', innerHTML: '',
-      options: [], focus() {}, querySelectorAll: () => [], addEventListener() {} });
+    if (!ui.has(id)) ui.set(id, { isConnected:true, hidden:false, value:'', textContent:'', className:'', innerHTML:'',
+      options:[], dataset:{}, setAttribute() {}, focus() {}, querySelectorAll:() => [], addEventListener() {},
+      insertAdjacentHTML(position, html) { if (position === 'beforeend') this.innerHTML += html; } });
     return ui.get(id);
   };
   const select = node('#chat-draft-project');
@@ -27,12 +36,29 @@ function harness(responses, filter = '', apiRoot = async () => ({})) {
     selected = options.some((o) => o.value === value) ? value : '';
   } });
   const context = {
+    crypto:webcrypto, TextEncoder, Uint8Array,
     $: (id) => id === '#chat-project-filter' ? { value: filter } : node(id),
     api: async () => { const value = responses[calls++]; if (value instanceof Error) throw value; return value; },
     escape: (s) => s, getEmbeddedConversation: () => '', toast: (message) => node('#toast').textContent = message,
-    apiRoot,
+    apiRoot: async (path, options) => {
+      const result = await apiRoot(path, options);
+      if (path === '/conversations' && options?.method === 'POST' && result?.id) {
+        const body = JSON.parse(options.body);
+        const created = {...result,project_slug:result.project_slug || body.project,
+          creation_receipt:result.creation_receipt || {version:2,required_issue:null,issue_bound:true,
+            request_id:body.request_id,payload_sha256:'a'.repeat(64),project_slug:body.project,
+            read_only:body.read_only,publish_allowed:body.publish_allowed,media_only:false,
+            mode:body.read_only ? 'read_only' : 'write',ready:true}};
+        createdContracts.set(body.request_id,created); return created;
+      }
+      if (path.startsWith('/conversations/creation-requests/') && result?.found === undefined) {
+        const id = decodeURIComponent(path.split('/creation-requests/')[1].split('?')[0]);
+        return createdContracts.has(id) ? {found:true,...createdContracts.get(id)} : {found:false};
+      }
+      return result;
+    },
     setTaskWorkspaceContext() {}, showMainView: () => { opened++; }, renderConvList() {}, detachGrafo() {},
-    invalidateQuestions() {},
+    setChatDrawer() {}, invalidateChatQuestions() {}, confirmModal:async () => false,
     renderDraftMode() {}, setBusy() {}, matchCommand: () => null, renderSuggestions() {},
     renderAttachTray() {}, appendOptimisticUser() {}, pokeGrafo: async () => {}, pollChat: async () => {},
     renderHeader() {}, loadChats() {}, newRequestId: () => 'fake-request-id',
@@ -41,7 +67,10 @@ function harness(responses, filter = '', apiRoot = async () => ({})) {
     optionalIssuePayload: value => value ? {issue: Number(value)} : {},
   };
   runInNewContext(`let chatSelectionGeneration = 0, chatDraftGeneration = 0, activeChat, taskPanel, draftIssuePicker;
-    let pendingAttachments = [], chosenModel = '', chosenStageModels = {};
+    let pendingAttachments = [], pendingAttachmentUploads = 0, attachmentContext = null, chosenModel = '', chosenStageModels = {};
+    const attachmentContexts = new WeakMap(), conversationAttachmentContexts = new Map(), pendingMessageRequests = new Map(), draftsByProject = new Map();
+    let lastDraftProject = '';
+    ${composerRequestHelpers};
     ${openDraft}; ${createDraft}; ${sendMessage}; ${newChatError};
     this.open = openNewChatDraft; this.send = sendCurrentMessage;
     this.state = () => activeChat; this.generation = () => chatSelectionGeneration;
@@ -170,7 +199,7 @@ test('la issue opcional viaja con el borrador sin sustituir su objetivo', async 
   const h = harness([catalog('demo')], '', async (path, options) => {
     requests.push({path,options});
     if (path === '/conversations') return {id:'issue-conversation'};
-    return {chat_id:'run-1'};
+    return {id:'run-1'};
   });
   await h.context.open();
   h.context.setIssue('42');

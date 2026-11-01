@@ -13,6 +13,34 @@ const _dato = (v, k) =>
   `<span class="text-[13px] text-zinc-300"><span
      class="font-semibold tabular-nums text-zinc-100">${v}</span> ${k}</span>`;
 
+function deploymentMetadata(h) {
+  const deployment = h.deployment_state === "active"
+    && h.deployment?.status === "confirmed"
+    && Number.isSafeInteger(h.deployment.number) && h.deployment.number > 0
+    ? h.deployment : null;
+  if (deployment) {
+    return `<div id="status-deployment" class="w-full" data-deployment-state="active">
+      <span class="text-zinc-200">Despliegue #${deployment.number}</span>
+      <span class="text-emerald-400"> · Activo confirmado${deployment.rollback_of ? " · Rollback" : ""}</span>
+      <div>SHA <code class="font-mono break-all">${escape(String(deployment.commit_sha))}</code></div>
+      <div>Activado <time datetime="${escape(String(deployment.deployed_at))}">${escape(String(deployment.deployed_at))}</time></div>
+    </div>`;
+  }
+  const state = ["pending", "unconfirmed"].includes(h.deployment_state)
+    ? h.deployment_state : "unknown";
+  const label = {
+    pending: "Despliegue pendiente de confirmación",
+    unconfirmed: "Despliegue no confirmado",
+    unknown: "Sin registro de despliegue",
+  }[state];
+  const sha = h.runtime?.commit_sha;
+  const shaLabel = h.runtime?.dirty === true ? "SHA base (checkout con cambios)" : "SHA en ejecución";
+  return `<div id="status-deployment" class="w-full" data-deployment-state="${state}">
+    <span class="text-amber-300">${label}</span>
+    ${sha ? `<div>${shaLabel} <code class="font-mono break-all">${escape(String(sha))}</code></div>` : ""}
+  </div>`;
+}
+
 let statusRefreshGeneration = 0;
 
 export async function refreshStatus() {
@@ -28,10 +56,11 @@ export async function refreshStatus() {
       "text-base font-semibold text-zinc-100"; }
     if (meta) {
       meta.innerHTML = [
-        `versión <span class="font-mono text-zinc-200">${escape(String(h.relay_version ?? "?"))}</span>`,
+        `versión <span id="status-software-version" class="font-mono text-zinc-200">${escape(String(h.software_version ?? h.relay_version ?? "?"))}</span>`,
         `<span class="h-3 w-px bg-zinc-800"></span>`,
         `<span>${h.vscode_sessions_live} ${h.vscode_sessions_live === 1
           ? "sesión de VS Code" : "sesiones de VS Code"}</span>`,
+        deploymentMetadata(h),
       ].join("");
     }
     if (inv) {

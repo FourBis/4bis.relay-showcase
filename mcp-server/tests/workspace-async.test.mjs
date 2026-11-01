@@ -36,7 +36,7 @@ test('seleccionar B mientras A carga mantiene B aunque A llegue último', async 
   const pending = {}, opened = [], errors = [];
   const context = {
     apiRoot: path => new Promise(resolve => { pending[path] = resolve; }),
-    $: () => null, invalidateQuestions() {},
+    $: () => null, rememberChatDraft() {}, invalidateChatQuestions() {},
     setChatDrawer() {}, openConversation: async meta => opened.push(meta.id),
     toast: error => errors.push(error),
   };
@@ -59,6 +59,7 @@ test('cambiar de conversación reemplaza el grafo antes de esperar el proyecto',
   let graph = 'anterior', headerGraph, release;
   const context = {
     $: () => ({}), showMainView() {}, renderConvList() {},
+    rememberChatDraft() {}, invalidateChatQuestions() {}, selectAttachmentContext() {},
     setTaskWorkspaceContext() {}, mountTaskPanel: () => ({ destroy() {} }), renderTaskMode() {},
     attachGrafo: id => { graph = id; }, conversationTaskMode: () => "write",
     renderHeader: () => { headerGraph = graph; },
@@ -66,6 +67,7 @@ test('cambiar de conversación reemplaza el grafo antes de esperar el proyecto',
     selectionIsCurrent: () => false,
   };
   runInNewContext(`let chatSelectionGeneration = 1, activeChat, taskPanel, draftIssuePicker;
+    const pendingMessageRequests = new Map(), attachmentContext = {composerText:""};
     ${sourceFunction('tab-chats.js', 'openConversation')}; this.open = openConversation`, context);
   const pending = context.open({ id: 'nueva', project_slug: 'demo', status: 'open' }, 1);
   assert.equal(headerGraph, 'nueva', 'el encabezado nuevo nunca debe conservar el grafo anterior');
