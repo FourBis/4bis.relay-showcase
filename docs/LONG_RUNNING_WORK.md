@@ -125,3 +125,17 @@ Otorgar el proyecto no ejecuta el plan ni autoriza publicación o integración.
 
 Consulta [Equipo](TEAM_ACCESS.md), [cuentas personales](USER_ACCOUNTS.md) y
 [tareas persistentes](PERSISTENT_TASKS.md) para los contratos y límites.
+
+## Presupuesto y reintentos: candidato de mantenimiento
+
+El presupuesto de una solicitud se acumula entre tandas y etapas, conservando
+los topes configurados de herramientas, tandas y verificación. Un resultado del
+ejecutor se conserva antes de esperar etapas posteriores; un verificador no
+disponible no convierte el trabajo realizado en trabajo verificado.
+
+Un nodo agotado espera una decisión explícita. **Retomar** no inventa intentos
+disponibles; responder la decisión aplica la concesión existente y revalida los
+controles antes de relanzar. La revisión de esta rama fue estática. La
+recuperación integral de cierre/verificación y la recuperación tras terminar
+abruptamente el proceso no se declaran resueltas por esta tanda. Véase el
+[alcance de mantenimiento](qa/maintenance-2026-11-01.md).

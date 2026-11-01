@@ -257,3 +257,16 @@ con el dominio y la audiencia configurados; el correo sin JWT no basta. Los
 permisos se comprueban en el servidor.
 
 Consulta [SECURITY.md](../SECURITY.md) antes de configurar acceso remoto.
+
+## Precisiones del candidato de mantenimiento
+
+- `GET /questions` sólo incluye preguntas para las que la cuenta conserva la
+  autoridad existente de control de la tarea. Responder sigue requiriendo sus
+  comprobaciones del servidor.
+- Los endpoints de adjuntos permiten inline únicamente para formatos pasivos
+  de imagen admitidos. El resto usa descarga, `application/octet-stream`,
+  `nosniff`, CSP aislada y `private, no-store`.
+- Los previews de consola/estado aplican redacción al preparar su contenido;
+  no se modifica el archivo original ni se amplía el acceso.
+
+Alcance y límites de comprobación: [mantenimiento](qa/maintenance-2026-11-01.md).

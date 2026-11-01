@@ -43,3 +43,20 @@ En móvil se muestra una ventana activa con acceso al resto desde la bandeja.
 
 Consulta [UI_WORKSPACE.md](UI_WORKSPACE.md) para persistencia y límites, y
 [SETUP.md](SETUP.md) para instalación y pruebas.
+
+## Cambios del candidato de noviembre de 2026
+
+Los cambios de flags conservan los valores que estás editando cuando llega una
+respuesta de otro campo. El panel de proyecto incorpora sus acciones locales
+de reindexación y ejecución; la búsqueda abre el proyecto aunque no aparezca en
+la página actual de la tabla. Los instaladores mantienen la propuesta ligada
+al repositorio y trabajo originales; ante una respuesta incierta consultan el
+mismo trabajo antes de presentar otro intento.
+
+Archivos y Diagramas fijan el destino al iniciar una operación. Una generación
+o un guardado tardío conserva el borrador vigente. La redacción de correo nueva
+tampoco se elimina por la respuesta de un envío anterior.
+
+La [revisión de mantenimiento](qa/maintenance-2026-11-01.md) documenta el alcance
+y las comprobaciones estáticas; la UI de esta rama no se ejecutó ni verificó
+visualmente en esta tanda.

@@ -370,3 +370,8 @@ The documented installation targets Windows. Validation with simulated providers
 If you try a workflow, an [issue](https://github.com/FourBis/4bis.relay-showcase/issues) with the request, expected result, observed result, and version helps improve Relay. See [CONTRIBUTING.md](CONTRIBUTING.md) for changes.
 
 FourBis · Jeremías Badilla. Code under the [MIT License](LICENSE); see [third-party notices](THIRD_PARTY_NOTICES.md).
+
+The [November 1 maintenance candidate](docs/qa/maintenance-2026-11-01.md)
+records local UI, safety and continuity fixes, exclusions and static review.
+It does not establish publication or deployment; functional and visual
+validation remain pending.

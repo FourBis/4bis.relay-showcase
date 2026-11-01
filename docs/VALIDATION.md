@@ -1,5 +1,15 @@
 # Validación de la versión de portafolio
 
+## Candidato del 1 de noviembre de 2026
+
+La [tanda de mantenimiento](qa/maintenance-2026-11-01.md) sólo tiene revisión
+estática y compilación CSS con herramientas existentes. No se ejecutaron pruebas,
+Relay, navegador, DB ni proveedores; no se comprobó el runtime ni CI. Los
+resultados históricos de abajo pertenecen a sus respectivas versiones y no se
+heredan a este candidato local. Publicación e integración remota pendientes.
+
+## Evidencia histórica
+
 Revisiones locales del 16, 17, 22 y 24 de septiembre y del 2 y 6 de octubre de 2026.
 La [revisión acotada del 26 de octubre](qa/showcase-verified-status-2026-10-26.md)
 actualiza la presentación y comprueba la demo estática; no revalida todo el servidor. Relay se presenta como proyecto

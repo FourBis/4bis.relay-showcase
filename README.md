@@ -370,3 +370,7 @@ La instalación documentada tiene como destino Windows. La validación con prove
 Si pruebas un recorrido, un [issue](https://github.com/FourBis/4bis.relay-showcase/issues) con el pedido, resultado esperado, resultado observado y versión ayuda a mejorar Relay. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para cambios.
 
 FourBis · Jeremías Badilla. Código bajo [licencia MIT](LICENSE); [avisos de terceros](THIRD_PARTY_NOTICES.md).
+
+El [candidato de mantenimiento del 1 de noviembre](docs/qa/maintenance-2026-11-01.md)
+documenta correcciones locales de UI, seguridad y continuidad, sus exclusiones
+y la validación estática realizada. Aún no acredita publicación ni despliegue.
