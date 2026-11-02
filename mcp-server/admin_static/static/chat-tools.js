@@ -37,16 +37,39 @@ const TONO = {
              etiqueta: "pregunta" },
 };
 
+const _questionViews = new WeakMap();
+const actorKey = value => typeof value === "string" ? value.trim().toLowerCase() : "";
+const currentQuestionActor = async signal => actorKey((await api("me", {signal}))?.email);
+
+export function invalidateQuestions(box) {
+  if (!box) return;
+  const view = _questionViews.get(box);
+  if (view) {
+    view.alive = false; view.controller.abort();
+    view.actions.forEach(controller => controller.abort());
+    view.timers.forEach(timer => clearTimeout(timer));
+    view.actions.clear(); view.timers.clear();
+  }
+  _questionViews.delete(box);
+  box.querySelectorAll(".chat-question-card").forEach(card => {
+    card.querySelectorAll("button, input").forEach(control => { control.disabled = true; });
+    card.remove();
+  });
+}
+
 /**
  * Pinta la pregunta abierta del experto como tarjeta accionable.
  *
- * `onAnswered(resumePrompt)` se llama con el texto que retoma el hilo —
+ * `onAnswered(resumePrompt, answerContext)` recibe el texto que retoma el hilo
+ * y la captura local del compositor al iniciar la respuesta.
  * el caller decide si lo manda solo o lo deja escrito en el composer.
  * La tarjeta se saca del DOM apenas se responde: una pregunta ya
  * contestada que sigue con botones invita a contestarla dos veces.
  */
-export function renderQuestionCard(box, pregunta, onAnswered) {
-  if (!box || !pregunta) return null;
+export function renderQuestionCard(box, pregunta, onAnswered, context) {
+  if (!box || !pregunta || !context?.isCurrent() || pregunta.conversation_id !== context.convId) return null;
+  const qId = pregunta.id;
+  const current = () => context.isCurrent() && card.isConnected && card.parentElement === box;
   const q = pregunta.question || {};
   const tono = TONO[pregunta.kind] || TONO.choice;
   const opciones = q.options || [];
@@ -95,82 +118,144 @@ export function renderQuestionCard(box, pregunta, onAnswered) {
       font-size:13px; font-weight:500;`;
     b.addEventListener("mouseenter", () => { b.style.background = tono.fondo; });
     b.addEventListener("mouseleave", () => { b.style.background = "transparent"; });
-    b.addEventListener("click", () => responder(card, pregunta.id,
-                                               { choice: opt.key }, onAnswered));
+    b.addEventListener("click", () => responder(card, qId,
+                                               { choice: opt.key }, onAnswered, context));
     acciones.appendChild(b);
   }
   if (!opciones.length) acciones.remove();
 
   const input = card.querySelector(".q-text");
   const enviar = () => {
+    if (!current()) return;
     const texto = input.value.trim();
     if (!texto) { input.focus(); return; }
-    responder(card, pregunta.id, { text: texto }, onAnswered);
+    responder(card, qId, { text: texto }, onAnswered, context);
   };
   card.querySelector(".q-send").addEventListener("click", enviar);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); enviar(); }
   });
 
+  if (!context.isCurrent()) return null;
   box.appendChild(card);
   // Que se vea sin scrollear: si el humano no la ve, no la contesta.
   card.scrollIntoView({ behavior: "smooth", block: "nearest" });
   return card;
 }
 
-async function responder(card, qId, body, onAnswered) {
+async function responder(card, qId, body, onAnswered, context) {
+  const current = () => context?.isCurrent() && card.isConnected && card.parentElement === context.box;
+  if (!current() || card.dataset.submitting === "true") return;
+  const answerContext = context.captureAnswerContext?.();
+  card.dataset.submitting = "true";
   const estado = card.querySelector(".q-status");
   card.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
   estado.hidden = false;
   estado.textContent = "Enviando…";
+  const controller = new AbortController(); context.actions.add(controller);
+  const finishLater = status => context.schedule(async () => {
+    try {
+      if (!current() || !await context.verifyActor(context.controller.signal) || !current()) return;
+      card.remove();
+      if (status === "superseded") card._refreshQuestions?.();
+    } catch { /* No stale view or unverified account can reload decisions. */ }
+  });
   try {
+    if (!await context.verifyActor(controller.signal) || !current()) return;
     const r = await apiRoot(`/questions/${encodeURIComponent(qId)}/answer`, {
-      method: "POST", body: JSON.stringify(body),
+      method: "POST", body: JSON.stringify(body), signal:controller.signal,
     });
+    if (!current() || !await context.verifyActor(controller.signal) || !current()) return;
     if (r && r.error) {
       // 409: la pregunta ya no está abierta. Dos motivos: alguien más
       // contestó (Discord, otra pestaña), o el experto preguntó otra cosa
       // después y esta quedó vieja. En el segundo caso el mensaje dice
       // "mirá la última", así que se la mostramos en vez de dejarlo
-      // buscándola: `_recargar` la repinta desde la API.
+      // buscándola: el callback de esta tarjeta la repinta desde la API.
       estado.textContent = r.error;
-      setTimeout(() => {
-        const box = card.parentElement;
-        card.remove();
-        if (r.status === "superseded" && box && _recargar) _recargar(box);
-      }, 2500);
+      finishLater(r.status);
       return;
     }
     card.remove();
-    if (typeof onAnswered === "function") onAnswered(r.resume_prompt || "");
+    if (typeof onAnswered === "function") onAnswered(r?.resume_prompt || "", answerContext);
   } catch (e) {
+    if (!current()) return;
+    try {
+      if (!await context.verifyActor(controller.signal) || !current()) return;
+    } catch {
+      if (context.isCurrent()) invalidateQuestions(context.box);
+      return;
+    }
+    let detail = null;
+    try { detail = typeof e.body === "string" ? JSON.parse(e.body) : e.body; } catch { /* keep the original error */ }
+    const terminal = e.status === 409 && ["answered", "skipped", "superseded"].includes(detail?.status);
+    if (terminal || e.status === 403 || e.status === 404) {
+      estado.textContent = detail?.error || "Pregunta no disponible para esta cuenta.";
+      if (terminal) finishLater(detail.status);
+      return;
+    }
     estado.textContent = "No se pudo enviar: " + e.message;
+    card.dataset.submitting = "false";
     card.querySelectorAll("button, input").forEach((el) => { el.disabled = false; });
+  } finally {
+    context.actions.delete(controller);
   }
 }
 
-// Cómo repintar la decisión vigente después de un 409 por `superseded`.
-// Se guarda en el módulo y no se pasa por parámetro para no cambiar la
-// firma pública de `renderQuestionCard`, que los tests y el E2E usan
-// directo con una pregunta armada a mano.
-let _recargar = null;
-
-/** Trae las preguntas abiertas del hilo y pinta la primera. */
-export async function refreshQuestions(box, convId, onAnswered) {
-  if (!box || !convId) return 0;
-  _recargar = (b) => refreshQuestions(b, convId, onAnswered);
-  box.querySelectorAll(".chat-question-card").forEach((c) => c.remove());
+// Una recarga de decisiones pertenece a la misma vista del mismo hilo.
+// Una respuesta tardía de A nunca usa el callback de B.
+/** Trae la primera pregunta de la selección vigente. `isCurrent` pertenece
+ * a esa selección, no solo al contenedor reutilizable. Abort es una ayuda;
+ * el token y la cuenta fresca también se comprueban si la respuesta llega. */
+export async function refreshQuestions(box, convId, onAnswered, {isCurrent = () => false,
+  getActor = currentQuestionActor, expectedActor = "", captureAnswerContext = () => null} = {}) {
+  if (!box || !convId || !isCurrent()) return 0;
+  invalidateQuestions(box);
+  const view = {box, convId, actor:"", alive:true, controller:new AbortController(), actions:new Set(), timers:new Set(), captureAnswerContext};
+  _questionViews.set(box, view);
+  view.isCurrent = () => view.alive && box.isConnected && _questionViews.get(box) === view && isCurrent();
+  view.verifyActor = async signal => {
+    if (!view.isCurrent()) return false;
+    const actor = actorKey(await getActor(signal));
+    if (!view.isCurrent()) return false;
+    if (!actor || actor !== view.actor) { invalidateQuestions(box); return false; }
+    return true;
+  };
+  view.schedule = callback => {
+    const timer = setTimeout(() => {
+      view.timers.delete(timer);
+      if (view.isCurrent()) callback();
+    }, 2500);
+    view.timers.add(timer);
+  };
   let abiertas = [];
   try {
+    const actor = actorKey(await getActor(view.controller.signal));
+    if (!view.isCurrent() || !actor) return 0;
+    if (expectedActor && actor !== expectedActor) { invalidateQuestions(box); return 0; }
+    view.actor = actor;
     const r = await apiRoot(
-      `/questions?conversation=${encodeURIComponent(convId)}&only_open=1`);
+      `/questions?conversation=${encodeURIComponent(convId)}&only_open=1`, {signal:view.controller.signal});
+    if (!view.isCurrent() || !await view.verifyActor(view.controller.signal)) return 0;
     abiertas = (r && r.questions) || [];
+    if (!Array.isArray(abiertas) || !abiertas.every(q => q?.conversation_id === convId && typeof q.id === "string")) return 0;
+    abiertas = abiertas.filter(q => q.status === "open");
   } catch (_) {
     return 0;   // sin tarjeta, la pregunta igual está en el texto
   }
+  if (!view.isCurrent()) return 0;
   // Una a la vez: el experto pregunta una cosa por turno, y una pila de
   // tarjetas sería ruido. La más nueva primero (la API ya ordena DESC).
-  if (abiertas.length) renderQuestionCard(box, abiertas[0], onAnswered);
+  if (abiertas.length) {
+    const card = renderQuestionCard(box, abiertas[0], onAnswered, view);
+    if (card) card._refreshQuestions = async () => {
+      try {
+        if (view.isCurrent() && await view.verifyActor(view.controller.signal) && view.isCurrent()) {
+          return refreshQuestions(box, convId, onAnswered, {isCurrent, getActor, expectedActor:view.actor, captureAnswerContext});
+        }
+      } catch { /* A failed identity read cannot revive a stale card. */ }
+    };
+  }
   return abiertas.length;
 }
 
@@ -214,7 +299,7 @@ export const chatCommands = [
   },
   {
     name: "/parar",
-    desc: "Corta el run en curso sin perder lo avanzado",
+    desc: "Solicita detener el turno en curso; revisa luego su estado y resultados",
     run: (ctx) => { ctx.parar(); return false; },
   },
   {

@@ -30,7 +30,10 @@ def build_instructions(
         [{"path": project["repo_path"], "name": project["slug"]}]
     )
     defaults = project.get("defaults_json") or {}
-    inject_skills = defaults.get("inject_skills", True)
+    # A private project consultation never receives global/repository skills
+    # through automatic embed, compact index or fallback. Read project files
+    # explicitly through its native file permissions instead.
+    inject_skills = False if defaults.get("mcp_private") else defaults.get("inject_skills", True)
     skills_mode = defaults.get("skills_mode", "embed")
     if not inject_skills:
         chosen_skills_block = ""

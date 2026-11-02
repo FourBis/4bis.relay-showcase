@@ -5,12 +5,13 @@ import asyncio
 import json
 import base64
 import uuid
+import sqlite3
 from typing import Optional
 
 from aiohttp import web
 
 from .server_common import (
-    BG_TASKS_KEY, COMMANDS_KEY, DB_KEY, MCP_POOL_KEY, NOTIFY_KEY, PROGRESS_KEY,
+    BG_TASKS_KEY, COMMANDS_KEY, DB_KEY, GRAFOS_KEY, MCP_POOL_KEY, NOTIFY_KEY, PROGRESS_KEY,
     RUNNING_KEY, SESSIONS_KEY, SKILLS_KEY, _require_auth, _spawn_bg, logger,
 )
 from . import attachments as attachments_mod
@@ -28,8 +29,21 @@ from .db import Database
 from .notify import NotifyClient
 from .skills import SkillCache
 from .server_expert_jobs import _run_expert_bg
+from .secret_redaction import redact_data
+
+
+async def _require_conversation_send(request, db, cid):
+    from . import conversation_access
+    try:
+        return await conversation_access.require(db, cid, identity.requester(request), "send")
+    except PermissionError:
+        raise web.HTTPNotFound(text="Conversación no disponible.") from None
+
+
+
+
 @_require_auth
-@coordination.guard_workspace(DB_KEY, enqueue=True)
+@coordination.guard_workspace(DB_KEY, enqueue=True, checkout_only=True)
 async def experts_run(request: web.Request) -> web.Response:
     """POST /experts/run — corre el experto pydantic-ai de un proyecto.
 
@@ -77,6 +91,9 @@ async def experts_run(request: web.Request) -> web.Response:
         return web.json_response({"error": "user requerido (string)"}, status=400)
     target = target.strip()
     source = body.get("source") or "api"
+    if isinstance(source, str) and source.strip().casefold() == "discord":
+        return web.json_response({"error": "bridge_audience_unverified",
+            "message": "Usa Relay con tu cuenta; no se puede verificar la audiencia de Discord."}, status=409)
     author = body.get("author") or ""
     system_extra = body.get("system") or ""
     model_override = body.get("model") or ""
@@ -179,6 +196,7 @@ async def experts_run(request: web.Request) -> web.Response:
             status=404,
         )
 
+
     # Etapas apagadas en el proyecto (2026-08-26). El popover del chat
     # ofrece los tres roles sin saber la config del proyecto, así que
     # `stage_models` podía traer un verificador para un proyecto que
@@ -205,6 +223,8 @@ async def experts_run(request: web.Request) -> web.Response:
     # ADR-025: conversación (opcional). Validar ANTES de crear el chat.
     conversation: Optional[dict] = None
     conv_id = body.get("conversation") or body.get("conversation_id") or ""
+    if "expected_creation" in body and (not conv_id or not isinstance(body["expected_creation"], dict)):
+        return web.json_response({"error": "expected_creation requiere conversación y contrato"}, status=400)
     if conv_id:
         if not isinstance(conv_id, str):
             return web.json_response(
@@ -213,7 +233,10 @@ async def experts_run(request: web.Request) -> web.Response:
         if conversation is None:
             return web.json_response(
                 {"error": f"conversación {conv_id!r} desconocida"}, status=404)
+        await _require_conversation_send(request, db, conv_id)
         managed = await db.get_conversation_task(conv_id)
+        if "expected_creation" in body and not managed:
+            return web.json_response({"error": "La creación no tiene un contrato de tarea verificable"}, status=409)
         if conversation["status"] != "open" and not managed:
             return web.json_response(
                 {"error": "conversación cerrada (cerrar es cerrar; abre una "
@@ -246,27 +269,39 @@ async def experts_run(request: web.Request) -> web.Response:
                 {"error": "discord_thread_id debe ser string"}, status=400)
         conversation = await db.get_open_conversation_by_thread(
             project["slug"], thread_id)
+        if conversation is not None:
+            await _require_conversation_send(request, db, conversation["id"])
         if conversation is None:
-            existing = await db.get_open_conversation_for_workspace(project)
+            from . import git_flow
+            from pathlib import Path
+            repo = project.get("repo_path") or ""
+            if not repo or not Path(repo).is_dir():
+                return web.json_response({"error": "El proyecto no tiene un directorio existente"}, status=422)
+            thread_is_git = await git_flow.is_git_repo(repo)
+            existing = await db.get_open_conversation_for_workspace(project) if thread_is_git else None
             if existing is not None:
+                from . import conversation_access
+                if not (await conversation_access.get_access(db, existing["id"], identity.requester(request)))["can_read"]:
+                    return web.json_response({"error": "El workspace del proyecto está ocupado", "code": "workspace_occupied"}, status=409)
                 return web.json_response(
                     {"error": "ya hay una conversación abierta para este repositorio",
+                     "code": "workspace_occupied",
                      "conversation_id": existing["id"]}, status=409)
+            initial_task = {"role": identity.role_of(request), "requested_by": identity.requester(request),
+                "publish_allowed": False, "tracking": {"enabled": False}, "state": "provisioning",
+                "read_only": not identity.can_write_project(request, project) if thread_is_git else True}
+            if not thread_is_git:
+                initial_task.update(mode="read_only", no_checkout=True, state="ready", workspace_state="not_applicable")
             new_id = await db.create_conversation(
                 project_slug=project["slug"], discord_thread_id=thread_id,
                 discord_user_id=discord_user_id,
                 discord_author=discord_author,
-                requested_by=identity.requester(request))
-            from . import git_flow
-            if await git_flow.is_git_repo(project.get("repo_path") or ""):
-                read_only = not identity.can_write_project(request, project)
-                await db.update_conversation_task(new_id, role=identity.role_of(request),
-                                                  requested_by=identity.requester(request), publish_allowed=False,
-                                                  tracking={"enabled": False})
-                try:
-                    await task_workspace.initialize_task(db, project, new_id, read_only=read_only)
-                except (RuntimeError, OSError) as exc:
-                    return web.json_response({"error": str(exc), "conversation_id": new_id}, status=422)
+                requested_by=identity.requester(request), initial_task=initial_task)
+            read_only = not identity.can_write_project(request, project)
+            try:
+                await task_workspace.initialize_task(db, project, new_id, read_only=read_only)
+            except (RuntimeError, OSError) as exc:
+                return web.json_response({"error": str(exc), "conversation_id": new_id}, status=422)
             conversation = await db.get_conversation(new_id)
         else:
             managed = await db.get_conversation_task(conversation["id"])
@@ -285,30 +320,61 @@ async def experts_run(request: web.Request) -> web.Response:
                 conversation = await db.get_conversation(conversation["id"])
 
     # Un pedido sin hilo sobre un repo Git también necesita identidad y raíz propia.
-    if conversation is None and project.get("repo_path"):
+    if conversation is None:
         from . import git_flow
-        if await git_flow.is_git_repo(project["repo_path"]):
+        from pathlib import Path
+        repo = project.get("repo_path") or ""
+        if not repo or not Path(repo).is_dir():
+            return web.json_response({"error": "El proyecto no tiene un directorio existente"}, status=422)
+        if repo:
             request_id = body.get("request_id")
             if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 128):
                 return web.json_response({"error": "request_id inválido"}, status=400)
             cid = (str(uuid.uuid5(uuid.NAMESPACE_URL, f"relay:implicit:{target}:{request_id}")) if request_id else None)
             conversation = await db.get_conversation(cid) if cid else None
+            if conversation:
+                await _require_conversation_send(request, db, cid)
+                if not (await db.get_conversation_task(cid)).get("mode"):
+                    return web.json_response({"error": "La conversación aún no tiene un workspace preparado; revisa sus controles antes de continuar.",
+                        "code": "conversation_initializing", "conversation_id": cid}, status=409)
             if not conversation:
                 readonly = body.get("read_only", bool((project.get("defaults_json") or {}).get("read_only")))
                 if not isinstance(readonly, bool):
                     return web.json_response({"error": "read_only debe ser booleano"}, status=400)
                 readonly = readonly or not identity.can_write_project(request, project)
-                cid = await db.create_conversation(project_slug=target, author=author,
-                    requested_by=identity.requester(request), conversation_id=cid)
-                await db.update_conversation_task(cid, role=identity.role_of(request),
-                    requested_by=identity.requester(request), publish_allowed=False, tracking={"enabled": False})
+                try:
+                    cid = await db.create_conversation(project_slug=target, author=author,
+                        requested_by=identity.requester(request), conversation_id=cid,
+                        initial_task={"role": identity.role_of(request), "requested_by": identity.requester(request),
+                            "publish_allowed": False, "tracking": {"enabled": False}, "read_only": readonly, "state": "provisioning"})
+                except sqlite3.IntegrityError:
+                    if not cid or not await db.get_conversation(cid):
+                        raise
+                    await _require_conversation_send(request, db, cid)
+                    # Another identical ingress owns initialization. Do not run
+                    # through the legacy/stateless fallback while it is pending.
+                    if not (await db.get_conversation_task(cid)).get("mode"):
+                        return web.json_response({"error": "La conversación se está preparando; vuelve a enviar el mismo pedido.",
+                            "code": "conversation_initializing", "conversation_id": cid}, status=409)
                 try:
                     await task_workspace.initialize_task(db, project, cid, read_only=readonly)
                 except (RuntimeError, OSError) as exc:
                     return web.json_response({"error": str(exc), "conversation_id": cid}, status=422)
                 conversation = await db.get_conversation(cid)
 
+    if conversation is not None:
+        await _require_conversation_send(request, db, conversation["id"])
     managed = await db.get_conversation_task(conversation["id"]) if conversation else {}
+    if not managed:
+        # Historical empty tasks remain untouched. A directory without Git
+        # still cannot inherit code-write/shell permissions from project defaults.
+        from . import git_flow
+        from pathlib import Path
+        repo = project.get("repo_path") or ""
+        if not repo or not Path(repo).is_dir():
+            return web.json_response({"error": "El proyecto no tiene un directorio existente"}, status=422)
+        if not await git_flow.is_git_repo(repo):
+            project = {**project, "defaults_json": {**(project.get("defaults_json") or {}), "read_only": True}}
     if managed and not identity.can_control_task(request, project, managed, conversation):
         return web.json_response({"error": "No tienes permiso para continuar esta tarea."}, status=403)
     # Seguimiento por GitHub (fase 4): si la conversación nació de un
@@ -326,8 +392,11 @@ async def experts_run(request: web.Request) -> web.Response:
 
     # ADR-027: retrieval manual de memoria (si el caller lo pide).
     memory_query = body.get("memory") or ""
-    if memory_query and isinstance(memory_query, str):
-        hits = await db.search_memories(project["slug"], memory_query, limit=3)
+    if not isinstance(memory_query, str):
+        return web.json_response({"error": "memory debe ser texto"}, status=400)
+    if memory_query and not managed and conversation:
+        hits = await db.search_memories(project["slug"], memory_query, limit=3,
+            actor=identity.requester(request), source_conversation=conversation["id"])
         block = memory.build_memory_block(hits)
         if block:
             system_extra = f"{system_extra}\n\n{block}" if system_extra else block
@@ -344,11 +413,16 @@ async def experts_run(request: web.Request) -> web.Response:
     attach_scope = attachments_mod.scope_for(
         conversation["id"] if conversation else "", project["slug"])
     raw_attachments = body.get("attachments")
+    valid_ids = []
     images: list[tuple[bytes, str]] = []
     if isinstance(raw_attachments, list) and raw_attachments:
         # Filtramos strings vacíos y casteamos a str (defensivo).
         valid_ids = [str(a).strip() for a in raw_attachments
                      if isinstance(a, (str,)) and a.strip()]
+        from . import conversation_access
+        for attach_id in valid_ids:
+            if not await conversation_access.can_read_attachment(db, identity.requester(request), attach_id):
+                return web.json_response({"error": "Adjunto no disponible para esta cuenta"}, status=404)
         block = attachments_mod.format_user_block(valid_ids, attach_scope)
         if block:
             user = f"{user.rstrip()}\n{block}"
@@ -397,16 +471,26 @@ async def experts_run(request: web.Request) -> web.Response:
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
             return web.json_response({"error": "request_id inválido"}, status=400)
         payload = {"user": user, "system_extra": system_extra, "model_override": model_override,
+                   "memory_query": memory_query,
+                   "knowledge_scope_version": 1,
                    "stage_models": stage_models, "mcp_with": mcp_with, "source": source,
                    "author": author, "target": target, "role": identity.role_of(request),
                    "requested_by": identity.requester(request),
                    "images": [(base64.b64encode(raw).decode("ascii"), mime) for raw, mime in images]}
+        if "expected_creation" in body:
+            payload["expected_creation"] = body["expected_creation"]
         try:
-            event = await db.enqueue_conversation_event(conversation["id"], "request:" + request_id, "run", payload)
+            # enable_write holds this same lock across its empty-queue check
+            # and promotion. The SQL assertion then shares the event commit.
+            async with task_service.control_lock(db, conversation["id"]):
+                event = await db.enqueue_conversation_event(conversation["id"], "request:" + request_id, "run", payload,
+                                                           authorized_actor=identity.requester(request))
+                await db.run("UPDATE conversations SET status='open', closed_at=NULL WHERE id=?", (conversation["id"],))
+                task_service.start_pending(request.app, conversation["id"])
+        except PermissionError:
+            return web.json_response({"error": "Conversación no disponible"}, status=404)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=409)
-        await db.run("UPDATE conversations SET status='open', closed_at=NULL WHERE id=?", (conversation["id"],))
-        task_service.start_pending(request.app, conversation["id"])
         return web.json_response({"id": event["chat_id"], "status": "queued" if event["state"] == "pending" else "running",
                                   "conversation_id": conversation["id"], "event_id": event["id"],
                                   "ignored_stages": ignored_stages}, status=202)
@@ -471,6 +555,42 @@ async def experts_cancel(request: web.Request) -> web.Response:
     return await asyncio.shield(_spawn_bg(finish_cancel(), hold_workspace=False))
 
 
+async def _graph_chat_cancel_conflict(request, chat):
+    """Graph workers live outside RUNNING_KEY; do not clean them as zombies."""
+    db = request.app[DB_KEY]
+    registries = (request.app.get(GRAFOS_KEY, {}), getattr(db, "_graph_cancellations", {}))
+    def alive(gid):
+        return any((worker := registry.get(gid)) is not None and not worker.done()
+                   for registry in registries)
+    links = await db.run(
+        "SELECT g.id,g.project_slug,g.conversation_id,t.estado AS node_state "
+        "FROM tasks t JOIN task_graphs g ON g.id=t.graph_id WHERE t.chat_id=?", (chat["id"],))
+    for graph in links:
+        if graph["node_state"] != "corriendo" and not alive(graph["id"]):
+            continue
+        body = {"code": "graph_managed_run",
+                "error": "Este run pertenece a un plan; usa sus controles para detenerlo o revisar su estado."}
+        if (graph.get("conversation_id") and graph["conversation_id"] == chat.get("conversation_id")
+                and graph.get("project_slug") == chat.get("project_slug")):
+            from . import conversation_access
+            actor = identity.requester(request)
+            if (await conversation_access.get_access(db, graph["conversation_id"], actor))["can_control"]:
+                body["graph_id"] = graph["id"]
+        return web.json_response(body, status=409)
+    if not links and chat.get("source") == "grafo":
+        # create_chat precedes task.chat_id during protected node setup. A
+        # matching live parent prevents cleanup in that brief linkage window;
+        # without the exact node link do not claim or expose a graph ID.
+        parents = await db.run(
+            "SELECT id FROM task_graphs WHERE estado='activo' AND "
+            "conversation_id IS ? AND project_slug IS ?",
+            (chat.get("conversation_id"), chat.get("project_slug")))
+        if any(alive(graph["id"]) for graph in parents):
+            return web.json_response({"code": "graph_managed_run",
+                "error": "Este run pertenece a un plan que sigue en curso; usa sus controles para revisar su estado."}, status=409)
+    return None
+
+
 async def _cancel_expert(request, chat_id):
     db, running = request.app[DB_KEY], request.app[RUNNING_KEY]
     progress = request.app[PROGRESS_KEY]
@@ -530,9 +650,21 @@ async def _cancel_expert(request, chat_id):
             return web.json_response({"error": "La ejecución terminó sin guardar su cierre; revisa el registro."}, status=409)
         return web.json_response({"cancelled": [chat_id] if (chat or {}).get("status") == "cancelled" else [],
                                   "finished": [chat_id]})
+    if chat and chat.get("status") in {"queued", "running"}:
+        conflict = await _graph_chat_cancel_conflict(request, chat)
+        if conflict is not None:
+            return conflict
     if chat and chat.get("status") == "running":
-        await db.finish_chat(chat_id, status="cancelled", error="zombie: cancelado sin proceso vivo")
-        return web.json_response({"cancelled": [], "zombies_cleaned": [chat_id]})
+        # Authorization/graph checks await while the executor can finish. The
+        # transition, not the earlier snapshot, must prove this was a zombie.
+        # Never overwrite a completed result or report a cleanup we did not do.
+        changed = await db.cancel_running_chat(
+            chat_id, error="zombie: cancelado sin proceso vivo")
+        if changed:
+            return web.json_response({"cancelled": [], "zombies_cleaned": [chat_id]})
+        chat = await db.get_chat(chat_id)
+        if chat and chat.get("status") in {"queued", "running"}:
+            return web.json_response({"error": "La ejecución cambió de estado; revisa su registro."}, status=409)
     if chat:
         return web.json_response({"cancelled": [], "finished": [chat_id]})
     return web.json_response({"error": "no hay run en curso con ese id"}, status=404)
@@ -568,7 +700,8 @@ async def experts_steer(request: web.Request) -> web.Response:
     event = await db.conversation_event_for_chat(chat_id)
     if event:
         cid = event["conversation_id"]
-        if not await identity.can_control_graph(request, db, {"conversation_id": cid}):
+        from . import conversation_access
+        if not (await conversation_access.get_access(db, cid, identity.requester(request)))["can_send"]:
             return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
         state = await db.get_conversation_task(cid)
         if state.get("state") in task_service.STOPPED:
@@ -579,7 +712,11 @@ async def experts_steer(request: web.Request) -> web.Response:
         try:
             queued = await db.enqueue_conversation_event(cid, "steer:" + key, "run", {
                 "user": message, "role": identity.role_of(request), "source": "steer",
-                "requested_by": identity.requester(request)})
+                "requested_by": identity.requester(request),
+            },
+                authorized_actor=identity.requester(request))
+        except PermissionError:
+            return web.json_response({"error": "Conversación no disponible"}, status=404)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=409)
         task_service.start_pending(request.app, cid)
@@ -627,24 +764,36 @@ async def experts_status(request: web.Request) -> web.Response:
     progress: dict = request.app[PROGRESS_KEY]
     chat_id = request.match_info["chat_id"]
     matches = [cid for cid in progress if cid.startswith(chat_id)]
+    from .private_mcp_access import visible_rows
+    def unavailable():
+        return web.json_response(
+            {"error": "no hay run con ese id (o el relay reinició)",
+             "lost_on_restart_possible": True}, status=404,
+            headers={"Cache-Control": "no-store"})
     if not matches:
         db = request.app[DB_KEY]
         event = await db.conversation_event_for_chat(chat_id)
         if event:
             chat = await db.get_chat(chat_id)
-            return web.json_response({"chat_id": chat_id, "target": chat.get("project_slug"),
+            if not chat:
+                return unavailable()
+            payload = {"chat_id": chat_id, "target": chat.get("project_slug"),
                 "phase": "queued" if event["state"] == "pending" else chat.get("status"),
                 "finished": event["state"] in {"applied", "uncertain", "cancelled"},
                 "error": event.get("error"), "elapsed_s": 0, "tool_calls": chat.get("tool_calls") or 0,
-                "tokens_in": chat.get("tokens_in"), "tokens_out": chat.get("tokens_out"), "steps": []})
+                "tokens_in": chat.get("tokens_in"), "tokens_out": chat.get("tokens_out"), "steps": []}
+            if not await visible_rows(request, [{"chat_id": chat_id,
+                                                  "conversation_id": chat.get("conversation_id")}]):
+                return unavailable()
+            return web.json_response(redact_data(payload), headers={"Cache-Control": "no-store"})
         # Distinguir "no existe" de "existe pero reinicié": el caller
         # puede ir a /chats/{id} para ver el resultado final.
+        return unavailable()
+    snapshots = await visible_rows(request, [redact_data(progress[cid].snapshot()) for cid in matches])
+    if not snapshots:
+        return unavailable()
+    if len(snapshots) > 1:
         return web.json_response(
-            {"error": "no hay run con ese id (o el relay reinició)",
-             "lost_on_restart_possible": True},
-            status=404)
-    if len(matches) > 1:
-        return web.json_response(
-            {"matches": [m for m in matches],
-             "snapshots": [progress[m].snapshot() for m in matches]})
-    return web.json_response(progress[matches[0]].snapshot())
+            {"matches": [row["chat_id"] for row in snapshots], "snapshots": snapshots},
+            headers={"Cache-Control": "no-store"})
+    return web.json_response(snapshots[0], headers={"Cache-Control": "no-store"})

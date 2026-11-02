@@ -1,5 +1,13 @@
 # FourBis Relay
 
+Esta rama prepara una ampliación local revisable: compartir conversaciones,
+recuperar solicitudes inciertas, revisión opcional de PR externos, archivo de
+cuentas y consultas MCP personales con alcance por proyecto. Su
+[recibo de paridad](docs/qa/parity-2026-11-01.md) distingue código, demo y
+validación pendiente. Todavía no acredita integración ni despliegue remoto.
+La demo modificada en esta rama usa sólo datos sintéticos; la URL publicada
+puede seguir mostrando una versión anterior.
+
 **Español** · [English](README.en.md) · [Demo interactiva](https://fourbis.github.io/4bis.relay-showcase/) · [Instalación](docs/SETUP.md)
 
 ## Tu equipo, tus repositorios y la IA trabajando sobre el mismo proyecto
@@ -22,7 +30,7 @@ La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte 
 |---|---|
 | Implementado en el código público | El [mapa de capacidades](docs/CAPABILITY_MAP.md) enlaza módulos, condiciones y límites. No todas las integraciones están configuradas por defecto. |
 | Integrado en `develop` | El [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) incorporó el registro de PR externos y la sincronización opcional de issues; el [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrigió observaciones concurrentes. Integración de código no equivale a despliegue. |
-| Demostrado en el navegador | Los cinco escenarios usan datos sintéticos, sin modelos, GitHub ni backend. La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) documenta la comprobación local. |
+| Demostrado en el navegador | La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) comprobó los cinco escenarios de esa versión. Esta rama añade un sexto escenario, Modelos y bandeja, con revisión estática; no tiene una comprobación nueva en navegador. Todos usan datos sintéticos, sin modelos, GitHub ni backend. |
 | Disponible en una instancia | Depende de la versión instalada, sus permisos y su configuración. Esta revisión no acredita un despliegue conectado ni la disponibilidad operativa de PR externos. |
 
 ## Explora Relay
@@ -370,3 +378,25 @@ La instalación documentada tiene como destino Windows. La validación con prove
 Si pruebas un recorrido, un [issue](https://github.com/FourBis/4bis.relay-showcase/issues) con el pedido, resultado esperado, resultado observado y versión ayuda a mejorar Relay. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para cambios.
 
 FourBis · Jeremías Badilla. Código bajo [licencia MIT](LICENSE); [avisos de terceros](THIRD_PARTY_NOTICES.md).
+
+El [candidato de mantenimiento del 1 de noviembre](docs/qa/maintenance-2026-11-01.md)
+documenta correcciones locales de UI, seguridad y continuidad, sus exclusiones
+y la validación estática realizada. Aún no acredita publicación ni despliegue.
+
+## Funciones del candidato de paridad
+
+| Recorrido | Guía y límite principal |
+| --- | --- |
+| Mis conversaciones y Compartidas conmigo | [Acceso](docs/CONVERSATION_ACCESS.md): invitación explícita; colaborar exige escritura vigente. |
+| Recuperar un envío sin duplicarlo | [Borradores y recibos](docs/REQUEST_RECOVERY.md): conserva el ID original; el borrador local se pierde al recargar. |
+| Revisar PR externos por commit | [Revisión](docs/EXTERNAL_REVIEW.md): política apagada por defecto, publicación e inbox con estados separados. |
+| Archivar una cuenta | [Equipo](docs/TEAM_ACCESS.md): conserva asignaciones; restaurar no reactiva el acceso. |
+| Consultar por MCP personal | [Interfaz opcional](docs/GENERIC_MCP.md): apagada globalmente y por proyecto; sin skills globales. |
+| Recuperar trabajo y cerrar un plan | [Recuperación](docs/DURABLE_RECOVERY.md): distingue resultado, persistencia y verificación final. |
+| Saber qué proceso está instalado | [Recibos locales](docs/DEPLOYMENT_RECEIPTS.md): opt-in del operador, sin despliegue automático. |
+| Explorar estos recorridos | [Demo](docs/DEMO.md): simulación en memoria, sin cuentas ni servicios reales. |
+
+Los adjuntos existentes y la evidencia PNG de PR externos son recorridos
+distintos. Esta tanda no incorpora generación o edición nativa de imágenes,
+audio o vídeo ni la revisión posterior de su interfaz. Tampoco se verificaron
+proveedores ni se ejecutó el navegador, la aplicación o las suites.

@@ -562,7 +562,8 @@ def write_plan_files(
     .gitignore del proyecto — decisión 11 de la enmienda ADR-028).
     Best-effort en el repo; el espejo en state/ es la fuente de resume.
     """
-    mirror = state_dir / "night-runs" / run_id / "plan.md"
+    from .night_paths import night_plan_mirror
+    mirror = night_plan_mirror(state_dir, run_id)
     mirror.parent.mkdir(parents=True, exist_ok=True)
     mirror.write_text(text, encoding="utf-8")
     try:

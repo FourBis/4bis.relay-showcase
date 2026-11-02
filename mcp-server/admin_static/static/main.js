@@ -12,7 +12,7 @@ import { initRunning, loadRunning } from "./tab-running.js";
 // endpoint legacy /admin/api/consults queda como alias por compat
 // con clientes viejos (Discord bot). Ver docs/CHANGELOG.md iter 9.8.
 import { initChats, loadChats, selectConversation } from "./tab-chats.js";
-import { bootEmbeddedChat, getEmbeddedConversation } from "./chat-window.js";
+import { bootEmbeddedChat, getEmbeddedConversation, returnToConversationList } from "./chat-window.js";
 import { initVoice, loadVoice } from "./tab-voice.js";
 import { initProjects, loadProjects } from "./tab-projects.js";
 import { initOrphans, loadOrphans, loadIgnored } from "./tab-orphans.js";
@@ -41,6 +41,7 @@ import { initWatcher } from "./watcher.js";
 import { initSearch } from "./search.js";
 import { initWorkspace, visibleWorkspaceModules } from './workspace.js';
 import { restoreChatObject } from './chat-objects.js';
+import { initChatChrome } from './chat-chrome.js';
 
 _dbg("admin.js (módulos) cargado, debug:",
      DEBUG ? "?debug=1" : "agrega ?debug=1 a la URL");
@@ -80,6 +81,7 @@ const TAB_LOADERS = {
 wireModals();
 wireSidePanel();
 wirePanelResize();
+initChatChrome();
 
 const embeddedConversation = getEmbeddedConversation();
 const actor = await api("me").catch((error) => {
@@ -89,13 +91,16 @@ const actor = await api("me").catch((error) => {
 const allowedTabs = actor?.role === "owner" && actor.allowed_tabs === null ? null
   : new Set(Array.isArray(actor?.allowed_tabs) ? actor.allowed_tabs : []);
 if (embeddedConversation && (allowedTabs === null || allowedTabs.has("chat"))) {
-  bootEmbeddedChat({ initChats, selectConversation, initPollers }).catch(error => {
+  bootEmbeddedChat({ initChats: () => initChats(actor), selectConversation, initPollers }).catch(error => {
     console.error("No se pudo abrir la conversación", error);
     const message = document.createElement('p'); message.className = 'chat-task-error';
     message.textContent = `No se pudo abrir el chat: ${error.message}. `;
+    const back = document.createElement('button'); back.className = 'btn btn-primary btn-xs'; back.textContent = 'Volver a conversaciones';
+    back.onclick = returnToConversationList; message.append(back);
     const retry = document.createElement('button'); retry.className = 'btn btn-xs'; retry.textContent = 'Reintentar';
     retry.onclick = () => location.reload(); message.append(retry);
     document.getElementById('main').prepend(message);
+    document.getElementById('chat-empty').hidden = true;
   });
 } else if (embeddedConversation) {
   $("#main").textContent = "Tu cuenta no tiene permiso para abrir conversaciones del Relay.";
@@ -120,8 +125,8 @@ if (!canObserveGlobally) {
 // handlers" en vez de "medio admin no responde".
 for (const [tab, name, fn] of [
   ["running", "running", initRunning],
-  ["chat", "chats", initChats], ["voice", "voice", initVoice],
-  ["projects", "projects", initProjects], ["orphans", "orphans", initOrphans],
+  ["chat", "chats", () => initChats(actor)], ["voice", "voice", initVoice],
+  ["projects", "projects", () => initProjects(actor)], ["orphans", "orphans", initOrphans],
   ["index", "index", initIndex], ["commands", "commands", initCommands],
   ["mcp", "mcp", initMcp], ["models", "models", initModels],
   ["team", "team", () => initTeam(actor)],
@@ -142,7 +147,7 @@ for (const [tab, name, fn] of [
   }
 }
 
-initWorkspace({ moduleLoaders: TAB_LOADERS, restoreChatObject, allowedTabs,
+initWorkspace({ moduleLoaders: TAB_LOADERS, restoreChatObject, allowedTabs, actor,
   accessMessage: actor ? "Tu cuenta todavía no tiene herramientas asignadas. Pide al administrador que revise Equipo." : "No se pudo verificar tu acceso. Recarga la página o contacta al administrador." });
 if (canObserveGlobally) refreshStatus();
 // Los módulos visibles se refrescan aunque otro tenga el foco. Minimizar

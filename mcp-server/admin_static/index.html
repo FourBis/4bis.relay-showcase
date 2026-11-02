@@ -68,7 +68,7 @@
                    aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg>
               Reiniciar relay
             </button>
-            <span class="text-[11px] text-zinc-500">corta conexiones activas · la UI se recarga sola</span>
+            <span class="text-[11px] text-zinc-500">Corta conexiones activas; vuelve a cargar la página cuando termine</span>
           </div>
         </div>
 
@@ -183,26 +183,13 @@
           <p class="panel-sub">Ejecuciones, consumo y resultados de tus proyectos.</p>
         </header>
         <div class="toolbar">
-          <button class="btn btn-primary" id="metrics-refresh"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
-          <label class="label">periodo:
-            <select id="metrics-days" class="select" title="atajo: cuenta los últimos N días hacia atrás, dejando hoy como fin">
-              <option value="7" selected>7 días</option>
-              <option value="30">30 días</option>
-              <option value="90">90 días</option>
-            </select>
+          <label class="label">Desde
+            <input id="metrics-from" type="date" class="input" required aria-describedby="metrics-status">
           </label>
-          <label class="label">desde:
-            <input id="metrics-from" type="date" class="select" title="inicio del rango absoluto (YYYY-MM-DD)">
+          <label class="label">Hasta
+            <input id="metrics-to" type="date" class="input" required aria-describedby="metrics-status">
           </label>
-          <label class="label">hasta:
-            <input id="metrics-to" type="date" class="select" title="fin del rango absoluto (YYYY-MM-DD). Si está vacío, se usa hoy.">
-          </label>
-          <button class="btn" id="metrics-range-apply" title="usar el rango from/to en vez del atajo de días">
-            aplicar rango
-          </button>
-          <button class="btn" id="metrics-range-clear" hidden title="volver al atajo de días">
-            limpiar rango
-          </button>
+          <button class="btn btn-primary" id="metrics-refresh">Aplicar</button>
           <label class="label">proyecto:
             <select id="metrics-project" class="select">
               <option value="">todos</option>
@@ -233,7 +220,7 @@
             </select>
           </label>
           <button class="btn" id="metrics-clear" hidden><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg> limpiar filtros</button>
-          <span id="metrics-status" class="muted"></span>
+          <span id="metrics-status" class="muted" role="status" aria-live="polite"></span>
         </div>
         <p id="metrics-filter-note" class="muted mb-3" hidden></p>
         <div id="metrics-kpi" class="workspace-metric-grid"></div>
@@ -307,12 +294,14 @@
                 <button id="chat-new" class="btn btn-primary btn-xs ml-auto"
                         title="Nueva conversación multi-turno"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="chat-sidebar-label"> Nuevo</span></button>
               </div>
-              <button id="chat-external-pr" class="btn btn-xs w-full mt-2" type="button">
-                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 6v12m12-12v6a3 3 0 0 1-3 3H6m9-12 3 3 3-3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                Registrar PR externo
-              </button>
+              <label class="chat-sidebar-label label" for="chat-conversation-scope">Mostrar</label>
+              <select id="chat-conversation-scope" class="select chat-sidebar-label" aria-label="Conversaciones que quieres ver">
+                <option value="mine" selected>Mis conversaciones</option>
+                <option value="shared">Compartidas conmigo</option>
+                <option value="admin" hidden>Administración del equipo</option>
+              </select>
               <input id="chat-search" type="search" autocomplete="off"
-                     class="input mt-2 w-full text-xs" placeholder="🔍 filtrar…">
+                     class="input mt-2 w-full text-xs" placeholder="Buscar conversación" aria-label="Buscar en estas conversaciones">
               <div class="chat-sidebar-tools mt-2 flex items-center gap-1.5">
                 <!-- `input` + `datalist` y no `select`: son 52 proyectos y
                      un select nativo no se puede escribir, así que había
@@ -324,14 +313,18 @@
                        autocomplete="off" placeholder="todos los proyectos"
                        aria-label="Filtrar por proyecto">
                 <datalist id="chat-project-opts"></datalist>
-                <button id="chat-memoria-toggle" class="btn chat-icon-btn"
-                        title="Facts + memoria FTS5 del proyecto">📚</button>
-                <button id="chat-quick-note" class="btn chat-icon-btn"
-                        title="Nota rápida (workspace notes)">📝</button>
                 <button id="chat-refresh" class="btn chat-icon-btn"
                         title="Refrescar lista" aria-label="refrescar la lista de conversaciones"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg></button>
               </div>
             </div>
+            <details id="chat-sidebar-options" class="chat-options chat-sidebar-label" data-chat-options>
+              <summary>Herramientas del proyecto</summary>
+              <div class="chat-options-body">
+                <button id="chat-memoria-toggle" class="btn btn-xs" title="Consultar memoria del proyecto">Memoria</button>
+                <button id="chat-quick-note" class="btn btn-xs" title="Escribir una nota del proyecto">Nueva nota</button>
+                <button id="chat-external-pr" type="button" class="btn btn-xs">Registrar PR externo</button>
+              </div>
+            </details>
             <div id="chat-conv-list" class="chat-conv-list"></div>
             <!-- Lo que se ve cuando la columna está colapsada. Antes
                  quedaban el chevron y el ➕ flotando en 48px vacíos: no
@@ -360,29 +353,42 @@
 
           <!-- MAIN: conversación / memoria / vacío -->
           <div class="chat-main">
+            <div id="chat-new-feedback" class="chat-banner" hidden role="status" aria-live="polite"></div>
             <div id="chat-empty" class="chat-empty">
               <div class="workspace-chat-welcome">
                 <span class="workspace-eyebrow">CONVERSA · CREA · CONECTA</span>
                 <h2>¿En qué trabajamos?</h2>
-                <p>Una conversación para empezar.<br>Un espacio para todo lo que venga después.</p>
+                <p>Elige un proyecto y describe lo que necesitas.<br>Tus conversaciones quedan aquí, listas para continuar.</p>
                 <div class="workspace-welcome-actions"><button id="workspace-chat-new" class="btn btn-primary">Nueva conversación</button><button class="btn chat-drawer-btn chat-drawer-btn-empty" type="button" aria-expanded="false">Mis conversaciones</button></div>
-                <p class="workspace-chat-hint">Abre herramientas junto al chat.<br>Separa una respuesta o una tabla para seguir trabajando con ella.</p>
+                <p class="workspace-chat-hint">¿Van a trabajar juntos? Comparte un hilo con personas de tu equipo.<br>Encontrarás los que te compartan en «Compartidas conmigo».</p>
               </div>
             </div>
 
             <div id="chat-convo" class="chat-convo" hidden>
               <header class="chat-convo-head">
+                <button id="chat-parent-list" class="btn btn-xs" type="button" hidden aria-label="Volver a mis conversaciones">Mis conversaciones</button>
                 <!-- Abre la lista de conversaciones como drawer. Solo
                      visible en <md: en desktop la lista ya está al lado. -->
                 <button id="chat-drawer-btn" class="btn chat-icon-btn chat-drawer-btn"
                         type="button" aria-expanded="false"
                         title="Conversaciones" aria-label="Abrir conversaciones">☰</button>
                 <span id="chat-convo-status" class="badge dim">—</span>
-                <strong id="chat-panel-title" class="truncate font-mono text-xs text-zinc-300"></strong>
+                <strong id="chat-panel-title" class="chat-conversation-title"></strong>
                 <!-- Solo en borrador (➕ Nuevo): el proyecto se elige acá y la
                      conversación recién se crea al mandar el primer mensaje. -->
-                <select id="chat-draft-project" class="select chat-proj-select text-xs" hidden></select>
+                <label class="chat-project-choice">Proyecto
+                  <select id="chat-draft-project" class="select chat-proj-select text-xs" hidden aria-label="Proyecto de la nueva conversación"></select>
+                </label>
                 <span id="chat-task-mode" class="badge dim" hidden></span>
+                <button id="chat-panel-share" class="btn btn-xs" type="button" hidden>Compartir</button>
+                <details id="chat-conversation-options" class="chat-options" data-chat-options>
+                  <summary>Más opciones</summary>
+                  <div class="chat-options-body">
+                <button id="chat-panel-grafo" class="btn btn-xs" hidden
+                        title="Ver el plan y el grafo de esta conversación"
+                        aria-label="Ver plan y grafo">
+                  <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="3" width="6" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-4h14v4"/></svg>
+                  Plan y grafo</button>
                 <span id="chat-panel-meta" class="ml-auto hidden truncate text-[11px] text-zinc-400 md:inline"></span>
                 <button id="chat-panel-vscode" class="btn btn-xs" hidden
                         title="Abrir el repo en VS Code">🧠 VS Code</button>
@@ -403,12 +409,6 @@
                      conversación y vive en localStorage. -->
                 <button id="chat-panel-chime" class="btn chat-icon-btn" hidden
                         title="Avisar con un sonido cuando termine">🔔</button>
-                <!-- Vuelve a abrir el panel del plan. Visible en toda
-                     conversación abierta: el plan existe para cualquier
-                     pedido, chico o grande, y esconderlo cuando no hay
-                     grafo lo volvía imposible de encontrar. -->
-                <button id="chat-panel-grafo" class="btn btn-xs" hidden
-                        title="Ver el plan y en qué anda">🕸 Plan</button>
                 <span id="chat-panel-context" class="badge dim" hidden></span>
                 <!-- Tiempo de USO de la conversación: la suma de lo que
                      duraron los runs. El reloj de pared (que sale en el
@@ -426,23 +426,27 @@
                   <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l0.9 12.2h9.2L17.5 7"/></svg> Borrar rama</button>
                 <button id="chat-panel-diff" class="btn btn-xs" hidden
                         title="Ver qué cambió en la rama (git diff contra la base, sin LLM)">
-                  📄 Diff</button>
+                  Ver cambios</button>
                 <!-- Extraer != compactar: este saca los hechos y deja
                      el hilo intacto; "Compactar" ademas recorta los
                      turnos viejos y pisa el resumen (2026-08-21). -->
                 <button id="chat-panel-extract-facts" class="btn btn-xs" hidden
                         title="Destilar hechos de este hilo SIN cerrarlo ni recortarlo. Quedan pendientes de aprobación en Memoria">
-                  🧠 Extraer facts</button>
+                  Guardar aprendizajes</button>
                 <button id="chat-panel-compact" class="btn btn-xs" hidden
                         title="Resumir el hilo y liberar contexto SIN cerrarlo (misma rama, mismo Discord)">
-                  🗜 Compactar</button>
+                  Resumir contexto</button>
                 <button id="chat-panel-close-conv" class="btn btn-xs" hidden
                         title="Cerrar la conversación: compacta la memoria y abre el PR de la rama">
-                  🔒 Cerrar</button>
+                  Cerrar conversación</button>
+                  </div>
+                </details>
               </header>
               <div id="chat-summary" class="chat-summary" hidden></div>
-              <section id="chat-task-panel" class="chat-task-panel card" hidden aria-live="polite"></section>
-              <div id="chat-panel-messages" class="chat-messages"></div>
+              <div id="chat-timeline" class="chat-messages">
+                <section id="chat-task-panel" class="chat-task-panel card" hidden aria-live="polite"></section>
+                <div id="chat-panel-messages" class="chat-message-list"></div>
+              </div>
               <!-- Sugerencias de continuación: un tap manda el próximo paso
                    sin escribir. Se llenan al terminar cada run. -->
               <div id="chat-suggestions" class="chat-suggestions" hidden></div>
@@ -502,8 +506,9 @@
                 </div>
                 </div><!-- /chat-input-col izquierda -->
                 <textarea id="chat-panel-input" rows="2"
-                          class="input flex-1 min-h-[56px] py-2 font-mono text-xs"
-                          placeholder="Mensaje… (Ctrl+Enter envía)"></textarea>
+                          class="input flex-1 min-h-[56px] py-2 text-sm"
+                          aria-label="Mensaje para Relay"
+                          placeholder="Describe lo que necesitas… (Ctrl+Enter envía)"></textarea>
                 <div class="chat-input-col chat-input-col-acciones">
                   <button id="chat-panel-send" class="btn btn-primary">Enviar <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg></button>
                   <button id="chat-panel-busy" class="btn" hidden disabled>⏳ pensando…</button>
@@ -535,7 +540,8 @@
                 <button id="chat-memoria-back" class="btn btn-xs ml-auto">← Volver al chat</button>
               </header>
               <p class="panel-sub mb-3">Elige un proyecto en el filtro de la izquierda
-                para ver sus facts y su memoria compactada.</p>
+                para consultar la memoria de conversaciones a las que tienes acceso.
+                Aprobar un fact no lo publica al proyecto. Para agregar uno, abre su hilo de origen.</p>
 
               <h4 class="section-title">Facts (ADR-026) <span id="chat-facts-summary" class="muted"></span></h4>
               <!-- Aprobacion estricta (2026-08-21): un fact recien
@@ -545,12 +551,12 @@
               <div class="toolbar">
                 <select id="chat-facts-status" class="select text-xs">
                   <option value="pending">⏳ pendientes de aprobar</option>
-                  <option value="approved">✓ aprobados (los que ve el experto)</option>
+                  <option value="approved">✓ aprobados en su hilo de origen</option>
                   <option value="rejected">✕ rechazados</option>
                   <option value="">todos</option>
                 </select>
                 <input id="chat-fact-nuevo" type="text" class="input min-w-[280px] flex-1"
-                       placeholder="escribir un fact a mano (nace aprobado)"
+                       placeholder="fact privado del hilo abierto (nace aprobado)"
                        maxlength="2000">
                 <button id="chat-fact-add" class="btn">+ Agregar</button>
               </div>
@@ -1777,17 +1783,20 @@
         </header>
         <section class="form-section">
           <header class="form-section-head">
-            <h3 class="form-section-title">Integrantes</h3>
+              <h3 id="team-list-title" class="form-section-title">Integrantes</h3>
             <p class="form-section-sub">Los proyectos asignados permiten editar, compilar y probar. No conceden administración del equipo ni publicar o integrar cambios.</p>
           </header>
-          <div class="table-wrap mt-3">
-            <table id="team-table">
+            <button id="team-archive-toggle" class="btn btn-xs" type="button" aria-pressed="false" hidden>Ver archivados</button>
+            <p id="team-archive-help" class="field-hint" hidden>Deshabilitar suspende temporalmente el acceso. Archivar también retira a la persona de esta lista y conserva sus datos, historial y proyectos. Restaurar vuelve a mostrarla, sin activar su acceso.</p>
+            <p id="team-message" class="muted" role="status" aria-live="polite"></p>
+            <div class="table-wrap mt-3">
+              <table id="team-table">
               <thead><tr><th class="th">Persona</th><th class="th">Proyectos y alcance</th><th class="th">Estado</th><th class="th text-right">Acciones</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
         </section>
-        <section class="form-section mt-4">
+          <section id="team-editor" class="form-section mt-4">
           <header class="form-section-head">
             <h3 class="form-section-title">Agregar o editar integrante</h3>
             <p class="form-section-sub">Usa el correo confirmado. Las cuentas nuevas comienzan sin proyectos asignados.</p>
@@ -1796,7 +1805,6 @@
           <div class="field-actions">
             <button id="team-save" class="btn btn-primary">Guardar integrante</button>
             <button id="team-cancel" class="btn" hidden>Cancelar edición</button>
-            <span id="team-message" class="muted" role="status" aria-live="polite"></span>
           </div>
         </section>
       </section>
@@ -1814,22 +1822,22 @@
       <section id="tab-report" class="panel" hidden>
         <header class="mb-5">
           <h2 class="panel-title">Informe de uso</h2>
-          <p class="panel-sub">Tokens, runs y errores agregados por día, proyecto y
-            autor. La fuente es el índice <code>chats</code> completo (no el tope de
-            200 del listado).</p>
+          <p class="panel-sub">Tokens, ejecuciones y errores por día, proyecto y autor en el período elegido.</p>
         </header>
         <div class="toolbar">
-          <label class="label">rango:
-            <select id="report-days" class="select">
-              <option value="7">7 días</option>
-              <option value="30" selected>30 días</option>
-              <option value="90">90 días</option>
+          <label class="label">Desde
+            <input id="report-from" type="date" class="input" required aria-describedby="report-status">
+          </label>
+          <label class="label">Hasta
+            <input id="report-to" type="date" class="input" required aria-describedby="report-status">
+          </label>
+          <label class="label">Proyecto
+            <select id="report-project" class="select">
+              <option value="">todos los proyectos</option>
             </select>
           </label>
-          <select id="report-project" class="select">
-            <option value="">todos los proyectos</option>
-          </select>
-          <button id="report-refresh" class="btn"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-.7 3.3"/><path d="M20.5 4.5v6.5h-6"/></svg> Refrescar</button>
+          <button id="report-refresh" class="btn btn-primary">Aplicar</button>
+          <span id="report-status" class="muted" role="status" aria-live="polite"></span>
         </div>
         <div id="report-kpis" class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"></div>
 
@@ -2445,7 +2453,7 @@
 <div id="issue-link-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="issue-link-modal-title">
   <div class="modal-card modal-card-wide">
     <div class="modal-header">
-      <strong id="issue-link-modal-title" class="text-sm">Vincular issue</strong>
+      <strong id="issue-link-modal-title" class="text-sm">Asociar issue</strong>
       <button data-close class="icon-btn" aria-label="Cerrar vínculo de issue"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div>
     <div id="issue-link-modal-body" class="modal-body"></div>

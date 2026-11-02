@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -14,6 +15,7 @@ from typing import Optional
 from .night_types import (
     _CHAR_TO_STATE, _STATE_TO_CHAR, _TASK_RE, GATE_TIMEOUT_S, NightTask,
 )
+from .night_gate_process import GateCleanupError, finish_cleanup, terminate_tree
 
 logger = logging.getLogger("relay.night")
 
@@ -157,17 +159,33 @@ async def run_gate(repo: str, cmd: str,
     ÚNICA ruta con shell del repo (ver comentario en BranchWorker._sh):
     build_cmd/test_cmd son strings editables desde la Admin UI.
     """
-    try:
-        proc = await asyncio.create_subprocess_shell(
+    options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+               else {"start_new_session": True})
+    starting = asyncio.create_task(asyncio.create_subprocess_shell(
             cmd, cwd=resolve_cwd_for_cmd(repo, cmd),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **options))
+    try:
+        proc = await asyncio.shield(starting)
+    except asyncio.CancelledError:
+        async def recover_start():
+            try:
+                created = await starting
+            except OSError:
+                return  # Failed before a process existed.
+            await terminate_tree(created, asyncio.create_task(created.communicate()))
+        await finish_cleanup(recover_start())
+        raise
     except OSError as e:
         return 127, f"no pude lanzar {cmd!r}: {e}"
+    reader = asyncio.create_task(proc.communicate())
     try:
-        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out_b, _ = await asyncio.wait_for(asyncio.shield(reader), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        await finish_cleanup(terminate_tree(proc, reader))
         return 124, f"{cmd!r} superó {timeout}s"
+    except BaseException:
+        await finish_cleanup(terminate_tree(proc, reader))
+        raise
     return proc.returncode or 0, out_b.decode("utf-8", errors="replace")
 
 
@@ -193,8 +211,9 @@ async def verify_repo(repo: str, project: dict) -> tuple[Optional[bool], str]:
     ok=None → no hay comandos que correr (stack no detectado); el markdown
     lo dice para que el reviewer sepa que NADIE verificó, en vez de asumir
     verde. Si el build falla no se corren tests (regla de 4bis-shortcuts).
-    Nunca lanza: verificar es best-effort, el PR se abre igual (el estado
-    va en el body y el PR queda draft si está rojo).
+    La verificación ordinaria es best-effort: el PR queda draft si está
+    rojo. GateCleanupError propaga porque un proceso posiblemente vivo
+    impide seguir mutando/publicando el checkout de forma segura.
     """
     cfg = NightConfig.from_project(project)
     lines: list[str] = []
@@ -214,7 +233,9 @@ async def verify_repo(repo: str, project: dict) -> tuple[Optional[bool], str]:
             if label == "build":
                 lines.append("- ⏭️ tests no corridos (el build falló)")
                 break
-    except Exception:  # noqa: BLE001 — best-effort, nunca romper /cerrar
+    except GateCleanupError:
+        raise  # A possibly live writer forbids checkout/publication after the gate.
+    except Exception:  # noqa: BLE001 - best-effort, nunca romper /cerrar
         logger.exception("verify_repo rompió en %s (sigo sin verificación)", repo)
         return None, "## Verificación\n\n⚠️ La verificación rompió; ver logs del relay."
     if ok is None:

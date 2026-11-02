@@ -20,6 +20,7 @@ import importlib
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -51,8 +52,16 @@ class CommandRegistry:
     def __init__(self, db) -> None:
         self._db = db
         self._handlers: dict[str, tuple[Handler, dict]] = {}
+        self._reload_lock = asyncio.Lock()
 
     async def load_from_db(self) -> int:
+        # Serialize the SELECT and publication; a stale snapshot cannot
+        # overwrite a later deletion or disable operation.
+        async with self._reload_lock:
+            self._handlers = {}
+            return await self._reload_from_db()
+
+    async def _reload_from_db(self) -> int:
         cmds = await self._db.list_commands(enabled_only=True)
         handlers: dict[str, tuple[Handler, dict]] = {}
         for cmd in cmds:
@@ -151,6 +160,8 @@ async def show_logs(args: dict, ctx: CommandContext) -> str:
     name = args.get("name")
     limit = int(args.get("limit", 10))
     chats = await ctx.db.list_chats(project_slug=name, limit=limit)
+    chats = [c for c in chats if not c.get("conversation_id") or not
+             (await ctx.db.get_conversation_task(c["conversation_id"])).get("mcp_private")]
     if not chats:
         return f"Sin chats registrados{f' para {name!r}' if name else ''}."
     lines = []
@@ -166,16 +177,57 @@ async def show_logs(args: dict, ctx: CommandContext) -> str:
 
 
 async def cancel_chat(args: dict, ctx: CommandContext) -> str:
-    """Cancela un chat de experto en curso (mata el asyncio.Task)."""
+    """Solicita cancelación y espera el cierre propio de cada ejecución."""
     chat_id = args["chat"]
     # match por prefijo: el usuario ve ids cortos en `logs`
-    matches = [cid for cid in ctx.running if cid.startswith(chat_id)]
+    matches = [(cid, task) for cid, task in list(ctx.running.items())
+               if cid.startswith(chat_id)]
     if not matches:
         return f"No hay chat en curso que empiece con {chat_id!r}."
-    for cid in matches:
-        ctx.running[cid].cancel()
-        await ctx.db.finish_chat(cid, status="cancelled")
-    return f"Cancelado(s): {', '.join(c[:8] for c in matches)}."
+
+    async def settle():
+        requested = set()
+        for cid, task in matches:
+            if not task.done() and not task.cancelling() and task.cancel():
+                requested.add(cid)
+        # Un cancel() no es un cierre: el worker aún puede estar guardando
+        # un resultado completo bajo shield. No adelantarse a ese writer.
+        await asyncio.gather(*(task for _, task in matches), return_exceptions=True)
+        cancelled, finished, unconfirmed = [], [], []
+        for cid, _ in matches:
+            changed = await ctx.db.cancel_running_chat(
+                cid, error="Cancelado por comando.")
+            if changed:
+                cancelled.append(cid)
+                continue
+            chat = await ctx.db.get_chat(cid)
+            status = (chat or {}).get("status")
+            if status == "cancelled" and cid in requested:
+                cancelled.append(cid)
+            elif status in {"ok", "error", "cancelled"}:
+                finished.append(cid)
+            else:
+                unconfirmed.append(cid)
+        lines = []
+        for label, ids in (("Cancelado(s)", cancelled),
+                           ("Ya finalizado(s)", finished),
+                           ("Sin cierre confirmado", unconfirmed)):
+            if ids:
+                lines.append(f"{label}: {', '.join(cid[:8] for cid in ids)}.")
+        return "\n".join(lines)
+
+    cleanup = asyncio.create_task(settle())
+    try:
+        return await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        # Cancelar la petición tampoco debe interrumpir el cierre ni volver
+        # a cancelar sus workers. Propagar sólo una vez asentada la limpieza.
+        while not cleanup.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(cleanup)
+        with suppress(asyncio.CancelledError, Exception):
+            cleanup.result()
+        raise
 
 
 # ---- memoria de largo plazo (ADR-027: retrieval MANUAL) ----
@@ -192,7 +244,11 @@ async def memoria(args: dict, ctx: CommandContext) -> str:
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
         raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
-    hits = await ctx.db.search_memories(project["slug"], query, limit=5)
+    from .user_accounts import current_actor
+    bound = current_actor.get()
+    actor = (bound[1] if bound and bound[0].db is ctx.db
+             and bound[1] not in {"owner", "anonymous", ""} else None)
+    hits = await ctx.db.search_memories(project["slug"], query, limit=5, actor=actor)
     from .memory import format_memory_hits
     text = format_memory_hits(hits)
     if not text:
@@ -207,7 +263,11 @@ async def fact(args: dict, ctx: CommandContext) -> str:
     project = await ctx.db.get_project(target)
     if project is None or not project["enabled"]:
         raise ValueError(f"proyecto {target!r} no existe o está deshabilitado")
-    facts = await ctx.db.list_facts(project["slug"], limit=50)
+    from .user_accounts import current_actor
+    bound = current_actor.get()
+    actor = (bound[1] if bound and bound[0].db is ctx.db
+             and bound[1] not in {"owner", "anonymous", ""} else None)
+    facts = await ctx.db.list_facts(project["slug"], limit=50, actor=actor)
     if not facts:
         return f"Sin hechos registrados para {project['slug']}."
     lines = [f"• {f['fact']}" for f in facts]
@@ -289,8 +349,9 @@ _TEST_SUMMARY_RE = re.compile(
 
 
 async def _run_dotnet(verb: str, repo_path: str) -> tuple[int, str]:
+    from .night_plan import resolve_cwd_for_cmd
     proc = await asyncio.create_subprocess_exec(
-        "dotnet", verb, cwd=repo_path,
+        "dotnet", verb, cwd=resolve_cwd_for_cmd(repo_path, f"dotnet {verb}"),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     try:

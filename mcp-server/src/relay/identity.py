@@ -46,6 +46,7 @@ OWNER = "owner"
 # Missing configuration rejects signed requests before any network lookup.
 TEAM_DOMAIN = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "").strip()
 AUD = os.environ.get("CF_ACCESS_AUD", "").strip()
+MCP_AUD = os.environ.get("CF_ACCESS_MCP_AUD", "").strip()
 
 _JWT_HEADER = "Cf-Access-Jwt-Assertion"
 _EMAIL_HEADER = "Cf-Access-Authenticated-User-Email"
@@ -66,7 +67,7 @@ def _jwks():
     return _jwks_client
 
 
-def verify(token: str) -> str:
+def verify(token: str, *, audience: str | list[str] | None = None) -> str:
     """Mail del JWT de Access, o revienta. Bloqueante: usar en to_thread.
 
     Chequea firma, `aud` y expiración. El fetch del JWKS es urllib
@@ -83,7 +84,7 @@ def verify(token: str) -> str:
     # ImmatureSignatureError (iat en el futuro). 60s cubre el drift de un
     # Windows sin NTP apretado sin aflojar el exp de verdad.
     claims = pyjwt.decode(
-        token, key.key, algorithms=["RS256"], audience=AUD, leeway=60)
+        token, key.key, algorithms=["RS256"], audience=AUD if audience is None else audience, leeway=60)
     email = (claims.get("email") or "").strip().lower()
     if not email:
         raise ValueError("JWT de Access sin claim `email`")
@@ -107,6 +108,9 @@ async def resolve(request: web.Request) -> str:
         actor = await session_actor(request)
         return OWNER if actor is None else actor or "anonymous"
     try:
+        # ponytail: una ruta y audiencia adicional; ampliar solo con otro contrato MCP.
+        if MCP_AUD and request.path == "/mcp/relay" and request.method in {"GET", "POST"}:
+            return await asyncio.to_thread(verify, token, audience=[AUD, MCP_AUD])
         return await asyncio.to_thread(verify, token)
     except Exception as e:  # noqa: BLE001 — cualquier fallo acá es un 403
         # Incluye el caso "no pude hablar con Cloudflare para traer los
@@ -137,8 +141,8 @@ ROLE_LABELS = {"owner": "Admin", "subadmin": "Subadmin",
                "member": "Dev", "finance": "Finanzas"}
 ROLE_TABS = {
     "owner": None,
-    "subadmin": ["chat", "team", "crm", "report", "metrics", "account"],
-    "member": ["chat", "account"],
+    "subadmin": ["chat", "projects", "team", "crm", "report", "metrics", "account"],
+    "member": ["chat", "projects", "account"],
     "finance": ["crm", "report", "metrics", "account"],
 }
 
@@ -149,7 +153,7 @@ def load_roles(rows) -> None:
     rows = list(rows)
     _roles = {r["email"].strip().lower(): r["role"] for r in rows}
     _disabled = {r["email"].strip().lower() for r in rows
-                 if not r.get("enabled", True)}
+                 if not r.get("enabled", True) or r.get("archived_at")}
     _names = {r["email"].strip().lower(): r.get("display_name", "") for r in rows}
     _project_grants = {r["email"].strip().lower(): r.get("project_slugs") or [] for r in rows}
     logger.info("roles cargados: %d", len(_roles))
@@ -177,7 +181,7 @@ def project_slugs(request: web.Request) -> list[str]:
 
 
 def user_can_write_project(user: dict, slug: str) -> bool:
-    if not user.get("enabled", True):
+    if not user.get("enabled", True) or user.get("archived_at"):
         return False
     return user.get("role") == "owner" or (
         user.get("role") in {"member", "subadmin"}
@@ -194,9 +198,8 @@ def can_write_project(request: web.Request, project: dict) -> bool:
 
 
 async def can_write_conversation(request: web.Request, db, conv_id: str) -> bool:
-    conv = await db.get_conversation(conv_id)
-    project = await db.get_project(conv["project_slug"]) if conv else None
-    return can_write_project(request, project)
+    from . import conversation_access
+    return (await conversation_access.get_access(db, conv_id, requester(request)))["can_collaborate"]
 
 
 def can_control_task(request: web.Request, project, state, conversation) -> bool:
@@ -213,7 +216,10 @@ def can_control_task(request: web.Request, project, state, conversation) -> bool
 
 
 async def can_control_graph(request: web.Request, db, graph: dict) -> bool:
+    from . import conversation_access
     cid = graph.get("conversation_id")
+    if cid:
+        return (await conversation_access.get_access(db, cid, requester(request)))["can_control"]
     conversation = await db.get_conversation(cid) if cid else None
     state = await db.get_conversation_task(cid) if cid else {}
     project = await db.get_project(
@@ -231,9 +237,7 @@ async def can_control_chat(request: web.Request, db, chat: dict | None) -> bool:
         return False
     if chat.get("conversation_id"):
         return await can_control_graph(request, db, chat)
-    project = await db.get_project(chat.get("project_slug") or "")
-    return can_write_project(request, project) or (
-        role_of(request) in {"member", "subadmin"}
+    return (role_of(request) in {"member", "subadmin"}
         and bool(chat.get("requested_by")) and chat["requested_by"] == requester(request))
 
 
@@ -246,6 +250,7 @@ async def can_control_chat(request: web.Request, db, chat: dict | None) -> bool:
 # concreto: `/chats/{id}` cubre cualquier id sin parsear nada.
 MEMBER_ALLOWED = frozenset({
     # la UI en sí
+    ("POST", "/mcp/relay"), ("GET", "/mcp/relay"),
     ("GET", "/admin"), ("GET", "/admin/"),
     ("GET", "/admin/static/{filename}"),
     ("GET", "/admin/api/me"), ("GET", "/admin/api/health"),
@@ -299,13 +304,27 @@ MEMBER_ALLOWED = frozenset({
     ("GET", "/chats/{id}/md"), ("GET", "/chats/{id}/status"),
     ("GET", "/conversations"), ("GET", "/conversations/{id}"),
     ("GET", "/conversations/{id}/messages"),
+    ("GET", "/conversations/creation-requests/{request_id}"),
+    ("POST", "/conversations/creation-requests/{request_id}"),
+    ("GET", "/conversations/{id}/requests/{request_id}"),
+    ("GET", "/conversations/{id}/shares"),
+    ("PUT", "/conversations/{id}/shares/{email}"),
+    ("DELETE", "/conversations/{id}/shares/{email}"),
     ("GET", "/conversations/{id}/branch"),
     ("GET", "/conversations/{id}/diff"),
     ("GET", "/conversations/{id}/pr"),
     ("POST", "/conversations/{id}/task"),
     ("POST", "/projects/{slug}/external-pr"),
+    ("GET", "/projects/{slug}/external-pr"),
+    ("GET", "/admin/api/external-review/notifications"),
+    ("POST", "/admin/api/external-review/notifications/{notification_id}/read"),
     ("POST", "/conversations/{id}/external-pr"),
+    ("GET", "/conversations/{id}/external-pr/images"),
+    ("POST", "/conversations/{id}/external-pr/images"),
+    ("GET", "/conversations/{id}/external-pr/images/{draft_id}"),
+    ("POST", "/conversations/{id}/external-pr/images/{draft_id}/confirm"),
     ("GET", "/projects/{slug}/issues"),
+    ("GET", "/projects/{slug}/pulls"),
     ("POST", "/conversations/{id}/issue"),
     ("GET", "/conversations/{id}/issue-sync"),
     ("POST", "/conversations/{id}/issue-sync"),

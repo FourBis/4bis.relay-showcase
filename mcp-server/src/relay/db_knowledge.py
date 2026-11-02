@@ -8,35 +8,85 @@ from typing import Any, Optional
 
 from .db_support import now_iso
 
+
+def _source_tx(conn, conversation_id, project_slug, actor, permission="read"):
+    """Knowledge inherits its live source ACL; approval never publishes it."""
+    from .conversation_access import access_tx
+    if not actor or not conversation_id:
+        return None
+    row = conn.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+    if not row or not row["requested_by"] or str(row["project_slug"]).casefold() != str(project_slug).casefold():
+        return None
+    try:
+        task = json.loads(row["task_json"] or "{}")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(task, dict) or task.get("mcp_private") or task.get("mode") == "external_pr":
+        return None
+    if not access_tx(conn, conversation_id, actor).get("can_" + permission):
+        return None
+    return dict(row)
+
+
+def _require_source_tx(conn, conversation_id, project_slug, actor):
+    source = _source_tx(conn, conversation_id, project_slug, actor, "control")
+    if source is None:
+        raise PermissionError("Origen de conocimiento no disponible para esta cuenta")
+    return source
+
+def _facts_tx(conn, project_slug, *, limit=100, include_superseded=False,
+              status=None, actor=None, source_conversation=None):
+    if not actor:
+        return []
+    where = "" if include_superseded else "AND superseded_at IS NULL "
+    params = [project_slug]
+    if status is not None:
+        where += "AND status=? "
+        params.append(status)
+    if source_conversation is not None:
+        where += "AND source_conversation=? "
+        params.append(source_conversation)
+    result = []
+    for row in conn.execute(f"SELECT * FROM facts WHERE project_slug=? COLLATE NOCASE {where}ORDER BY created_at DESC,id DESC", params):
+        if _source_tx(conn, row["source_conversation"], project_slug, actor):
+            result.append(dict(row))
+            if len(result) >= max(1, min(int(limit), 500)):
+                break
+    return result
+
+
 class DatabaseKnowledgeMixin:
 
     async def add_facts(
         self, project_slug: str, facts: list[str],
         source_conversation: Optional[str] = None,
         status: str = "pending",
+        *, actor: Optional[str] = None,
     ) -> int:
-        """Agrega hechos. `status='pending'` por default: lo que escribe
-        el compactador espera aprobación. Quien llama con `approved` es
-        el alta manual desde la UI — ahí lo escribió un humano y no hay
-        a quién pedirle permiso."""
+        """Store facts with a verified origin and its current control ACL.
+
+        Review state controls model eligibility; it never changes the audience.
+        """
         if status not in self.FACT_STATES:
             raise ValueError(f"status inválido: {status!r}")
-        n = 0
-        for fact in facts:
-            fact = (fact or "").strip()
-            if not fact:
-                continue
-            await self.run(
-                "INSERT INTO facts (project_slug, fact, source_conversation, "
-                "status) VALUES (?,?,?,?)",
-                (project_slug, fact, source_conversation, status))
-            n += 1
-        return n
+        from .conversation_access import transaction
+        def work(conn):
+            _require_source_tx(conn, source_conversation, project_slug, actor)
+            n = 0
+            for fact in facts:
+                fact = (fact or "").strip()
+                if fact:
+                    conn.execute("INSERT INTO facts(project_slug,fact,source_conversation,status) VALUES(?,?,?,?)",
+                                 (project_slug, fact, source_conversation, status))
+                    n += 1
+            return n
+        return await transaction(self, work, write=True)
 
     async def list_facts(
         self, project_slug: str, limit: int = 100,
         include_superseded: bool = False,
         status: Optional[str] = None,
+        *, actor: Optional[str] = None, source_conversation: Optional[str] = None,
     ) -> list[dict]:
         """Hechos del proyecto, por default solo los VIGENTES (los
         obsoletos quedan en la tabla para auditoría pero no molestan).
@@ -46,50 +96,76 @@ class DatabaseKnowledgeMixin:
         (para no re-emitir un hecho que ya está esperando revisión). Quien
         inyecta al experto pide `status="approved"` explícito.
         """
-        where = "" if include_superseded else "AND superseded_at IS NULL "
-        params: list[Any] = [project_slug]
-        if status is not None:
-            where += "AND status=? "
-            params.append(status)
-        params.append(limit)
-        return await self.run(
-            f"SELECT * FROM facts WHERE project_slug=? COLLATE NOCASE "
-            f"{where}ORDER BY created_at DESC, id DESC LIMIT ?",
-            tuple(params))
+        from .conversation_access import transaction
+        return await transaction(self, lambda conn: _facts_tx(conn, project_slug,
+            limit=limit, include_superseded=include_superseded, status=status,
+            actor=actor, source_conversation=source_conversation))
 
-    async def set_fact_status(self, fact_id: int, status: str) -> bool:
+    async def facts_view(self, project_slug: str, *, limit=100, status=None, actor=None):
+        """List and pending count share one current source/account snapshot."""
+        from .conversation_access import transaction
+        def work(conn):
+            return {"facts": _facts_tx(conn, project_slug, limit=limit, status=status, actor=actor),
+                    "pendientes": len(_facts_tx(conn, project_slug, limit=500, status="pending", actor=actor))}
+        return await transaction(self, work)
+
+    async def set_fact_status(self, fact_id: int, status: str, *, actor=None) -> bool:
         """Aprueba o rechaza un hecho. Devuelve False si el id no existe."""
         if status not in self.FACT_STATES:
             raise ValueError(f"status inválido: {status!r}")
-        rows = await self.run(
-            "UPDATE facts SET status=?, reviewed_at=? WHERE id=? RETURNING id",
-            (status, now_iso(), fact_id))
-        return bool(rows)
+        return await self._mutate_fact(fact_id, actor,
+            "UPDATE facts SET status=?,reviewed_at=? WHERE id=?", (status, now_iso(), fact_id))
 
     async def supersede_facts(
         self, fact_ids: list[int], project_slug: str,
         superseded_by: Optional[str] = None,
+        *, actor=None,
     ) -> int:
         """Marca hechos como obsoletos (soft; el compactador detectó que
         una conversación posterior los contradice). Scopeado al proyecto
         para que un id ajeno no pise hechos de otro repo."""
-        n = 0
-        for fid in fact_ids:
-            rows = await self.run(
-                "UPDATE facts SET superseded_at=?, superseded_by=? "
-                "WHERE id=? AND project_slug=? COLLATE NOCASE "
-                "AND superseded_at IS NULL RETURNING id",
-                (now_iso(), superseded_by, fid, project_slug))
-            n += len(rows)
-        return n
+        from .conversation_access import transaction
+        def work(conn):
+            _require_source_tx(conn, superseded_by, project_slug, actor)
+            n = 0
+            for fid in fact_ids:
+                # A compactor may only supersede facts of that exact source.
+                n += conn.execute("UPDATE facts SET superseded_at=?,superseded_by=? WHERE id=? "
+                    "AND project_slug=? COLLATE NOCASE AND source_conversation=? AND superseded_at IS NULL",
+                    (now_iso(), superseded_by, fid, project_slug, superseded_by)).rowcount
+            return n
+        return await transaction(self, work, write=True)
 
-    async def delete_fact(self, fact_id: int) -> bool:
+    async def delete_fact(self, fact_id: int, *, actor=None) -> bool:
         """Borra un fact por id (curación desde la Admin UI, 2026-07-12).
         La tabla sigue siendo append-only para el compactador; esto es
         el botón de "sacar un fact que quedó viejo o mal destilado"."""
-        rows = await self.run(
-            "DELETE FROM facts WHERE id=? RETURNING id", (fact_id,))
-        return bool(rows)
+        return await self._mutate_fact(fact_id, actor, "DELETE FROM facts WHERE id=?", (fact_id,))
+
+    async def _mutate_fact(self, fact_id, actor, sql, params):
+        from .conversation_access import transaction
+        def work(conn):
+            row = conn.execute("SELECT * FROM facts WHERE id=?", (fact_id,)).fetchone()
+            if not row or not _source_tx(conn, row["source_conversation"], row["project_slug"], actor, "control"):
+                return False
+            return bool(conn.execute(sql, params).rowcount)
+        return await transaction(self, work, write=True)
+
+    async def knowledge_source(self, conversation_id, project_slug, *, actor=None, permission="read"):
+        from .conversation_access import transaction
+        return await transaction(self, lambda conn: _source_tx(conn, conversation_id, project_slug, actor, permission))
+
+    async def save_compacted_history(self, conversation_id, project_slug, messages_json, *, expected, actor=None):
+        """The final history rewrite has its own fresh control fence and CAS."""
+        from .conversation_access import transaction
+        def work(conn):
+            _require_source_tx(conn, conversation_id, project_slug, actor)
+            updated = conn.execute("UPDATE conversations SET messages_json=?,last_activity_at=? "
+                "WHERE id=? AND COALESCE(messages_json,'')=?",
+                (messages_json, now_iso(), conversation_id, expected))
+            if not updated.rowcount:
+                raise RuntimeError("el historial cambió durante la compactación; no se sobrescribió")
+        await transaction(self, work, write=True)
 
     # ---- skill_drafts (autoaprendizaje 2026-07-12: aprobación humana) ----
 
@@ -97,13 +173,15 @@ class DatabaseKnowledgeMixin:
         self, *, name: str, description: str, content: str,
         project_slug: Optional[str] = None,
         source_conversation: Optional[str] = None,
+        actor: Optional[str] = None,
     ) -> int:
-        rows = await self.run(
-            "INSERT INTO skill_drafts (name, description, content, "
-            "project_slug, source_conversation) VALUES (?,?,?,?,?) "
-            "RETURNING id",
-            (name, description, content, project_slug, source_conversation))
-        return rows[0]["id"]
+        from .conversation_access import transaction
+        def work(conn):
+            if actor is not None:
+                _require_source_tx(conn, source_conversation, project_slug, actor)
+            return conn.execute("INSERT INTO skill_drafts(name,description,content,project_slug,source_conversation) "
+                "VALUES(?,?,?,?,?) RETURNING id", (name, description, content, project_slug, source_conversation)).fetchone()[0]
+        return await transaction(self, work, write=True)
 
     async def list_skill_drafts(
         self, status: Optional[str] = None, limit: int = 100,
@@ -167,20 +245,21 @@ class DatabaseKnowledgeMixin:
 
     async def add_memory(
         self, conversation_id: str, project_slug: str, summary: str,
+        *, actor=None,
     ) -> bool:
         """Indexa (o re-indexa) el resumen de una conversación."""
-        if not self._fts_available:
-            return False
-        # idempotente: recompactar reemplaza la entrada previa
-        await self.run(
-            "DELETE FROM memories_fts WHERE conversation_id=?",
-            (conversation_id,))
-        await self.run(
-            "INSERT INTO memories_fts (summary, project_slug, conversation_id) "
-            "VALUES (?,?,?)", (summary, project_slug, conversation_id))
-        return True
+        from .conversation_access import transaction
+        def work(conn):
+            _require_source_tx(conn, conversation_id, project_slug, actor)
+            conn.execute("UPDATE conversations SET summary=? WHERE id=?", (summary, conversation_id))
+            if self._fts_available:
+                conn.execute("DELETE FROM memories_fts WHERE conversation_id=?", (conversation_id,))
+                conn.execute("INSERT INTO memories_fts(summary,project_slug,conversation_id) VALUES(?,?,?)",
+                             (summary, project_slug, conversation_id))
+            return True
+        return await transaction(self, work, write=True)
 
-    async def delete_memory(self, conversation_id: str) -> bool:
+    async def delete_memory(self, conversation_id: str, *, actor=None) -> bool:
         """Saca una memoria del retrieval (curación desde la Admin UI).
 
         Borra la fila FTS5 y limpia conversations.summary — las DOS rutas
@@ -188,15 +267,16 @@ class DatabaseKnowledgeMixin:
         devolverla. El historial (messages_json) queda intacto. True si
         la conversación existía y tenía summary.
         """
-        if self._fts_available:
-            await self.run(
-                "DELETE FROM memories_fts WHERE conversation_id=?",
-                (conversation_id,))
-        rows = await self.run(
-            "UPDATE conversations SET summary=NULL "
-            "WHERE id=? AND summary IS NOT NULL RETURNING id",
-            (conversation_id,))
-        return bool(rows)
+        from .conversation_access import transaction
+        def work(conn):
+            row = conn.execute("SELECT project_slug FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if not row or not _source_tx(conn, conversation_id, row["project_slug"], actor, "control"):
+                return False
+            if self._fts_available:
+                conn.execute("DELETE FROM memories_fts WHERE conversation_id=?", (conversation_id,))
+            return bool(conn.execute("UPDATE conversations SET summary=NULL WHERE id=? AND summary IS NOT NULL",
+                                     (conversation_id,)).rowcount)
+        return await transaction(self, work, write=True)
 
     @staticmethod
     def _fts_quote(query: str) -> str:
@@ -206,35 +286,38 @@ class DatabaseKnowledgeMixin:
         return " ".join(f'"{t}"' for t in terms if t)
 
     async def search_memories(
-        self, project_slug: str, query: str = "", limit: int = 5,
+        self, project_slug: str, query: str = "", limit: int = 5, *, actor=None, source_conversation=None,
     ) -> list[dict]:
-        """Busca resúmenes por FTS5 scopeado a un proyecto (ADR-027).
-
-        Sin query (o sin FTS5): devuelve los resúmenes más recientes del
-        proyecto desde `conversations` directamente.
-        """
-        query = (query or "").strip()
-        if query and self._fts_available:
-            match = self._fts_quote(query)
-            if match:
+        """Retrieve only live sources readable by this actor in one snapshot."""
+        from .conversation_access import transaction
+        def work(conn):
+            if not actor:
+                return []
+            rows = None
+            match = self._fts_quote((query or "").strip())
+            if match and self._fts_available:
                 try:
-                    return await self.run(
-                        "SELECT conversation_id, project_slug, summary, "
-                        "bm25(memories_fts) AS rank FROM memories_fts "
-                        "WHERE memories_fts MATCH ? AND project_slug=? "
-                        "AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id=memories_fts.conversation_id "
-                        "AND COALESCE(json_extract(c.task_json, '$.mode'), '') = 'external_pr') "
-                        "ORDER BY rank LIMIT ?",
-                        (match, project_slug, limit))
+                    rows = conn.execute("SELECT c.id AS conversation_id,c.project_slug,c.summary,"
+                        "bm25(memories_fts) AS rank FROM memories_fts JOIN conversations c "
+                        "ON c.id=memories_fts.conversation_id AND c.project_slug=memories_fts.project_slug COLLATE NOCASE "
+                        "WHERE memories_fts MATCH ? AND c.project_slug=? COLLATE NOCASE "
+                        "AND c.summary IS NOT NULL AND c.summary<>'' ORDER BY rank", (match, project_slug)).fetchall()
                 except sqlite3.OperationalError:
-                    pass  # query FTS malformado pese al quoting → fallback
-        rows = await self.run(
-            "SELECT id AS conversation_id, project_slug, summary "
-            "FROM conversations WHERE project_slug=? COLLATE NOCASE "
-            "AND summary IS NOT NULL AND summary != '' "
-            "AND COALESCE(json_extract(task_json, '$.mode'), '') <> 'external_pr' "
-            "ORDER BY closed_at DESC LIMIT ?", (project_slug, limit))
-        return rows
+                    pass
+            if rows is None:
+                rows = conn.execute("SELECT id AS conversation_id,project_slug,summary FROM conversations "
+                    "WHERE project_slug=? COLLATE NOCASE AND summary IS NOT NULL AND summary<>'' "
+                    "ORDER BY closed_at DESC,id", (project_slug,)).fetchall()
+            result = []
+            for row in rows:
+                if source_conversation is not None and row["conversation_id"] != source_conversation:
+                    continue
+                if _source_tx(conn, row["conversation_id"], project_slug, actor):
+                    result.append(dict(row))
+                    if len(result) >= max(1, min(int(limit), 500)):
+                        break
+            return result
+        return await transaction(self, work)
 
     # ---- system_config (red + paths, gestionable desde la Admin UI) ----
 

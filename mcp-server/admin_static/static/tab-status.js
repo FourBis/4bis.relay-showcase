@@ -2,7 +2,7 @@
 
 import { $, api, apiRoot, escape } from "./api.js";
 import { statCell, toast, emptyRow, confirmModal, alertModal } from "./ui.js";
-import { dtView } from "./ui-table.js";
+import { dtView, updateTablePager } from "./ui-table.js";
 import { updateSkillsBadge } from "./tab-skills.js";
 
 // El health repartido en dos niveles: lo que contesta "¿anda?" arriba,
@@ -13,21 +13,54 @@ const _dato = (v, k) =>
   `<span class="text-[13px] text-zinc-300"><span
      class="font-semibold tabular-nums text-zinc-100">${v}</span> ${k}</span>`;
 
+function deploymentMetadata(h) {
+  const deployment = h.deployment_state === "active"
+    && h.deployment?.status === "confirmed"
+    && Number.isSafeInteger(h.deployment.number) && h.deployment.number > 0
+    ? h.deployment : null;
+  if (deployment) {
+    return `<div id="status-deployment" class="w-full" data-deployment-state="active">
+      <span class="text-zinc-200">Despliegue #${deployment.number}</span>
+      <span class="text-emerald-400"> · Activo confirmado${deployment.rollback_of ? " · Rollback" : ""}</span>
+      <div>SHA <code class="font-mono break-all">${escape(String(deployment.commit_sha))}</code></div>
+      <div>Activado <time datetime="${escape(String(deployment.deployed_at))}">${escape(String(deployment.deployed_at))}</time></div>
+    </div>`;
+  }
+  const state = ["pending", "unconfirmed"].includes(h.deployment_state)
+    ? h.deployment_state : "unknown";
+  const label = {
+    pending: "Despliegue pendiente de confirmación",
+    unconfirmed: "Despliegue no confirmado",
+    unknown: "Sin registro de despliegue",
+  }[state];
+  const sha = h.runtime?.commit_sha;
+  const shaLabel = h.runtime?.dirty === true ? "SHA base (checkout con cambios)" : "SHA en ejecución";
+  return `<div id="status-deployment" class="w-full" data-deployment-state="${state}">
+    <span class="text-amber-300">${label}</span>
+    ${sha ? `<div>${shaLabel} <code class="font-mono break-all">${escape(String(sha))}</code></div>` : ""}
+  </div>`;
+}
+
+let statusRefreshGeneration = 0;
+
 export async function refreshStatus() {
+  const generation = ++statusRefreshGeneration;
   const dot = $("#status-health-dot"), txt = $("#status-health-text");
   const meta = $("#status-health-meta"), inv = $("#status-inventory");
   try {
     const h = await api("health");
+    if (generation !== statusRefreshGeneration) return;
     $("#status-indicator").classList.remove("down");
     if (dot) dot.className = "h-2 w-2 shrink-0 rounded-full bg-emerald-400";
     if (txt) { txt.textContent = "Relay operativo"; txt.className =
       "text-base font-semibold text-zinc-100"; }
     if (meta) {
       meta.innerHTML = [
-        `versión <span class="font-mono text-zinc-200">${escape(String(h.relay_version ?? "?"))}</span>`,
+        `versión <span id="status-software-version" class="font-mono text-zinc-200">${escape(String(h.software_version ?? h.relay_version ?? "?"))}</span>`,
         `<span class="h-3 w-px bg-zinc-800"></span>`,
         `<span>${h.vscode_sessions_live} ${h.vscode_sessions_live === 1
           ? "sesión de VS Code" : "sesiones de VS Code"}</span>`,
+        deploymentMetadata(h),
       ].join("");
     }
     if (inv) {
@@ -46,6 +79,7 @@ export async function refreshStatus() {
     // health se pollea cada 15s, así el sidebar avisa sin abrir la tab.
     updateSkillsBadge(h.skill_drafts_pending ?? 0);
   } catch (e) {
+    if (generation !== statusRefreshGeneration) return;
     $("#status-indicator").classList.add("down");
     if (dot) dot.className = "h-2 w-2 shrink-0 rounded-full bg-red-400";
     if (txt) { txt.textContent = "El relay no responde"; txt.className =
@@ -81,11 +115,14 @@ const _SESS_COLUMNS = [
     value: (s) => s.last_handshake_ts || "" },
 ];
 const _sessState = { sortKey: 4, sortDir: "desc", page: 0 };  // handshake desc
+let _statusExtrasGeneration = 0;
 
 // Stats del día + sesiones VS Code (endpoints raíz del relay).
 async function refreshStatusExtras() {
+  const generation = ++_statusExtrasGeneration;
   try {
     const s = await apiRoot("/stats");
+    if (generation !== _statusExtrasGeneration) return;
     $("#stats-grid").innerHTML = [
       statCell(s.chats_today ?? 0, "chats hoy"),
       statCell((s.tokens_in_today ?? 0).toLocaleString(), "tokens in"),
@@ -97,8 +134,13 @@ async function refreshStatusExtras() {
     // cada 15s; loadRunning lo pisa con el número exacto al refrescar.
     updateRunningBadge(s.experts_running ?? 0);
   } catch (_) { /* best-effort */ }
+  if (generation !== _statusExtrasGeneration) return;
   try {
     const r = await apiRoot("/sessions");
+    if (generation !== _statusExtrasGeneration) return;
+    const view = dtView(_SESS_COLUMNS, {..._sessState,rows:r.sessions,query:""}, 25);
+    _sessState.page = view.page;
+    updateTablePager($("#sessions-table"), view, page => { _sessState.page = page; return refreshStatusExtras(); });
     const tbody = $("#sessions-table tbody");
     if (!r.sessions.length) {
       tbody.innerHTML = emptyRow(5, {
@@ -116,12 +158,7 @@ async function refreshStatusExtras() {
     // dtView: sort por columna + paginación si >25 (cabe un admin con
     // 20 repos abiertos y 2 VS Code por repo). Sin estado local el
     // orden elegido se perdía con cada /sessions del poller.
-    const { slice } = dtView(_SESS_COLUMNS, {
-      rows: r.sessions,
-      sortKey: _sessState.sortKey,
-      sortDir: _sessState.sortDir,
-      page: _sessState.page,
-    }, r.sessions.length > 25 ? 25 : 0);
+    const { slice } = view;
     tbody.innerHTML = slice.map((s) => `
       <tr>
         <td>${escape(s.name)}</td>

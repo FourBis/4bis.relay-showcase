@@ -138,7 +138,7 @@ async def api_index_bulk(request: web.Request) -> web.Response:
                 is_repo = False
                 for marker in repo_markers:
                     if marker.startswith("*."):
-                        if any(child.glob(marker[1:])):
+                        if any(child.glob(marker)):
                             is_repo = True
                             break
                     elif (child / marker).exists():

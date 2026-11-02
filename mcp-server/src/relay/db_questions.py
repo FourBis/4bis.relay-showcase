@@ -159,6 +159,7 @@ class DatabaseQuestionsMixin:
 
     async def answer_night_question(
         self, q_id: str, answer: dict,
+        *, actor: Optional[str] = None,
     ) -> bool:
         """Guarda la respuesta del humano. Idempotente: si ya estaba
         respondida, retorna False (la API HTTP responde 409 en ese caso).
@@ -171,6 +172,9 @@ class DatabaseQuestionsMixin:
         `UPDATE ... RETURNING answered_at` y solo retornamos True si
         el RETURNING trajo una fila (osea, la nuestra ganó el race).
         """
+        if actor is not None:
+            return await self._in_thread(self._answer_night_question_for_actor,
+                                         q_id, answer, actor)
         rows = await self.run(
             "UPDATE night_questions SET answered_at=?, answer_json=? "
             "WHERE id=? AND answered_at IS NULL "
@@ -178,10 +182,50 @@ class DatabaseQuestionsMixin:
             (now_iso(), json.dumps(answer), q_id))
         return bool(rows)
 
-    async def skip_night_question(self, q_id: str) -> bool:
+    def _answer_night_question_for_actor(self, q_id, answer, actor):
+        """Autorizar y escribir bajo el mismo lock; revocar acceso gana a respuestas posteriores."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE", (actor,)).fetchone()
+            user = dict(user) if user else {}
+            admin = actor == "owner" or (user.get("enabled") and not user.get("archived_at")
+                                           and user.get("role") == "owner")
+            row = conn.execute(
+                "SELECT r.requested_by,r.project_slug,p.enabled,p.defaults_json "
+                "FROM night_questions q LEFT JOIN night_runs r ON r.id=q.run_id "
+                "LEFT JOIN projects p ON p.slug=r.project_slug COLLATE NOCASE WHERE q.id=?",
+                (q_id,)).fetchone()
+            allowed = bool(admin)
+            if row and not admin:
+                try:
+                    grants = json.loads(user.get("project_slugs_json") or "[]")
+                    defaults = json.loads(row["defaults_json"] or "{}")
+                except (ValueError, TypeError):
+                    grants, defaults = [], {"read_only": True}
+                allowed = bool(user.get("enabled") and not user.get("archived_at")
+                    and user.get("role") in {"member", "subadmin"}
+                    and row["requested_by"] == actor and row["enabled"]
+                    and isinstance(grants, list) and row["project_slug"] in grants
+                    and isinstance(defaults, dict) and not defaults.get("read_only"))
+            if not allowed:
+                raise PermissionError("Pregunta no disponible para esta cuenta")
+            rows = conn.execute(
+                "UPDATE night_questions SET answered_at=?, answer_json=? "
+                "WHERE id=? AND answered_at IS NULL RETURNING id",
+                (now_iso(), json.dumps(answer), q_id)).fetchall()
+            conn.commit()
+            return bool(rows)
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    async def skip_night_question(self, q_id: str, *, actor: Optional[str] = None) -> bool:
         """Cierra la pregunta sin respuesta (default). Misma semántica
         que answer_night_question pero con answer={}."""
-        return await self.answer_night_question(q_id, {})
+        return await self.answer_night_question(q_id, {}, actor=actor)
 
     async def list_night_questions(
         self, run_id: Optional[str] = None,

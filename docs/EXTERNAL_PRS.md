@@ -25,11 +25,15 @@ Si falla una solicitud, el formulario conserva sus datos. Reintentar la misma de
 | Revisión humana | Debe ser independiente del autor y del responsable, y aplicable al head actual. Un bot no sustituye esa revisión. |
 | Apto en Relay | La última lectura cumple la política configurada para el riesgo. No bloquea ni autoriza merges en GitHub. |
 
-Un head nuevo vuelve histórica la evidencia del commit anterior. Una revisión revocada, una política retirada o un fallo remoto también pueden retirar la aptitud. La vigencia técnica de la lectura es de cinco minutos: el registro no implica vigilancia continua.
+Un head nuevo vuelve histórica la evidencia del commit anterior. Una revisión revocada, una política retirada o un fallo remoto también pueden retirar la aptitud. La vigencia técnica de la lectura es de cinco minutos. Registrar una PR por sí solo no habilita observación automática.
 
 Admin configura la política explícita por riesgo en `projects.defaults_json.external_pr_policy`, mediante la edición del proyecto documentada en la [API](API.md). Sin política válida no se presenta el registro como apto. Registrar no concede permisos de publicación, integración ni despliegue.
 
-El registro externo no ofrece el ejecutor, publicación, seguimiento automático ni diff de un workspace local. El código se modifica con la herramienta elegida y se revisa en GitHub. Un PR fusionado o cerrado puede refrescarse para consultar su resultado sin convertir el registro en una tarea de ejecución.
+El registro externo no ejecuta cambios ni prepara un diff de workspace local.
+El código se modifica con la herramienta elegida y se revisa en GitHub. Un PR
+fusionado o cerrado puede refrescarse para consultar su resultado sin convertir
+el registro en una tarea de ejecución. El candidato local de paridad descrito
+abajo añade revisión informativa y publicación configurables por separado.
 
 ## Issue compartida y límites
 
@@ -38,3 +42,38 @@ La issue opcional se verifica por identidad y repositorio, y puede compartirse c
 La demo pública usa personas, repositorio, PR y commits ficticios. Sus botones solo cambian un escenario local; no consultan GitHub, no ejecutan pruebas y no representan una instalación conectada. La instalación local utiliza las cuentas y permisos que configures.
 
 Las pruebas de esta función usan datos sintéticos y GitHub simulado. No acreditan reglas de protección, required checks, permisos o movimientos en una cuenta real.
+
+## Candidato local de paridad: revisión y evidencia visual
+
+**Estado al 1 de noviembre de 2026:** estas ampliaciones están preparadas en
+una rama local independiente. Esta documentación no afirma publicación remota,
+integración, despliegue ni activación de la funcionalidad. La revisión de esta
+tanda fue estática: no se ejecutaron app, DB, modelos, proveedores, unitarias ni
+suites. La evidencia de octubre citada arriba corresponde a aquella versión.
+
+El candidato conserva la comprobación de base y head en el mismo repositorio,
+el rechazo de forks y la lectura fresca del remote. Añade registro por proyecto,
+selectores paginados de PR/issues y un informe automático ligado a head, base,
+objetivo, issue, evidencia y directrices verificadas del commit base.
+
+La revisión comienza desactivada y requiere que un Admin elija explícitamente
+un modelo habilitado y active la política del proyecto. No ejecuta código ni
+pruebas. Sus hallazgos son asesoría y se muestran separados de la revisión
+humana independiente. Los intentos interrumpidos o inválidos requieren un
+reintento explícito, conservando su procedencia.
+
+Publicar comentarios de GitHub es otra opción, apagada inicialmente. Requiere
+modo e identidad de cuenta verificados; una respuesta incierta se reconcilia
+sin repetir automáticamente el POST. Los avisos son una bandeja local para
+cuentas autorizadas configuradas de forma explícita, sin envíos a otras apps.
+
+La evidencia PNG permite preparar una copia temporal propia, descargarla y
+subirla manualmente mediante la interfaz de GitHub. Relay verifica después el
+enlace, autor, destino, marcador y hash antes de limpiar su copia. No genera ni
+sube la imagen, no la envía al modelo y no la considera una prueba ejecutada
+ni una aprobación humana.
+
+Consulta [Revisión externa, estados y permisos](EXTERNAL_REVIEW.md) para el
+contrato y sus límites. [Issues y Projects](ISSUE_SYNC.md) conserva su política
+separada, con protección frente a observaciones concurrentes; una evidencia o
+revisión informativa no autoriza cerrar la issue.

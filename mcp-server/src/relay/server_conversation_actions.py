@@ -6,8 +6,7 @@ import uuid
 
 from aiohttp import web
 
-from .server_common import DB_KEY, _require_auth, _spawn_bg, logger, relay_config
-from . import bot_control
+from .server_common import DB_KEY, _require_auth, _spawn_bg, logger
 from . import coordination
 from . import git_flow
 from . import identity
@@ -17,14 +16,19 @@ from .server_conversation_helpers import compact_live_conversation
 from .server_conversation_jobs import (
     _PR_JOBS, _compact_and_store, _finalize_pr_bg,
 )
-from .server_expert_jobs import _request_bot_create_thread
 
 
-async def _conversation_project(db, conv):
+async def _conversation_project(db, conv, *, read_only=False):
     project = await db.get_project(conv["project_slug"])
     if not project:
         return project
     try:
+        if read_only:
+            task = await db.get_conversation_task(conv["id"])
+            if not task:
+                return project
+            _, workspace = task_workspace._safe_task_paths(db, project, conv["id"], task)
+            return {**project, "repo_path": str(workspace)}
         return await task_workspace.resolved_project(db, project, conv["id"])
     except (RuntimeError, OSError) as exc:
         raise web.HTTPUnprocessableEntity(text=json.dumps({"error": str(exc)}),
@@ -65,7 +69,7 @@ async def conversations_compact(request: web.Request) -> web.Response:
             {"error": "hay un run en curso en este hilo; espera a que "
                       "termine (o cancelalo) y compacta después"},
             status=409)
-    out = await compact_live_conversation(db, conv)
+    out = await compact_live_conversation(db, conv, actor=identity.requester(request))
     if not out["ok"]:
         return web.json_response({"error": out["error"]}, status=502)
     return web.json_response({
@@ -125,7 +129,7 @@ async def conversations_close(request: web.Request) -> web.Response:
     compaction = "skipped"
     if conv.get("messages_json") and not (conv.get("summary") or "").strip():
         _spawn_bg(_compact_and_store(
-            db, conv_id, conv["project_slug"], conv["messages_json"]),
+            db, conv_id, conv["project_slug"], conv["messages_json"], actor=identity.requester(request)),
             hold_workspace=False)
         compaction = "running"
     logger.info("conversación cerrada id=%s compaction=%s branch=%s pr=%s",
@@ -200,7 +204,7 @@ async def conversation_branch_status(request: web.Request) -> web.Response:
             "exists": False, "merged": False, "ahead": 0, "behind": 0,
             "is_current": False, "current_branch": "", "error": None,
         })
-    project = await _conversation_project(db, conv)
+    project = await _conversation_project(db, conv, read_only=True)
     repo_path = (project or {}).get("repo_path") or ""
     if not repo_path:
         return web.json_response({
@@ -335,7 +339,7 @@ async def conversation_diff(request: web.Request) -> web.Response:
     if not branch:
         return web.json_response(
             {"error": "esta conversación no tiene rama de trabajo"}, status=422)
-    project = await _conversation_project(db, conv)
+    project = await _conversation_project(db, conv, read_only=True)
     repo_path = (project or {}).get("repo_path") or ""
     if not repo_path:
         return web.json_response(
@@ -481,141 +485,32 @@ async def conversation_git_action(request: web.Request) -> web.Response:
 
 @_require_auth
 async def conversation_set_discord_user(request: web.Request) -> web.Response:
-    """POST /conversations/{id}/set-discord-user — vincula un chat de UI
-    con un Discord user para el bridge bidireccional (iter 10.0 + 10.4).
-
-    Caso de uso: el humano inicia un chat en la UI. Después quiere
-    contestarlo desde Discord (porque está en el celu). El relay:
-    1. Guarda discord_user_id en la conversación.
-    2. Si `create_thread: true`, pide al bot crear un DM thread con el
-       usuario y guarda discord_thread_id.
-    A partir de ahí, las respuestas del experto van al DM del usuario,
-    y si el usuario responde en Discord, el bot llama /experts/run con
-    discord_thread_id y el relay auto-attacha al mismo hilo.
-
-    Body:
-        discord_user_id:  str|null (null = desvincular)
-        discord_author:   str (opcional, display name)
-        create_thread:    bool (opcional, default false) — si true,
-                          pide al bot crear un DM thread para seguir
-                          la conversación desde Discord.
-
-    Si `discord_user_id` es null/ausente Y no se manda discord_author,
-    se interpreta como DESVINCULAR: ambos campos quedan NULL y la
-    conversación deja de tener bridge con Discord.
-
-    **Excepción** (2026-08-17, botón "seguir en el celu"): un body que
-    pide `create_thread: true` SIN user_id no es una desvinculación —
-    es "mandame el hilo al Discord de siempre". Ahí se usa el default de
-    `FOURBIS_DEFAULT_DISCORD_USER`, y si no hay ninguno configurado se
-    devuelve 400 diciendo qué falta. Es la diferencia entre un click y
-    abrir un modal a copiar un id de 18 dígitos.
-
-    Returns:
-        200 -> {id, discord_user_id, discord_author, discord_thread_id,
-                cleared?}
-        400 -> tipo inválido, o ambos campos vacíos sin intención clara
-        404 -> conv desconocida
-        502 -> se pidió hilo y el bot no pudo crearlo (no se vincula nada)
-    """
+    """Keep explicit unlink available; audience-unverified links are closed."""
     db: Database = request.app[DB_KEY]
     conv_id = request.match_info["id"]
-    if await db.get_conversation(conv_id):
-        if (await db.get_conversation_task(conv_id)).get("mode") == "external_pr":
-            return web.json_response({"error": "external_pr_read_only", "message":
-                "Un PR externo solo registra evidencia y revisión; no abre hilos de ejecución."}, status=409)
-    try:
-        body: dict = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        body = {}
-    discord_user_id = body.get("discord_user_id")
-    discord_author = body.get("discord_author")
-    create_thread = body.get("create_thread", False)
-    if create_thread and not (discord_user_id or "").strip():
-        # "Seguir en el celu": un click, sin modal. Si la conversación ya
-        # está vinculada reusamos su user; si no, el default configurado.
-        conv_previa = await db.get_conversation(conv_id)
-        heredado = (conv_previa or {}).get("discord_user_id") or ""
-        auto_id, auto_author = relay_config.default_discord_user()
-        discord_user_id = heredado.strip() or auto_id
-        if not discord_user_id:
-            return web.json_response({
-                "error": "no hay un Discord por default configurado. "
-                         "Configurá FOURBIS_DEFAULT_DISCORD_USER (o pasá "
-                         "discord_user_id explícito).",
-                "needs_user_id": True,
-            }, status=400)
-        if not (discord_author or "").strip():
-            discord_author = (
-                (conv_previa or {}).get("discord_author") or auto_author or None)
-    # Iter 10.0: signal de clear. null explícito en discord_user_id sin
-    # author → desvincula. Cualquier string vacío o no-string → 400.
-    if discord_user_id is None and not discord_author:
-        conv = await db.get_conversation(conv_id)
-        if conv is None:
-            return web.json_response(
-                {"error": f"conversación {conv_id!r} desconocida"}, status=404)
-        await db.set_conversation_discord_user(
-            conv_id, discord_user_id=None, clear=True)
-        # También limpiar discord_thread_id al desvincular
-        await db.run(
-            "UPDATE conversations SET discord_thread_id=NULL WHERE id=?",
-            (conv_id,))
-        return web.json_response({
-            "id": conv_id,
-            "discord_user_id": None,
-            "discord_author": None,
-            "discord_thread_id": None,
-            "cleared": True,
-        })
-    if not isinstance(discord_user_id, str) or not discord_user_id.strip():
-        return web.json_response(
-            {"error": "discord_user_id requerido (string no vacío) o "
-                      "null para desvincular"},
-            status=400)
-    if discord_author is not None and not isinstance(discord_author, str):
-        return web.json_response(
-            {"error": "discord_author debe ser string"}, status=400)
     conv = await db.get_conversation(conv_id)
     if conv is None:
-        return web.json_response(
-            {"error": f"conversación {conv_id!r} desconocida"}, status=404)
-    # Iter 10.4: si el caller pide thread, pedir al bot que cree un DM.
-    # El pedido va ANTES de escribir el vínculo (2026-08-16). Al revés
-    # dejaba vínculos fantasma: con el bot caído la conv quedaba marcada
-    # como vinculada, la UI escondía el botón de vincular y mostraba
-    # "Discord · @vos", pero el DM no existía y el error se iba en un
-    # toast de tres segundos. Quien cerraba la notebook confiando en eso
-    # no recibía nada.
-    discord_thread_id = None
-    if create_thread:
-        discord_thread_id, thread_error = await _request_bot_create_thread(
-            discord_user_id=discord_user_id.strip(),
-            conversation_id=conv_id,
-            project_slug=conv["project_slug"],
-        )
-        if not discord_thread_id:
-            return web.json_response({
-                "error": thread_error or "no se pudo crear el hilo DM",
-                # La sonda va en el body para que la UI pueda ofrecer
-                # "arrancar el bot" sin una segunda vuelta.
-                "bot": await bot_control.probe(),
-                "linked": False,
-            }, status=502)
-
-    await db.set_conversation_discord_user(
-        conv_id, discord_user_id=discord_user_id.strip(),
-        discord_author=discord_author.strip() if discord_author else None)
-    if discord_thread_id:
-        await db.run(
-            "UPDATE conversations SET discord_thread_id=? WHERE id=?",
-            (discord_thread_id, conv_id))
-
-    resp = {
-        "id": conv_id,
-        "discord_user_id": discord_user_id,
-        "discord_author": discord_author,
-    }
-    if discord_thread_id:
-        resp["discord_thread_id"] = discord_thread_id
-    return web.json_response(resp)
+        return web.json_response({"error": "no existe"}, status=404)
+    from . import conversation_access
+    try:
+        await conversation_access.require(db, conv_id, identity.requester(request), "control")
+    except PermissionError:
+        return web.json_response({"error": "Conversación no disponible"}, status=404)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return web.json_response({"error": "json inválido"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "el body debe ser un objeto"}, status=400)
+    # No supplied source/thread/user ID proves Discord membership or opt-in.
+    # Reject before creating a bot thread or recording a misleading new link.
+    if (body.get("create_thread") or body.get("discord_user_id") is not None
+            or body.get("discord_author")):
+        return web.json_response({"error": "No se puede vincular Discord: la audiencia de esta conversación no está verificada.",
+            "code": "discord_audience_unverified", "linked": False}, status=409)
+    if "discord_user_id" not in body:
+        return web.json_response({"error": "discord_user_id requerido; null permite desvincular"}, status=400)
+    await db.set_conversation_discord_user(conv_id, discord_user_id=None, clear=True)
+    await db.run("UPDATE conversations SET discord_thread_id=NULL WHERE id=?", (conv_id,))
+    return web.json_response({"id": conv_id, "discord_user_id": None,
+        "discord_author": None, "discord_thread_id": None, "cleared": True})

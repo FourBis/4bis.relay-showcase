@@ -413,6 +413,8 @@ def format_user_block(attach_ids: list[str], scope: str = "") -> str:
             continue
         resolved_count += 1
         p = p.resolve()
+        if scope:
+            p = materializar(scope, p)
         if p.suffix.lower() in _TEXT_EXTS:
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
@@ -449,8 +451,6 @@ def format_user_block(attach_ids: list[str], scope: str = "") -> str:
             # faltaba era saber dónde está.
             # La ruta que se le nombra al experto es la de SU vista, no
             # la del store plano: es la única que su sandbox habilita.
-            if scope:
-                p = materializar(scope, p)
             size = p.stat().st_size
             extra = ""
             if image_mime(p):

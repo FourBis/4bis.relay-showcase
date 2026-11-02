@@ -1,7 +1,10 @@
 """Coordinación de etapas y reintentos a partir del veredicto."""
 from __future__ import annotations
+import asyncio
+from copy import deepcopy
 import json
 import logging
+import re
 import time
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from typing import Any
@@ -21,6 +24,18 @@ from .bitacora import Bitacora
 from .task_workspace import resolved_project
 
 logger = logging.getLogger("relay.experts")
+
+
+def _valid_correction(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return (expert_verdicts._validate_plan_correction(value) is None
+                and all(isinstance(step.get(k), str) and step[k].strip()
+                        for step in value["revised_steps"]
+                        for k in ("id", "description", "expected_output")))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
 
 
 async def run_expert_staged(
@@ -72,12 +87,18 @@ async def run_expert_staged(
     le inyectaba al ejecutor —que sí recordaba— como orden de sistema.
     Era la limitación conocida de iter 11.
     """
+    initial_recovery = expert_result.recovery_seed(kwargs.get("rescue"),
+        messages_json=kwargs.get("message_history_json", ""),
+        bitacora_json=kwargs.get("bitacora_json", ""), image_artifacts=kwargs.get("image_artifacts"))
+    if kwargs.get("rescue") is not None:
+        kwargs["rescue"].clear()
+        kwargs["rescue"].update(initial_recovery)
     if (db := kwargs.get("db")) is not None and kwargs.get("conversation_id") \
             and not project.get("_task_id"):
         project = await resolved_project(db, project, kwargs["conversation_id"])
     defaults = project.get("defaults_json") or {}
-    existing_plan = kwargs.pop("existing_plan", None)
     kwargs.setdefault("image_artifacts", {})
+    existing_plan = kwargs.pop("existing_plan", None)
     limite_pedido = min(kwargs.get("deadline_pedido") or float("inf"),
         time.monotonic() + float(defaults.get("request_timeout") or config.expert_request_timeout_s()))
     kwargs["deadline_pedido"] = limite_pedido
@@ -104,6 +125,11 @@ async def run_expert_staged(
         result["stage_errors"] = {}
         return result
 
+    async def authorize_stage():
+        await expert_runner.require_model_admission(kwargs.get("db"),
+            kwargs.get("conversation_id") or "",
+            write_required=project.get("_task_mode") == "write")
+
     on_progress = kwargs.get("on_progress")
     ponytail = await expert_models.read_ponytail()
     planner_spec = (etapas.get("planner") or defaults.get("planner_model")
@@ -125,6 +151,7 @@ async def run_expert_staged(
         if defaults.get("planner_reasoning", True) and not es_continuacion:
             planner_toolsets = await expert_planning._reasoning_toolset(
                 kwargs.get("db"), project, kwargs.get("mcp_pool"))
+        await authorize_stage()
         plan, planner_usage, planner_err = await expert_stages._run_planner(
             user=user, project=project, model_spec=planner_spec,
             ponytail=ponytail, on_progress=on_progress,
@@ -211,22 +238,34 @@ async def run_expert_staged(
     mid_verdicts: list[dict] = []
     stages_events: list[dict] = []
     user_original = user
+    verifier_totals: dict[str, int] = {}
+
+    def count_verifier(usage: dict) -> None:
+        for key in ("tokens_in", "tokens_out"):
+            if usage.get(key) is not None:
+                verifier_totals[key] = verifier_totals.get(key, 0) + usage[key]
 
     async def _supervisar(parcial: dict) -> str:
-        v_tuple = await expert_stages._run_verifier(
-            user=user_original, plan=plan,
-            executor_result={
-                **parcial,
-                "tool_calls_summary": expert_consult._summarize_tool_calls_from_messages(
-                    parcial.get("messages_json") or ""),
-            },
-            model_spec=verifier_spec, ponytail=ponytail,
-            on_progress=on_progress, deadline=limite_pedido,
-        )
+        try:
+            await authorize_stage()
+            v_tuple = await expert_stages._run_verifier(
+                user=user_original, plan=plan,
+                executor_result={
+                    **parcial,
+                    "tool_calls_summary": expert_consult._summarize_tool_calls_from_messages(
+                        parcial.get("messages_json") or ""),
+                },
+                model_spec=verifier_spec, ponytail=ponytail,
+                on_progress=on_progress, deadline=limite_pedido,
+            )
+        except asyncio.CancelledError:
+            stage_errors["verifier"] = "Verificación cancelada; trabajo sin verificar"
+            raise
         if len(v_tuple) == 5:
             v, f, u, err = v_tuple[:4]
         else:
             v, f, u, err = v_tuple
+        count_verifier(u or {})
         mid_verdicts.append({
             "leg": parcial.get("leg"), "verdict": v, "feedback": f,
             "usage": u, "error": err,
@@ -257,15 +296,81 @@ async def run_expert_staged(
     acum = {"tokens_in": 0, "tokens_out": 0, "cache_read_tokens": 0, "tool_calls": 0,
             "duration_ms": 0, "legs": 0, "progress_events": []}
     corte_por_presupuesto = False
-    result: dict = {}
+    result: dict = initial_recovery
+    pasos_verificados: set[int] = set()
+    executor_tokens_used = 0
+    executor_requests_used = 0
+    requests_known = True
+    completed_runs = 0
+    measured: set[str] = set()
+    rescue = kwargs.pop("rescue", None)
+
+    def exhausted() -> bool:
+        token_limit = int(defaults.get("task_token_limit") or 0)
+        request_limit = int(defaults.get("task_request_limit") or 0)
+        return bool((token_limit and executor_tokens_used >= token_limit)
+                    or (request_limit and (not requests_known or executor_requests_used >= request_limit)))
+
+    def checkpoint(partial: dict | None = None) -> dict:
+        """Publish completed work before any await that can interrupt a post-stage.
+
+        Each executor owns a separate rescue dict: cancelling a later executor
+        must add its partial usage to completed rounds, never overwrite them.
+        Completed rounds are counted once, immediately after they return.
+        """
+        value = expert_result.merge_recovery_snapshot(result, partial or {})
+        for key in ("tokens_in", "tokens_out", "cache_read_tokens", "tool_calls", "duration_ms", "legs"):
+            extra = (partial or {}).get(key)
+            value[key] = (acum[key] + (extra or 0)
+                          if key in measured or extra is not None else None)
+        partial_requests_known = (partial is None or partial.get("requests") is not None
+                                 or partial.get("_executor_attempted") is False)
+        value["requests"] = (executor_requests_used + int((partial or {}).get("requests") or 0)
+                             if requests_known and partial_requests_known else None)
+        value["progress_events"] = list(acum["progress_events"]) + list((partial or {}).get("progress_events") or [])
+        value.update(three_stage=True, plan=plan, planner_model=planner_spec,
+            verifier_verdict=verdict, verifier_feedback=feedback,
+            verifier_model=verifier_spec if verifier_corrio else "",
+            documenter_model=documenter_spec if doc else "", doc=doc,
+            verifier_rounds=rondas, mid_verdicts=mid_verdicts, stages_events=stages_events,
+            stage_usage={"planner": planner_usage, "verifier": {**verifier_usage, **verifier_totals},
+                         "documenter": documenter_usage}, stage_errors=stage_errors)
+        value = deepcopy(value)
+        if rescue is not None:
+            rescue.clear()
+            rescue.update(value)
+        return value
 
     bitacora = Bitacora.cargar(kwargs.get("bitacora_json") or "") \
         if kwargs.get("bitacora_json") else Bitacora()
 
     while True:
-        if result.get("bitacora_json"):
-            kwargs["bitacora_json"] = result["bitacora_json"]
-        result = await expert_runner.run_expert(project, user, **kwargs)
+        if completed_runs and (exhausted() or limite_pedido - time.monotonic() < expert_stage_prompts.RESERVA_CIERRE_S):
+            corte_por_presupuesto = True
+            break
+        continuation_correction = None
+        verdict, feedback = "", ""
+        project_for_run = project
+        if (
+                defaults.get("task_token_limit")
+                or defaults.get("task_request_limit")):
+            run_defaults = dict(defaults)
+            if defaults.get("task_token_limit"):
+                run_defaults["task_token_limit"] = max(
+                    1, int(defaults["task_token_limit"]) - executor_tokens_used)
+            if defaults.get("task_request_limit"):
+                run_defaults["task_request_limit"] = max(
+                    1, int(defaults["task_request_limit"])
+                    - executor_requests_used)
+            project_for_run = {**project, "defaults_json": run_defaults}
+        executor_rescue = expert_result.recovery_seed(result,
+            messages_json=kwargs.get("message_history_json", ""),
+            bitacora_json=kwargs.get("bitacora_json", ""), image_artifacts=kwargs.get("image_artifacts"))
+        try:
+            result = await expert_runner.run_expert(project_for_run, user, rescue=executor_rescue, **kwargs)
+        except BaseException:
+            checkpoint(executor_rescue)
+            raise
 
         if result is None:
             result = {
@@ -276,6 +381,25 @@ async def run_expert_staged(
                 "last_tool": None, "legs": 1, "steers": 0,
                 "steer_texts": [], "progress_events": [],
             }
+
+        completed_runs += 1
+        for key in ("tokens_in", "tokens_out", "cache_read_tokens", "tool_calls", "duration_ms", "legs"):
+            if result.get(key) is not None:
+                measured.add(key)
+                acum[key] += result[key]
+        acum["progress_events"].extend(result.get("progress_events") or [])
+        executor_tokens_used += (result.get("tokens_in") or 0) + (result.get("tokens_out") or 0)
+        executor_requests_used += int(result.get("requests") or 0)
+        requests_known = requests_known and result.get("requests") is not None
+        if result.get("messages_json"):
+            kwargs["message_history_json"] = result["messages_json"]
+        if result.get("bitacora_json"):
+            kwargs["bitacora_json"] = result["bitacora_json"]
+        phase = result.get("phase_at_end") or ""
+        broken, pregunto = False, bool(result.get("question_id"))
+        checkpoint()
+        if result.get("bitacora_json"):
+            bitacora = Bitacora.cargar(result["bitacora_json"])
 
         interrupcion = expert_verdicts._parse_executor_interruption(result.get("content") or "")
         if interrupcion is not None and interrupciones >= MAX_INTERRUPCIONES:
@@ -293,6 +417,15 @@ async def run_expert_staged(
             })
             interrupcion = None
         if interrupcion is not None:
+            if exhausted() or limite_pedido - time.monotonic() < expert_stage_prompts.RESERVA_CIERRE_S:
+                corte_por_presupuesto = True
+                phase = result["phase_at_end"] = "budget_exceeded"
+                broken = True
+                verdict, feedback = "needs_human", "La interrupción quedó guardada; no queda presupuesto para replanificar ni continuar."
+                rondas.append({"ronda": len(rondas) + 1, "verdict": verdict, "feedback": feedback,
+                               "phase_at_end": phase, "tool_calls": result.get("tool_calls")})
+                checkpoint()
+                break
             interrupciones += 1
             ev = {
                 "type": "executor_interruption",
@@ -339,7 +472,9 @@ async def run_expert_staged(
             planner_history = (
                 result.get("messages_json") or history_json
             )
+            _rev_usage = {}
             try:
+                await authorize_stage()
                 (rev_plan, _rev_usage, rev_err) = await expert_stages._run_planner(
                     user=revised_user, project=project,
                     model_spec=planner_spec, ponytail=ponytail,
@@ -354,6 +489,10 @@ async def run_expert_staged(
                     "run_expert_staged: el segundo planificador falló "
                     "tras una interrupción del ejecutor: %r", _e)
                 rev_plan, rev_err = "", str(_e)
+            for key in ("tokens_in", "tokens_out"):
+                if _rev_usage.get(key) is not None:
+                    planner_usage[key] = (planner_usage.get(key) or 0) + _rev_usage[key]
+            checkpoint()
             rev_ev = {
                 "type": "plan_revision",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ",
@@ -371,6 +510,7 @@ async def run_expert_staged(
                     "con el plan original")
             else:
                 plan = rev_plan
+                checkpoint()
                 # Reemplaza el plan; si es trivial, conserva el camino corto.
                 new_plan_block = ""
                 if plan and not trivial and signal != "trivial":
@@ -404,12 +544,15 @@ async def run_expert_staged(
                             "no pude adelantar el plan revisado a la "
                             "DB: %r", _e)
             stages_events.append(rev_ev)
+            rondas.append({"ronda": len(rondas) + 1, "verdict": "interrupted", "feedback": ev["reason"],
+                           "phase_at_end": phase, "tool_calls": result.get("tool_calls")})
+            checkpoint()
             continue
 
         phase = result.get("phase_at_end") or ""
         broken = phase in ("error", "timeout", "hard_timeout", "idle_timeout",
                            "cancelled", "no_result",
-                           "provider_error")
+                           "provider_error", "budget_split", "budget_exceeded")
         pregunto = bool(result.get("question_id"))
         if phase == "off_plan" and mid_verdicts:
             ultimo = mid_verdicts[-1]
@@ -435,11 +578,17 @@ async def run_expert_staged(
                 expert_consult._summarize_tool_calls_from_messages(
                     result.get("messages_json") or ""))
             if ver_enabled:
-                v_tuple = await expert_stages._run_verifier(
-                    user=user_original, plan=plan, executor_result=result,
-                    model_spec=verifier_spec, ponytail=ponytail,
-                    on_progress=on_progress, deadline=limite_pedido,
-                )
+                try:
+                    await authorize_stage()
+                    v_tuple = await expert_stages._run_verifier(
+                        user=user_original, plan=plan, executor_result=result,
+                        model_spec=verifier_spec, ponytail=ponytail,
+                        on_progress=on_progress, deadline=limite_pedido,
+                    )
+                except asyncio.CancelledError:
+                    stage_errors["verifier"] = "Verificación cancelada; trabajo sin verificar"
+                    checkpoint()
+                    raise
                 if len(v_tuple) == 5:
                     (verdict, feedback, verifier_usage, ver_err,
                      _pasos_v) = v_tuple
@@ -447,10 +596,30 @@ async def run_expert_staged(
                     (verdict, feedback, verifier_usage,
                      ver_err) = v_tuple
                     _pasos_v = []
+                if not isinstance(verifier_usage, dict):
+                    verifier_usage = {}
+                count_verifier(verifier_usage)
                 verifier_corrio = True
                 if _pasos_v:
-                    bitacora.fusionar_pasos_verificados(_pasos_v)
+                    plan_ids = {
+                        int(m.group(1)) for m in re.finditer(
+                            r"(?m)^\s*(\d+)[.)]\s+", plan or "")}
+                    for raw_paso in _pasos_v:
+                        try:
+                            paso = int(raw_paso)
+                        except (TypeError, ValueError):
+                            continue
+                        if paso > 0 and plan_ids and paso in plan_ids:
+                            pasos_verificados.add(paso)
+                    if plan_ids:
+                        bitacora.fusionar_pasos_verificados(
+                            sorted(pasos_verificados))
                     kwargs["bitacora_json"] = bitacora.volcar()
+                    result["bitacora_json"] = kwargs["bitacora_json"]
+                    result["plan_steps_done"] = {str(k): v for k, v in bitacora.pasos.items()}
+                correction = verifier_usage.get("plan_correction")
+                if verdict == "needs_more" and _valid_correction(correction):
+                    continuation_correction = correction
                 if ver_err:
                     stage_errors["verifier"] = ver_err
             else:
@@ -460,10 +629,12 @@ async def run_expert_staged(
                        "feedback": feedback,
                        "phase_at_end": phase,
                        "tool_calls": result.get("tool_calls")})
+        checkpoint()
 
-        sin_trabajo = (not trivial and not broken and not pregunto
+        sin_trabajo = ((project.get("slug") or "").lower() != "notes"
+                       and not trivial and not broken and not pregunto
                        and not (result.get("tool_calls") or 0))
-        reintento_vacio = sin_trabajo and not forzadas
+        reintento_vacio = sin_trabajo and not forzadas and not stage_errors.get("verifier")
 
         if not ((verdict == "needs_more" or reintento_vacio)
                 and len(rondas) <= max_rondas
@@ -479,15 +650,12 @@ async def run_expert_staged(
                 max_rondas + 1, max(0.0, limite_pedido - time.monotonic()))
             break
 
-        acum["tokens_in"] += result.get("tokens_in") or 0
-        acum["tokens_out"] += result.get("tokens_out") or 0
-        acum["cache_read_tokens"] += result.get("cache_read_tokens") or 0
-        acum["tool_calls"] += result.get("tool_calls") or 0
-        acum["duration_ms"] += result.get("duration_ms") or 0
-        acum["legs"] += result.get("legs") or 0
-        acum["progress_events"].extend(result.get("progress_events") or [])
+        if exhausted():
+            corte_por_presupuesto = True
+            logger.info("run_expert_staged: no queda presupuesto explícito "
+                        "para otra continuación")
+            break
 
-        kwargs["message_history_json"] = result["messages_json"]
         if reintento_vacio:
             forzadas += 1
             user = (
@@ -509,11 +677,23 @@ async def run_expert_staged(
                 "forzada (verdict del verificador: %s)",
                 len(rondas) + 1, max_rondas + 1, verdict or "(sin verificar)")
         else:
-            user = (
-                "Continúa la tarea. El verificador revisó lo que hiciste y dice "
-                f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
-                "cierra con el resumen final. Si al mirarlo descubres que ya "
-                "estaba cubierto, dilo y no rehagas el trabajo.")
+            if continuation_correction is not None:
+                pending = "\n".join(
+                    f"- {step['description']}: {step['expected_output']}"
+                    for step in continuation_correction["revised_steps"]
+                    if step["status"] != "done")
+                user = (
+                    "Revisa el estado actual y continúa esta misma tarea desde "
+                    "su historial. Conserva los efectos ya realizados y completa "
+                    "los criterios pendientes, dentro de los límites vigentes:\n\n"
+                    f"{continuation_correction['feedback_to_executor'][:2000]}\n"
+                    f"{pending[:2000]}")
+            else:
+                user = (
+                    "Continúa la tarea. El verificador revisó lo que hiciste y dice "
+                    f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
+                    "cierra con el resumen final. Si al mirarlo descubres que ya "
+                    "estaba cubierto, dilo y no rehagas el trabajo.")
             logger.info(
                 "run_expert_staged: needs_more → ronda %d/%d sola (feedback: %s)",
                 len(rondas) + 1, max_rondas + 1, (feedback or "")[:120])
@@ -524,13 +704,7 @@ async def run_expert_staged(
             except Exception:  # noqa: BLE001 — callback best-effort
                 pass
 
-    if len(rondas) > 1:
-        for k in ("tokens_in", "tokens_out", "cache_read_tokens", "tool_calls", "duration_ms",
-                  "legs"):
-            if result.get(k) is not None:
-                result[k] = (result.get(k) or 0) + acum[k]
-        result["progress_events"] = (
-            acum["progress_events"] + (result.get("progress_events") or []))
+    result = checkpoint()
 
     # Documenta trabajo completo; las revisiones de solo lectura se omiten.
     if not broken and not pregunto and phase != "off_plan":
@@ -546,12 +720,18 @@ async def run_expert_staged(
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                            time.gmtime()),
             })
-            doc, documenter_usage, doc_err = await expert_stages._run_documenter(
-                user=user_original, plan=plan, executor_result=result,
-                verdict=verdict or "(sin verificar)", feedback=feedback,
-                model_spec=documenter_spec, ponytail=ponytail,
-                on_progress=on_progress, deadline=limite_pedido,
-            )
+            try:
+                await authorize_stage()
+                doc, documenter_usage, doc_err = await expert_stages._run_documenter(
+                    user=user_original, plan=plan, executor_result=result,
+                    verdict=verdict or "(sin verificar)", feedback=feedback,
+                    model_spec=documenter_spec, ponytail=ponytail,
+                    on_progress=on_progress, deadline=limite_pedido,
+                )
+            except asyncio.CancelledError:
+                stage_errors["documenter"] = "Documentación cancelada; resultado del ejecutor conservado"
+                checkpoint()
+                raise
             if doc_err:
                 stage_errors["documenter"] = doc_err
         elif doc_enabled and has_work and documenter_blocked:
@@ -573,24 +753,7 @@ async def run_expert_staged(
                                            time.gmtime()),
             })
 
-    result["verifier_rounds"] = rondas
-    result["plan"] = plan
-    result["planner_model"] = planner_spec
-    result["verifier_verdict"] = verdict
-    result["verifier_feedback"] = feedback
-    result["mid_verdicts"] = mid_verdicts
-    result["stages_events"] = stages_events
-    result["verifier_model"] = verifier_spec if verifier_corrio else ""
-    result["doc"] = doc
-    result["documenter_model"] = documenter_spec if doc else ""
-    result["three_stage"] = True
-    result["stage_usage"] = {
-        "planner": planner_usage,
-        "verifier": verifier_usage,
-        "documenter": documenter_usage,
-    }
-    result["stage_errors"] = stage_errors
-
-    return expert_result.finish_staged_result(
+    result = expert_result.finish_staged_result(
         result, doc=doc, verdict=verdict, feedback=feedback, phase=phase,
         rondas=rondas, corte_por_presupuesto=corte_por_presupuesto, sin_trabajo=sin_trabajo)
+    return checkpoint()

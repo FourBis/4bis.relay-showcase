@@ -39,7 +39,7 @@ def _looks_like_repo(d: Path) -> bool:
             return False
     for m in _REPO_MARKERS:
         if m.startswith("*."):
-            if any(d.glob(m[1:])):
+            if any(d.glob(m)):
                 return True
         elif (d / m).exists():
             return True
@@ -152,15 +152,10 @@ async def _merge_defaults(db, project: dict, patch: dict) -> None:
     que escribir `defaults_json` completo desde acá se llevaría puestos
     el model y el timeout del proyecto.
     """
-    defaults = dict(project.get("defaults_json") or {})
-    for k, v in patch.items():
-        if v is None:
-            defaults.pop(k, None)
-        else:
-            defaults[k] = v
-    await db.upsert_project({"slug": project["slug"], "defaults_json": defaults})
+    await db.patch_project_defaults(project["slug"], patch)
 
 _PROJECT_FLAGS: dict = {
+    "mcp_consultations": ("bool", False, "Permitir consultas MCP personales de solo lectura; requiere habilitación global y una cuenta autorizada"),
     "native_files": ("bool", True,
                      "Tools de archivo nativas (read/write/edit/list/search)"),
     "native_shell": ("bool", True, "Tool `shell` nativa"),

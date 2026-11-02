@@ -168,12 +168,12 @@ function _wireTooltip(wrap, rows, series, format, custom) {
  * saltean. Un eje de tiempo con huecos comprimidos miente sobre el ritmo.
  * `rows` trae objetos con `.day` = "YYYY-MM-DD".
  */
-export function fillDays(rows, days, empty = {}) {
+export function fillDays(rows, days, empty = {}, endDate = new Date().toISOString().slice(0, 10)) {
   const byDay = new Map(rows.map((d) => [d.day, d]));
   const out = [];
-  const today = new Date();
+  const end = new Date(`${endDate}T00:00:00Z`);
   for (let i = days - 1; i >= 0; i--) {
-    const key = new Date(today.getTime() - i * 86400_000)
+    const key = new Date(end.getTime() - i * 86400_000)
       .toISOString().slice(0, 10);
     out.push({ day: key, ...empty, ...(byDay.get(key) || {}) });
   }

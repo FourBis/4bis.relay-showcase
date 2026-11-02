@@ -304,6 +304,16 @@ async def sync_once(db: Any, *, dsn: Optional[str] = None) -> dict[str, int]:
     en memoria. Con miles de filas sigue siendo más barato que una query
     por company. `db` es un relay.db.Database.
     """
+    lock = getattr(db, "_crm_sync_lock", None)
+    if lock is None:
+        # The lock is scoped to this process and Database instance.
+        lock = db._crm_sync_lock = asyncio.Lock()
+    async with lock:
+        return await _sync_once(db, dsn=dsn)
+
+
+async def _sync_once(db: Any, *, dsn: Optional[str] = None) -> dict[str, int]:
+    """Apply one CRM snapshot under the instance synchronization lock."""
     conn = await _connect(dsn)
     try:
         companies = await conn.fetch(_COMPANY_SQL)

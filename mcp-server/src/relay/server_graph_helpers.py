@@ -15,6 +15,10 @@ from . import experts
 from . import grafo as grafo_mod
 from . import logctx
 from . import orquestador
+from .orchestrator_verification import (
+    verification_close_state, verification_interrupt_intent, verification_pending,
+    verification_signature,
+)
 # Estados terminales de un chat cuando el run cortó por timeout, presupuesto
 # o porque el experto se fue por las ramas. Sin este set, un `phase_at_end`
 # raro caía al default "pendiente" y el nodo se quedaba amarillo para
@@ -417,10 +421,22 @@ def _verificacion_publica(g: dict) -> dict:
         v = json.loads(raw) if raw else {}
     except (ValueError, TypeError):
         v = {}
-    return v if isinstance(v, dict) else {}
+    if not isinstance(v, dict):
+        return {}
+    if v.get("pending") is True:
+        # A prior result belongs to the preceding pass, not this pending
+        # verification. Do not display its old green verdict as current.
+        return ({key: v[key] for key in ("pending", "at") if key in v}
+                if verification_pending(g, verifier_enabled=None) else {})
+    if (type(v.get("verification_version")) is int and v["verification_version"] == 1
+            and v.get("input_signature") != verification_signature(g)
+            and (v.get("verdict") == "complete"
+                 or verification_pending(g, verifier_enabled=True))):
+        return {}  # stored history is not a verdict for this completed pass.
+    return v
 
 
-def _grafo_publico(g: dict) -> dict:
+def _grafo_publico(g: dict, *, verifier_enabled: bool | None = None) -> dict:
     """El grafo como lo quiere la UI: nodos + progreso ya calculado.
 
     Suma dos campos de PRESENTACIÓN además de lo que ya había (6/9/26,
@@ -453,16 +469,22 @@ def _grafo_publico(g: dict) -> dict:
                          "esperando_humano": 0, "porcentaje": 0,
                          "estado": g["estado"]},
             "verificacion": _verificacion_publica(g),
+            "verification_pending": False,
             "orden": [], "capas": [], "tasks": [],
         }
+    close_state = verification_close_state(g)
+    progress = grafo_mod.progreso(nodos)
+    if close_state:
+        progress["estado"] = close_state
     return {
         "id": g["id"], "objetivo": g["objetivo"], "estado": g["estado"],
-        "estado_visible": grafo_mod.estado_visible(nodos, g["estado"]),
+        "estado_visible": close_state or grafo_mod.estado_visible(nodos, g["estado"]),
         "verificacion": _verificacion_publica(g),
+        "verification_pending": verification_pending(g, verifier_enabled=verifier_enabled),
         "conversation_id": g.get("conversation_id"),
         "project_slug": g.get("project_slug"),
         "created_at": g.get("created_at"), "updated_at": g.get("updated_at"),
-        "progreso": grafo_mod.progreso(nodos),
+        "progreso": progress,
         "orden": grafo_mod.orden_topologico(nodos),
         # El grafo en filas: cada capa es lo que puede correr a la vez.
         # Va calculado desde acá y no en el JS por lo mismo que el orden
@@ -484,7 +506,7 @@ def _grafo_publico(g: dict) -> dict:
 
 
 async def _correr_grafo_bg(app: web.Application, project: dict,
-                           graph_id: str) -> None:
+                           graph_id: str, *, verification_only: bool = False) -> None:
     """Corre el grafo entero fuera del request. Nunca lanza."""
     from . import orquestador
 
@@ -511,7 +533,8 @@ async def _correr_grafo_bg(app: web.Application, project: dict,
         # Esta factory corre dentro de la task del nodo, no del padre.
         logctx.bind(chat_id, project.get("slug") or "")
         callback = experts.make_progress_callback(
-            store=app[PROGRESS_KEY], notify=app[NOTIFY_KEY],
+            # No authenticated Discord audience is bound to graph results.
+            store=app[PROGRESS_KEY], notify=None,
             chat_id=chat_id, target=project.get("slug") or "",
             model=(project.get("defaults_json") or {}).get("model") or "")
         rp = app[PROGRESS_KEY][chat_id]
@@ -527,15 +550,20 @@ async def _correr_grafo_bg(app: web.Application, project: dict,
 
     try:
         prog = await orquestador.lanzar(db, project, graph_id,
-                                        progreso_de=progreso_de)
+                                        progreso_de=progreso_de,
+                                        **({"verification_only": True} if verification_only else {}))
         logger.info("grafo %s terminó: %s", graph_id, prog.get("estado"))
     except asyncio.CancelledError:
         logger.info("grafo %s cancelado", graph_id)
         raise
     except Exception:  # noqa: BLE001 — un grafo roto no voltea el relay
         logger.exception("el grafo %s se cayó", graph_id)
-        with contextlib.suppress(Exception):
-            await db.set_task_graph_state(graph_id, "fallado")
+        if not verification_only:
+            with contextlib.suppress(Exception):
+                await db.set_task_graph_state(graph_id, "fallado")
+        # A failed close-only checkpoint must retain its existing pending or
+        # cancelled state. Do not overwrite a newer cancellation or pretend
+        # that a verifier result was confirmed.
     finally:
         graph_progress.finished = True
 
@@ -576,16 +604,28 @@ async def _cancelar_grafo(app: web.Application, graph_id: str) -> None:
 async def _finish_graph_cancel(app: web.Application, graph_id: str) -> None:
     """El caller conserva el lock del grafo y protege el cierre de desconexiones."""
     task = app[GRAFOS_KEY].get(graph_id)
+    was_live = task is not None and not task.done()
     if task is not None:
         asyncio.current_task().relay_actor = getattr(task, "relay_actor", None)
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    if (was_live and task.cancelled()
+            and getattr(task, "relay_verifier_enabled", None) is True):
+        # Cancellation may land after the last terminal node but before the
+        # verifier persisted its intent. Only this observed live worker and
+        # its actual enabled policy can establish that missing intent.
+        graph = await app[DB_KEY].get_task_graph(graph_id)
+        intent = verification_interrupt_intent(graph) if graph else None
+        if intent is not None:
+            await app[DB_KEY].set_task_graph_verificacion(
+                graph_id, json.dumps(intent, ensure_ascii=False))
     await app[DB_KEY].set_task_graph_state(graph_id, "cancelado")
 
 
 def _largar_grafo(app: web.Application, project: dict, graph_id: str,
-                  actor_email: str | None = None) -> None:
+                  actor_email: str | None = None, *,
+                  verification_only: bool = False) -> None:
     from . import user_accounts
     grafos: dict = app[GRAFOS_KEY]
     current = user_accounts.current_actor.get()
@@ -600,11 +640,27 @@ def _largar_grafo(app: web.Application, project: dict, graph_id: str,
             if task_state.get("state") in task_service.STOPPED:
                 raise RuntimeError("La tarea está detenida; continúa desde sus controles")
             effective = await task_workspace.resolved_project(db, project, graph["conversation_id"])
+        owner = asyncio.current_task()
+        if owner is not None and not verification_only:
+            owner.relay_verifier_enabled = bool(
+                (effective.get("defaults_json") or {}).get("graph_verifier", True))
+        if verification_only:
+            from . import conversation_access
+            if not actor or graph is None:
+                raise PermissionError("No hay una identidad autorizada para verificar este plan")
+            if (graph.get("conversation_id") and not
+                    (await conversation_access.get_access(db, graph["conversation_id"], actor))["can_control"]):
+                raise PermissionError("Ya no tienes permiso para verificar este plan")
         with user_accounts.bind_actor(db, actor):
-            return await coordination.spawn_workspace(
-                db, effective, _correr_grafo_bg(app, effective, graph_id))
+            child = coordination.spawn_workspace(
+                db, effective, _correr_grafo_bg(
+                    app, effective, graph_id,
+                    **({"verification_only": True} if verification_only else {})))
+            child.relay_graph_owner = owner
+            return await child
     task = asyncio.create_task(in_workspace())
     task.relay_actor = actor
+    task.relay_verifier_enabled = None
     coordination.hold_current(task)
     grafos[graph_id] = task
     bg_tasks: set = app[BG_TASKS_KEY]

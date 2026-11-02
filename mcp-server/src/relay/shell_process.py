@@ -1,11 +1,11 @@
 """shell process: funciones del flujo shell."""
 from __future__ import annotations
 import asyncio
-import contextlib
 import logging
 import os
 import signal
 import subprocess
+from contextlib import suppress
 from . import shell_environment
 
 logger = logging.getLogger("relay.shell")
@@ -27,24 +27,18 @@ async def _drain(stream, buf: bytearray, limit: int) -> None:
 
 
 #: Cuánto se le da a la salida en vuelo cuando el hijo directo ya murió
-#: pero los pipes siguen abiertos (ver `_esperar_al_hijo`).
+#: pero los pipes siguen abiertos.
 GRACIA_PIPES_S = 2.0
 
 
-async def _esperar_al_hijo(proc: asyncio.subprocess.Process) -> bool:
-    """Vuelve cuando terminó el hijo **directo**. `True` si dejó pipes.
+async def _esperar_al_hijo(proc: asyncio.subprocess.Process) -> None:
+    """Vuelve cuando terminó el hijo **directo**, aunque deje pipes.
 
-    `proc.wait()` a secas no alcanza: el transport de asyncio resuelve
-    ese future cuando el proceso terminó Y ADEMÁS se cerraron los pipes
-    (`BaseSubprocessTransport._try_finish`). Si el comando lanzó algo que
-    heredó el stdout —`Start-Process` con redirección, un `start`, un
-    server que se queda— el pipe no cierra nunca y esperamos al proceso
-    equivocado.
-
-    En el caso normal gana `proc.wait()` y esto no cambia nada: los pipes
-    cierran junto con el proceso. La rama de abajo solo corre cuando el
-    `Popen` crudo ya tiene returncode y el future sigue pendiente; ahí se
-    le da `GRACIA_PIPES_S` a lo que quede en vuelo y se sale.
+    En Python 3.12 `proc.wait()` puede esperar también el cierre de los
+    pipes; en 3.15 termina al salir el proceso. Por eso comprobamos por
+    separado la salida del hijo y el drenaje: un nieto puede heredar
+    stdout y mantenerlo abierto después de que termine el hijo directo.
+    El caller limita por separado el drenaje de la salida en vuelo.
 
     Caso real (code-hero-rpg, 2026-08-31): el ejecutor levantó el dev
     server con `Start-Process npm.cmd run dev -RedirectStandardOutput`.
@@ -58,24 +52,31 @@ async def _esperar_al_hijo(proc: asyncio.subprocess.Process) -> bool:
     crudo = crudo.get_extra_info("subprocess") if crudo is not None else None
     espera = asyncio.ensure_future(proc.wait())
     try:
-        if crudo is None:           # sin acceso al Popen: comportamiento viejo
+        if crudo is None:
             await espera
-            return False
-        while True:
-            listo, _ = await asyncio.wait({espera}, timeout=0.1)
-            if listo:
-                return False
-            if crudo.poll() is not None:
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(espera),
-                                           timeout=GRACIA_PIPES_S)
-                return not espera.done()
+        else:
+            while True:
+                listo, _ = await asyncio.wait({espera}, timeout=0.1)
+                if listo or crudo.poll() is not None:
+                    break
     finally:
-        # `shield` deja el future vivo si nos vamos por la gracia, y en
-        # un cancel de afuera hay que soltarlo igual: sin esto queda un
-        # "Task was destroyed but it is pending" por cada comando.
+        # En versiones que esperan los pipes, soltar también la espera.
         if not espera.done():
             espera.cancel()
+
+
+async def _kill_tree_async(proc) -> None:
+    """taskkill puede tardar: esperar su cierre sin bloquear el event loop."""
+    worker = asyncio.create_task(asyncio.to_thread(_kill_tree, proc))
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(worker)
+        with suppress(asyncio.CancelledError, Exception):
+            worker.result()
+        raise
 
 
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:

@@ -24,6 +24,16 @@ async def api_projects(request: web.Request) -> web.Response:
     """GET /admin/api/projects — lista con estado de index."""
     db = request.app[DB_KEY]
     projects = await db.list_projects(enabled_only=False)
+    if request.query.get("capability") == "chat":
+        # The chat picker needs names and current capabilities, not repository
+        # inspection, index statistics or connection configuration.
+        can_consult = identity.role_of(request) in {"owner", "member", "subadmin"}
+        return web.json_response({"projects": [
+            {"slug": p["slug"], "name": p["name"], "enabled": True,
+             "can_create_read": can_consult,
+             "can_create_write": can_consult and p["slug"].lower() != "notes"
+                 and identity.can_write_project(request, p)}
+            for p in projects if p.get("enabled", True)]})
     if request.query.get("capability") == "external_pr":
         eligible = []
         for project in projects:
@@ -383,12 +393,25 @@ async def api_projects_patch(request: web.Request) -> web.Response:
     project = await db.get_project(slug)
     if not project:
         return web.json_response({"error": "not found"}, status=404)
+    changes = {"slug": project["slug"]}
+    policy_updates = {}
+    if "external_pr_review_policy" in body:
+        if identity.role_of(request) != "owner":
+            return web.json_response({"error": "Sólo el administrador puede configurar revisión automática"}, status=403)
+        from .external_review_config import validate
+        try:
+            review_policy = validate(body["external_pr_review_policy"],
+                model_specs={row["spec"] for row in await db.list_models() if row.get("enabled", True)},
+                users=await db.list_users())
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=422)
+        policy_updates["external_pr_review_policy"] = review_policy
     if "external_pr_policy" in body:
         try:
             policy = _external_pr_policy(body["external_pr_policy"])
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=422)
-        project["defaults_json"] = {**(project.get("defaults_json") or {}), "external_pr_policy": policy}
+        policy_updates["external_pr_policy"] = policy
     editable = {"name", "description", "repo_path", "system_prompt",
                 "enabled", "include_in_index", "night_mode_enabled",
                 "night_config", "discord_channel_id"}  # Iter 10.1
@@ -409,13 +432,18 @@ async def api_projects_patch(request: web.Request) -> web.Response:
                 # NO queremos pisar el valor existente con NULL por
                 # accidente; usamos endpoint dedicado para clear).
                 if body[field] is None:
-                    project[field] = None
+                    changes[field] = None
                 elif isinstance(body[field], str) and body[field].strip():
-                    project[field] = body[field].strip()
+                    changes[field] = body[field].strip()
                 continue
-            project[field] = body[field]
-    await db.upsert_project(project)
-    return web.json_response({"project": _serialize(dict(project))})
+            changes[field] = body[field]
+    if len(changes) > 1:
+        await db.upsert_project(changes)
+    project = (await db.patch_project_defaults(slug, policy_updates) if policy_updates
+               else await db.get_project(slug))
+    if project is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"project": _serialize(project)})
 
 async def api_projects_set_discord_channel(request: web.Request) -> web.Response:
     """PATCH /admin/api/projects/{slug}/discord-channel — set/clear del

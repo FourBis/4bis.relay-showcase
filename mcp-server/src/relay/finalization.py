@@ -1,5 +1,6 @@
 """Resultado durable primero; exportación recuperable después, sin repetir el LLM."""
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import time
@@ -8,6 +9,19 @@ from functools import wraps
 from . import persist
 
 logger = logging.getLogger("relay.finalization")
+
+
+def retain_node_checkpoint(db, chat_id, checkpoint):
+    """Keep an unconfirmed full result alive for manual persistence recovery."""
+    if not hasattr(db, "_retained_node_results"):
+        db._retained_node_results = {}
+    db._retained_node_results[chat_id] = checkpoint
+
+
+def _release_retained_checkpoint(db, chat_id, checkpoint):
+    retained = getattr(db, "_retained_node_results", {})
+    if retained.get(chat_id) is checkpoint:
+        retained.pop(chat_id)
 
 #: Un candado por event loop, no por chat. El cierre normal y el barrido
 #: de pendientes exportan el mismo chat sin excluirse: `finish` deja la
@@ -96,6 +110,8 @@ def supervise(handler):
     @wraps(handler)
     async def guarded(*args, **kwargs):
         chat_id, db = kwargs["chat_id"], kwargs["db"]
+        checkpoint = {}
+        kwargs["_close_checkpoint"] = checkpoint
         try:
             return await handler(*args, **kwargs)
         except (asyncio.CancelledError, Exception) as exc:
@@ -104,12 +120,28 @@ def supervise(handler):
             error = "cancelado durante el cierre" if cancelled else f"falló el cierre: {exc}"
             logger.warning("chat %s: %s", chat_id, error, exc_info=not cancelled)
             try:
-                row = await db.get_chat(chat_id)
-                if row and row.get("status") == "running":
-                    await db.finish_chat(chat_id, status=status, error=error)
-                elif row:
-                    status, error = row["status"], row.get("error")
+                async def reconcile():
+                    nonlocal status, error
+                    if checkpoint.get("artifact") and not checkpoint.get("durable"):
+                        status, error = await _recover_result(db, chat_id, checkpoint, status=status, error=error)
+                    else:
+                        row = await db.get_chat(chat_id)
+                        if row and row.get("status") == "running":
+                            await db.finish_chat(chat_id, status=status, error=error)
+                        elif row:
+                            status, error = row["status"], row.get("error")
+                recovery = asyncio.create_task(reconcile())
+                while not recovery.done():
+                    try:
+                        await asyncio.shield(recovery)
+                    except asyncio.CancelledError:
+                        continue  # includes early metadata-only runs, not just results.
+                recovery.result()
             except Exception:
+                if checkpoint.get("artifact") and not checkpoint.get("durable"):
+                    # Retener también el resultado HTTP si el estado SQL no
+                    # puede confirmarse. No depender del lifetime del handler.
+                    retain_node_checkpoint(db, chat_id, checkpoint)
                 logger.exception("chat %s: base no disponible para cerrar", chat_id)
             progress = kwargs["progress"].get(chat_id)
             if progress is not None:
@@ -121,6 +153,33 @@ def supervise(handler):
                 progress.finished = True
                 progress.closing = False
     return guarded
+
+
+async def _recover_result(db, chat_id, checkpoint, *, status, error):
+    """Cerrar con el resultado ya producido, sin vincular archivos ni ejecutar modelos."""
+    confirmed = await _confirm_existing_checkpoint(db, chat_id, checkpoint)
+    if confirmed is not None:
+        return confirmed
+    artifact = {**checkpoint["artifact"], "status": status, "error": error}
+    fields = {**checkpoint["fields"], "error": error, "phase_at_end": status}
+    cid = checkpoint.get("conversation_id")
+    if cid and artifact.get("messages_json"):
+        try:
+            await db.save_conversation_messages(cid, artifact["messages_json"],
+                                                expected=checkpoint.get("history_before"))
+        except Exception:
+            # El payload también conserva ese historial si cambió el hilo o
+            # falló el CAS. No sobrescribir otro turno para recuperar éste.
+            logger.warning("chat %s: historial conservado en resultado durable", chat_id)
+    bitacora = (artifact.get("result_metadata") or {}).get("bitacora_json")
+    if cid and bitacora:
+        try:
+            await db.save_conversation_bitacora(cid, bitacora)
+        except Exception:
+            logger.warning("chat %s: bitácora conservada en resultado durable", chat_id)
+    await finish(db, chat_id, artifact=artifact, status=status,
+                 checkpoint=checkpoint, **fields)
+    return status, error
 
 
 async def export(db, chat_id: str, artifact: dict | str, *, reintento: bool = False):
@@ -181,11 +240,81 @@ async def export(db, chat_id: str, artifact: dict | str, *, reintento: bool = Fa
             return None
 
 
-async def finish(db, chat_id: str, *, artifact: dict, **fields):
+async def finish(db, chat_id: str, *, artifact: dict, checkpoint=None, **fields):
     # Una transacción conserva el resultado y el estado terminal. Si el
     # disco de exportación falla, el chat sigue terminado y se puede leer.
-    await db.finish_chat(chat_id, artifact=artifact, **fields)
+    if checkpoint is None:
+        checkpoint = {}
+    artifact, fields = deepcopy(artifact), deepcopy(fields)
+    # El snapshot de confirmación debe ser exactamente lo enviado a SQLite,
+    # también cuando cambió error/fase durante el postprocesado HTTP.
+    checkpoint.update(artifact=artifact, fields={key: value for key, value in fields.items() if key != "status"})
+    writer = asyncio.create_task(db.finish_chat(chat_id, artifact=artifact, **fields))
+    cancelled = False
+    while not writer.done():
+        try:
+            await asyncio.shield(writer)
+        except asyncio.CancelledError:
+            # La cancelación del caller no cancela el commit SQLite. Conocer
+            # su resultado antes de decidir si hace falta recuperar evita
+            # reescribir/exportar otra vez una fila ya confirmada.
+            cancelled = True
+        except Exception:
+            break
+    try:
+        writer.result()
+    except Exception as exc:
+        if cancelled:
+            raise asyncio.CancelledError from exc
+        raise
+    checkpoint["durable"] = True
+    _release_retained_checkpoint(db, chat_id, checkpoint)
+    if cancelled:
+        raise asyncio.CancelledError
     return await export(db, chat_id, artifact)
+
+
+async def _confirm_existing_checkpoint(db, chat_id, checkpoint):
+    """None means confirmed absence, never a failed lookup or different result."""
+    artifact = checkpoint["artifact"]
+    rows = await db.run("SELECT c.source,c.target,c.project_slug,c.conversation_id,c.status,c.error,"
+        "o.payload,o.exported FROM chats c LEFT JOIN chat_outputs o ON o.chat_id=c.id WHERE c.id=?", (chat_id,))
+    node = (artifact.get("result_metadata") or {}).get("graph_node") or {}
+    expected_cid = node.get("conversation_id") if node else checkpoint.get("conversation_id")
+    if (artifact.get("chat_id") != chat_id or not rows
+            or rows[0].get("source") != artifact.get("source")
+            or (rows[0].get("target") or rows[0].get("project_slug") or "_orphan") != artifact.get("target")
+            or rows[0].get("conversation_id") != expected_cid):
+        raise RuntimeError("No se confirmó la procedencia del resultado de cierre")
+    row = rows[0]
+    if row.get("payload") is None:
+        return None
+    if (json.loads(row["payload"]) != artifact or row.get("status") not in {"ok", "error", "cancelled"}):
+        raise RuntimeError("El resultado durable cambió; el cierre requiere revisión")
+    checkpoint["durable"] = True
+    _release_retained_checkpoint(db, chat_id, checkpoint)
+    if not row.get("exported"):
+        await export(db, chat_id, artifact, reintento=True)
+    return row["status"], row.get("error")
+
+
+async def resume_checkpoint(db, chat_id, checkpoint):
+    """Retry only a node's known result; never reset an already confirmed export."""
+    if checkpoint.get("durable"):
+        _release_retained_checkpoint(db, chat_id, checkpoint)
+        return
+    artifact = checkpoint["artifact"]
+    node = (artifact.get("result_metadata") or {}).get("graph_node") or {}
+    row = await db.get_chat(chat_id)
+    if (artifact.get("chat_id") != chat_id or not node.get("task_id") or not node.get("graph_id")
+            or not row or row.get("source") != "grafo"
+            or row.get("project_slug") != node.get("project_slug")
+            or row.get("conversation_id") != node.get("conversation_id")):
+        raise RuntimeError("No se confirmó la procedencia del resultado del nodo")
+    if await _confirm_existing_checkpoint(db, chat_id, checkpoint) is not None:
+        return
+    await finish(db, chat_id, artifact=artifact, checkpoint=checkpoint,
+                 status=artifact["status"], **checkpoint["fields"])
 
 
 async def retry_pending(db):

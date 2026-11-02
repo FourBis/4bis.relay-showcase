@@ -152,8 +152,29 @@ async def write_chat_md(
         finally:
             Path(temporary).unlink(missing_ok=True)
 
-    await asyncio.to_thread(_write)
+    await _write_completed(_write)
     return str(path)
+
+
+async def _write_completed(operation):
+    """Una cancelación no libera el cierre mientras su IO siga escribiendo."""
+    worker = asyncio.create_task(asyncio.to_thread(operation))
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break  # recoger el fallo sin perder una cancelación ya recibida.
+    try:
+        worker.result()
+    except Exception as exc:
+        if cancelled:
+            raise asyncio.CancelledError from exc
+        raise
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def append_jsonl(target: str, role: str, content: str, **extra) -> None:
@@ -168,7 +189,7 @@ async def append_jsonl(target: str, role: str, content: str, **extra) -> None:
         with path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
-    await asyncio.to_thread(_write)
+    await _write_completed(_write)
 
 
 async def jsonl_tiene_respuesta(target: str, chat_id: str) -> bool:
@@ -226,6 +247,7 @@ async def write_chat_artifacts(
     filename: str | None = None,
     escribir_jsonl: bool = True,
     messages_json: str | None = None,
+    result_metadata: dict | None = None,
 ) -> str:
     """Escribe .md + JSONL del chat. Devuelve el md_path.
 
@@ -242,6 +264,8 @@ async def write_chat_artifacts(
 
     `messages_json` puede viajar en el payload durable de un nodo cancelado.
     Permanece en la base; no se publica como texto crudo en .md ni JSONL.
+    `result_metadata` conserva bitácora, uso y procedencia de capturas del
+    ejecutor en la base. Tampoco se renderiza ni concede acceso a un archivo.
 
     ponytail: si algún día aparece un tercer camino que cierre chats,
     viene acá; si no, queda en 2 callers.

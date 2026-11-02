@@ -7,18 +7,26 @@ import time
 from aiohttp import web
 
 from .server_common import (
-    GRAFOS_KEY, PROGRESS_KEY, RELAY_VERSION, RUNNING_KEY, SESSIONS_KEY,
-    SessionRegistry, _require_auth, _rpc_error, logger, tool_registry, validate_name,
+    DB_KEY, GRAFOS_KEY, PROGRESS_KEY, RELAY_VERSION, RUNNING_KEY, SESSIONS_KEY,
+    SessionRegistry, _require_auth, _rpc_error, logger, relay_config, tool_registry, validate_name,
     validate_sid,
 )
-from . import progress
+from . import deployment_metadata, identity, private_mcp_access, progress
+from .secret_redaction import redact_data
 # ---------- core: health + push ----------
 
 
 @_require_auth
 async def health(request: web.Request) -> web.Response:
-    return web.json_response(
-        {"ok": True, "service": "relay", "version": RELAY_VERSION})
+    payload = {"ok": True, "service": "relay", "version": RELAY_VERSION}
+    if (identity.role_of(request) == identity.OWNER_ROLE
+            and relay_config.runtime_identity_enabled()):
+        candidate = await deployment_metadata.health_payload(request.app)
+        from . import conversation_access
+        current = await conversation_access.current_user(request.app[DB_KEY], identity.requester(request))
+        if current.get("role") == identity.OWNER_ROLE and relay_config.runtime_identity_enabled():
+            payload.update(candidate)
+    return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
 
 @_require_auth
@@ -70,6 +78,7 @@ async def system_active(request: web.Request) -> web.Response:
             items.append(snap)
     # Mayor elapsed_s primero, o sea el run más antiguo. El indicador
     # muestra ese; si hay varios, `count` avisa del resto.
+    items = redact_data(await private_mcp_access.visible_rows(request, items))
     items.sort(key=lambda s: s.get("elapsed_s", 0), reverse=True)
     first = items[0] if items else None
     return web.json_response({

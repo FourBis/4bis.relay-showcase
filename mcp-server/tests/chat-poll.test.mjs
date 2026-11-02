@@ -7,9 +7,7 @@ const source = readFileSync(
 const pollStart = source.indexOf("async function pollChat");
 const pollEnd = source.indexOf("\n\nfunction appendOptimisticUser", pollStart);
 const pollSource = source.slice(pollStart, pollEnd);
-const helpersStart = source.indexOf("function selectionIsCurrent");
-const helpersEnd = source.indexOf("// =====================================================================\n// SIDEBAR", helpersStart);
-const selectionSource = source.slice(helpersStart, helpersEnd);
+const selectionSource = source.match(/function selectionIsCurrent\([^]*?\n}/)[0];
 const terminalStart = source.indexOf('const TERMINAL_CHAT_STATUSES');
 const terminalEnd = source.indexOf('function showPollReconnect', terminalStart);
 const terminalSource = source.slice(terminalStart, terminalEnd);

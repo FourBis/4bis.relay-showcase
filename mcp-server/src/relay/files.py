@@ -39,6 +39,7 @@ logger = logging.getLogger("relay.files")
 
 MAX_READ_BYTES = int(os.environ.get("FOURBIS_READ_MAX_BYTES", str(512 * 1024)))
 MAX_TREE_ENTRIES = int(os.environ.get("FOURBIS_TREE_MAX_ENTRIES", "500"))
+MAX_SEARCH_ENTRIES = 10_000
 
 # Directorios que NUNCA se listan, aunque el repo los trackee: listar
 # `obj/Debug/net10.0/…` le aporta cero al LLM y varios KB de tokens.
@@ -274,6 +275,19 @@ class Permisos:
                     "reordene el plan si de verdad hay que tocarlo acá.")
 
 
+    def exigir_subarbol(self, p: Path) -> None:
+        """Mover un directorio también modifica las rutas protegidas que contiene."""
+        prefijo = p.as_posix().lower().rstrip("/") + "/"
+        protegidas = list(self.solo_lectura)
+        for raw in (*self.vedadas, *self.reservadas):
+            path = Path(str(raw).replace("\\", "/").rstrip("/"))
+            protegidas.extend([path] if path.is_absolute() else [r / path for r in self.raices])
+        if any(path.as_posix().lower().startswith(prefijo) for path in protegidas):
+            raise SinPermiso(
+                "el directorio contiene una ruta vedada, de solo lectura o reservada; "
+                "mueve únicamente los archivos permitidos")
+
+
 # ---------- .gitignore (portado del wrapper, con su bugfix) ----------
 
 
@@ -343,40 +357,51 @@ def _ignorado_por_default(name: str) -> bool:
 
 
 def leer(perm: Permisos, ruta: str, *, desde: int = 0, hasta: int = 0) -> str:
-    """Contenido de un archivo. `desde`/`hasta` son líneas 1-based.
-
-    El rango existe porque el cap del wrapper (256 KB) fallaba y ya:
-    el modelo tenía que adivinar cómo pedir menos. Acá, si el archivo no
-    entra, el mensaje dice exactamente qué rango pedir.
-    """
+    """Lectura UTF-8 acotada; los rangos no cargan ni cuentan el archivo entero."""
     p = perm.resolve(ruta)
     if not p.is_file():
         return f"error: no existe o no es un archivo: {ruta}"
-    tam = p.stat().st_size
-    if tam > MAX_READ_BYTES and not (desde or hasta):
-        lineas = _contar_lineas(p)
-        return (f"error: `{ruta}` pesa {tam // 1024} KB (el tope es "
-                f"{MAX_READ_BYTES // 1024} KB) y tiene ~{lineas} líneas. "
-                f"Pedí un rango: read_file(ruta, desde=1, hasta=400).")
-    texto = p.read_text(encoding="utf-8", errors="replace")
-    if desde or hasta:
-        todas = texto.splitlines()
-        ini = max(1, desde or 1)
-        fin = min(len(todas), hasta or len(todas))
-        if ini > len(todas):
-            return f"error: `{ruta}` tiene {len(todas)} líneas; pediste desde {ini}."
-        cuerpo = "\n".join(todas[ini - 1:fin])
-        return (f"[{ruta} · líneas {ini}-{fin} de {len(todas)}]\n{cuerpo}")
-    return texto
-
-
-def _contar_lineas(p: Path) -> int:
-    try:
-        with p.open("rb") as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
-
+    if not (desde or hasta):
+        if p.stat().st_size > MAX_READ_BYTES:
+            return (f"error: `{ruta}` excede {MAX_READ_BYTES // 1024} KB. "
+                    "Pide un rango: read_file(ruta, desde=1, hasta=400).")
+        with p.open("rb") as stream:
+            data = stream.read(MAX_READ_BYTES + 1)
+        if len(data) > MAX_READ_BYTES:
+            return "error: el archivo creció durante la lectura; pide un rango menor"
+        text = data.decode("utf-8", errors="replace")
+        if len(text.encode("utf-8")) > MAX_READ_BYTES:
+            return "error: el texto decodificado excede el límite; pide un rango menor"
+        return text
+    ini, fin = max(1, desde or 1), hasta or None
+    if fin is not None and fin < ini:
+        return "error: hasta debe ser mayor o igual que desde"
+    scan_limit = MAX_READ_BYTES * 16
+    scanned = output_bytes = count = 0
+    lines = []
+    eof = False
+    with p.open("rb") as stream:
+        while fin is None or count < fin:
+            raw = stream.readline(scan_limit - scanned + 1)
+            if not raw:
+                eof = True
+                break
+            scanned += len(raw)
+            if scanned > scan_limit:
+                return "error: el rango requiere escanear demasiados bytes; usa un archivo o rango más acotado"
+            count += 1
+            if count >= ini:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                output_bytes += len(line.encode("utf-8")) + 1
+                if output_bytes > MAX_READ_BYTES:
+                    return "error: el rango excede el límite de lectura; pide menos líneas o una línea más corta"
+                lines.append(line)
+        if not eof:
+            eof = not stream.read(1)
+    if count < ini:
+        return f"error: `{ruta}` tiene {count} líneas; pediste desde {ini}."
+    total = f" de {count}" if eof else " (total no calculado)"
+    return f"[{ruta} · líneas {ini}-{count}{total}]\n" + "\n".join(lines)
 
 def escribir(perm: Permisos, ruta: str, contenido: str) -> str:
     perm.exigir_escritura(f"escribir `{ruta}`")
@@ -428,6 +453,16 @@ def mover(perm: Permisos, origen: str, destino: str) -> str:
         return f"error: no existe: {origen}"
     if d.exists():
         return f"error: el destino ya existe: {destino}"
+    if o.is_dir():
+        perm.exigir_subarbol(o)
+        perm.exigir_subarbol(d)
+        # Los vetos globales del sandbox abierto también aplican a descendientes.
+        if perm.abierto and perm.vedadas:
+            for root, dirs, names in os.walk(o, followlinks=False):
+                for name in (*dirs, *names):
+                    child = Path(root) / name
+                    perm.resolve(str(child))
+                    perm.resolve(str(d / child.relative_to(o)))
     d.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(o), str(d))
     return f"ok: {origen} → {destino}"
@@ -464,6 +499,11 @@ def arbol(perm: Permisos, ruta: str = "", max_depth: int = 3) -> str:
             return
         if depth > max_depth:
             return
+        try:
+            # Validar cada entrada antes de mostrar su nombre o recorrerla.
+            perm.resolve(str(p))
+        except (FueraDelRepo, OSError):
+            return
         rel = p.relative_to(raiz)
         prefijo = "  " * (len(rel.parts) - base - 1) if rel.parts else ""
         marca = "[D] " if p.is_dir() else "[F] "
@@ -496,43 +536,47 @@ def arbol(perm: Permisos, ruta: str = "", max_depth: int = 3) -> str:
 
 def buscar(perm: Permisos, patron: str, *, glob: str = "*",
            max_hits: int = 60, en: str = "") -> str:
-    """Grep simple sobre el repo. NO estaba en el wrapper.
-
-    Se agrega porque su ausencia era la razón por la que el experto caía
-    a `run_shell` con `grep`/`Select-String` para cualquier búsqueda —
-    con el ruteo de shell, las comillas y el mojibake que eso arrastra.
-    Una tool que hace lo mismo sin salir de Python es más barata y no
-    depende de qué coreutils tenga la máquina.
-
-    `en` acota a un subdirectorio o apunta a una raíz extra habilitada.
-    """
+    """Busca texto con poda de directorios y presupuestos de entradas/bytes."""
     if not (patron or "").strip():
         return "error: patrón vacío"
     root = perm.resolve(en) if en else perm.raiz
     if not root.is_dir():
         return f"error: no es un directorio: {en}"
     base = perm.base_de(root) or (root if perm.abierto else perm.raiz)
-    hits: list[str] = []
-    for p in sorted(root.rglob(glob or "*")):
-        if len(hits) >= max_hits:
-            hits.append(f"⚠ corté en {max_hits} coincidencias; afiná el patrón.")
-            break
-        if not p.is_file() or _ignorado_por_default(p.name):
-            continue
-        if any(_ignorado_por_default(parte) for parte in p.relative_to(base).parts):
-            continue
-        if esta_gitignorado(base, p):
-            continue
+    hits = []
+    pending = [root]
+    visited = scanned = 0
+    while pending:
         try:
-            if p.stat().st_size > MAX_READ_BYTES:
-                continue
-            for i, linea in enumerate(
-                    p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if patron in linea:
-                    rel = p.relative_to(base).as_posix()
-                    hits.append(f"{rel}:{i}: {linea.strip()[:200]}")
-                    if len(hits) >= max_hits:
-                        break
+            entries = os.scandir(pending.pop())
         except OSError:
             continue
+        with entries:
+            for entry in entries:
+                visited += 1
+                if visited > MAX_SEARCH_ENTRIES or scanned >= MAX_READ_BYTES * 16:
+                    return "\n".join(hits + ["… búsqueda acotada por entradas/bytes; indica un subdirectorio más específico."])
+                p = Path(entry.path)
+                if _ignorado_por_default(p.name) or esta_gitignorado(base, p):
+                    continue
+                try:
+                    resolved = perm.resolve(str(p))
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(p)
+                        continue
+                    if not p.match(glob or "*") or not entry.is_file() or resolved.stat().st_size > MAX_READ_BYTES:
+                        continue
+                    allowance = min(MAX_READ_BYTES, MAX_READ_BYTES * 16 - scanned)
+                    with resolved.open("rb") as stream:
+                        data = stream.read(allowance + 1)
+                    scanned += len(data)
+                    if len(data) > allowance:
+                        continue
+                    for i, linea in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+                        if patron in linea:
+                            hits.append(f"{p.relative_to(base).as_posix()}:{i}: {linea.strip()[:200]}")
+                            if len(hits) >= max_hits:
+                                return "\n".join(hits + [f"… corté en {max_hits} coincidencias; afina el patrón."])
+                except (FueraDelRepo, OSError):
+                    continue
     return "\n".join(hits) if hits else f"sin coincidencias para {patron!r}"

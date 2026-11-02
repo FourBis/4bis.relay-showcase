@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import os
+import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -108,10 +110,25 @@ class MorningReporter:
     ) -> Path:
         """Escribe el archivo (fuente de verdad) + push Discord best-effort."""
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        # <fecha>-<slug>.md: dos proyectos la misma noche no colisionan
-        # (drift documentado vs el `<fecha>.md` de la spec original).
-        path = self.reports_dir / f"{time.strftime('%Y-%m-%d')}-{project_slug}.md"
-        await asyncio.to_thread(path.write_text, md, encoding="utf-8")
+        # El run forma parte del nombre: dos ejecuciones del mismo proyecto
+        # el mismo día conservan ambos reportes.
+        path = self.reports_dir / (
+            f"{time.strftime('%Y-%m-%d')}-{project_slug}-{run_id}.md")
+
+        def _write_atomic() -> None:
+            fd, temporary = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as report:
+                    report.write(md)
+                    report.flush()
+                    os.fsync(report.fileno())
+                os.replace(temporary, path)
+            finally:
+                # También limpia un temporal si falla la escritura o el replace.
+                Path(temporary).unlink(missing_ok=True)
+
+        await asyncio.to_thread(_write_atomic)
         if notify is not None:
             try:
                 await notify.send(

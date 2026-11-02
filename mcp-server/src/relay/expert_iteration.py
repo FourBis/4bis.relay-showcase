@@ -197,8 +197,9 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
                     # modelo pide varias en un mismo response y cada
                     # una necesita su propio evento (ver abajo).
                     mr = getattr(node, "model_response", None)
-                    pedidas, says, _recent = expert_steps._clasificar_partes(mr)
-                    state.recent_tool_calls.extend(_recent)
+                    pedidas, says, _ = expert_steps._clasificar_partes(mr)
+                    for nombre, args, call_id in pedidas:
+                        state.tool_call_args[call_id] = (nombre, args)
                     # El POR QUÉ (2026-07-25): el mismo response que pide
                     # las tools trae el TextPart donde el modelo dice qué
                     # va a hacer y por qué. Lo tirábamos — la UI mostraba
@@ -255,6 +256,16 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
                     state.meter_turn += 1
                     expert_context._measure_tool_returns(
                         node, state.tool_meter, state.meter_turn)
+                    for signature in expert_steps._tool_result_evidence(
+                            node, state.tool_call_args):
+                        kind, _, fingerprint = signature.partition(":")
+                        if fingerprint in state.progress_signatures:
+                            state.recent_tool_calls.append(
+                                "falla-repetida" if kind == "error"
+                                else "sin-progreso")
+                        else:
+                            state.progress_signatures.add(fingerprint)
+                            state.recent_tool_calls.append("progreso")
                     # …y es también el único lugar donde se ve QUÉ
                     # contestó la terminal. Se engancha al paso de la
                     # tool que ya está en el timeline, así la tarjeta
@@ -324,10 +335,14 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
                     state.usage = state.usage()
                 except Exception:  # noqa: BLE001
                     state.usage = None
-            if state.rescue is not None and state.usage is not None:
-                state.rescue["tokens_in"] = state.tokens_in_prev + (state.usage.input_tokens or 0)
-                state.rescue["tokens_out"] = state.tokens_out_prev + (state.usage.output_tokens or 0)
-                state.rescue["cache_read_tokens"] = state.cache_prev + (state.usage.cache_read_tokens or 0)
+            if state.rescue is not None and (state.task_usage is not None or state.usage is not None):
+                # Same contract as finish_run: task_usage already includes all
+                # legs. Adding tokens_*_prev would count earlier legs twice.
+                usage = state.task_usage if state.task_usage is not None else state.usage
+                state.rescue["tokens_in"] = (0 if state.task_usage is not None else state.tokens_in_prev) + (usage.input_tokens or 0)
+                state.rescue["tokens_out"] = (0 if state.task_usage is not None else state.tokens_out_prev) + (usage.output_tokens or 0)
+                state.rescue["cache_read_tokens"] = (0 if state.task_usage is not None else state.cache_prev) + (usage.cache_read_tokens or 0)
+                state.rescue["requests"] = usage.requests if state.task_usage is not None else None
             if idle_cause[0] is None:
                 # No fue el watchdog: tope global o cancel real.
                 # Que el round loop / caller clasifique.
@@ -455,9 +470,8 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
                 except Exception:  # noqa: BLE001
                     state.usage = None
             state.output_text = (
-                f"⚠️ Esta tarea superó el presupuesto de {state.request_limit} "
-                "pasos del bot antes de terminar (probablemente es muy "
-                "amplia para un solo mensaje). Guardé lo avanzado: puedes "
+                "⚠️ Esta tanda llegó al presupuesto de solicitudes antes "
+                "de terminar. Guardé lo avanzado: puedes "
                 "escribir **continúa** para que siga desde acá, o acotar "
                 "el alcance (menos archivos/objetivos por vez)."
             )
@@ -496,7 +510,7 @@ async def run_iteration(agent: Agent, state: expert_run_state.ExpertRunState, _e
             # `ClosedResourceError` y subía cruda, con el mismo daño
             # que describe el párrafo de arriba. Aparecieron 13 runs
             # así en 14 días (14 min de trabajo tirado); el último,
-            # `un run de ejemplo` en code-hero-rpg, murió a los 101s con la
+            # `un run de ejemplo` en un proyecto de ejemplo, murió a los 101s con la
             # conversación sin un solo turno. El reintento acá vale
             # la pena aunque la sesión siga muerta: el modelo puede
             # terminar sin volver a tocar ESE server, y si vuelve a

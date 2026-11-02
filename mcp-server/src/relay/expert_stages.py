@@ -239,13 +239,6 @@ async def _run_verifier(
             "" if expert_verdicts._verdict_match(expert_verdicts._clean_stage_output(verifier_text)) else "veredicto ausente o inválido",
             list(_pasos_verificados or []),
         )
-    except expert_models.ModelUnavailable:
-        # Mismo razonamiento que el planificador: si el verificador no
-        # puede armar su modelo, se propaga. El ejecutor ya corrió bien;
-        # el caller (server) prefiere enterarse de un ModelUnavailable
-        # único a recibir un content "completo" con un verificador que
-        # no pudo verificar.
-        raise
     except Exception as e:  # noqa: BLE001 — el verificador no debe romper el run
         # 2026-08-14: antes esto devolvía `complete`. Con MiniMax pagado
         # casi nunca se activaba; desde que las etapas corren en los
@@ -310,8 +303,8 @@ async def _run_documenter(
         result = await asyncio.wait_for(agent.run(prompt), timeout=expert_planning._stage_timeout(expert_stage_prompts._PV_TIMEOUT_S, deadline))
         return expert_verdicts._clean_stage_output(result.output or ""), expert_verdicts._stage_usage(result), ""
     except expert_models.ModelUnavailable as e:
-        # A diferencia del planificador y del verificador, aquí NO se
-        # propaga: el ejecutor ya terminó y su respuesta es válida.
+        # Igual que en el verificador, aquí NO se propaga: el ejecutor
+        # ya terminó y su respuesta se conserva.
         # Perder el registro del cambio no justifica marcar el run como
         # fallido y hacer que el humano lo repita.
         logger.warning("documentador sin modelo disponible: sigo sin registro")

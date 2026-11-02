@@ -99,7 +99,7 @@ def spawn_workspace(db, project, coro):
     return asyncio.create_task(run())
 
 
-async def _quien_ocupa(db, project, cuerpo: dict) -> None:
+async def _quien_ocupa(db, project, cuerpo: dict, *, actor=None) -> None:
     """Agrega al 409 el id del trabajo que está ocupando el workspace.
 
     Un 409 que no dice CUÁL es ese trabajo es un "no" a secas. Los
@@ -125,12 +125,17 @@ async def _quien_ocupa(db, project, cuerpo: dict) -> None:
             continue
         if not fila:
             continue
+        if actor is not None:
+            from . import conversation_access
+            cid = fila["id"] if clave == "conversation_id" else fila.get("conversation_id")
+            if not cid or not (await conversation_access.get_access(db, cid, actor))["can_read"]:
+                continue
         cuerpo[clave] = fila["id"]
         if clave == "conversation_id" and fila.get("branch"):
             cuerpo["branch"] = fila["branch"]
 
 
-def guard_workspace(db_key, *, source="body", enqueue=False):
+def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False):
     """Valida el proyecto, reserva y conserva el contrato HTTP del handler."""
     def decorate(handler):
         @wraps(handler)
@@ -214,6 +219,15 @@ def guard_workspace(db_key, *, source="body", enqueue=False):
             project = await db.get_project(slug.strip()) if isinstance(slug, str) else None
             if not project:
                 return await handler(request)
+            if checkout_only:
+                # Disabled/missing paths remain the handler's authorization or
+                # validation error. A directory without Git has no checkout to
+                # reserve, even when a different private chat uses the project.
+                from . import git_flow
+                repo = project.get("repo_path") or ""
+                if (not project.get("enabled") or not repo or not Path(repo).is_dir()
+                        or not await git_flow.is_git_repo(repo)):
+                    return await handler(request)
             if conv_id and row:
                 task = await db.get_conversation_task(conv_id)
                 if isinstance(task, dict) and task.get("mode") == "external_pr":
@@ -240,8 +254,9 @@ def guard_workspace(db_key, *, source="body", enqueue=False):
                 lease = acquire(db, project)
             except WorkspaceBusy as e:
                 cuerpo = {"error": "workspace_busy", "message": str(e),
-                          "project": project["slug"]}
-                await _quien_ocupa(db, project, cuerpo)
+                          "code": "workspace_occupied", "project": project["slug"]}
+                from . import identity
+                await _quien_ocupa(db, project, cuerpo, actor=identity.requester(request))
                 return web.json_response(cuerpo, status=409)
             token = _current.set(lease)
             try:

@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 # Cap de defensa (256 KB). Mismo valor que el wrapper original.
 MAX_READ_BYTES = 256 * 1024
@@ -83,9 +84,49 @@ def _is_default_ignored(name: str) -> bool:
     return False
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """No seguir symlinks ni junctions durante un scan del clon."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    try:
+        if is_junction is not None:
+            return bool(is_junction())
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return bool(attrs & reparse)
+    except OSError:
+        return False
+
+
 # --- .gitignore (heurístico) ------------------------------------------
 
-def _is_gitignored(ws: Path, target: Path) -> bool:
+def _read_gitignore_rules(ws: Path) -> tuple[tuple[str, bool], ...]:
+    """Lee las reglas una vez para una operación de recorrido."""
+    gi = ws / ".gitignore"
+    if not gi.is_file():
+        return ()
+    try:
+        lines = gi.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    rules: list[tuple[str, bool]] = []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        negated = s.startswith("!")
+        rule = s[1:].strip() if negated else s
+        if rule.endswith("/"):
+            rule = rule[:-1]
+        rules.append((rule, negated))
+    return tuple(rules)
+
+
+def _is_gitignored(
+    ws: Path, target: Path,
+    rules: Sequence[tuple[str, bool]] | None = None,
+) -> bool:
     """Heurística barata: parsea el .gitignore del root.
 
     No es un parser completo (reglas con `**` están fuera de scope). Para
@@ -93,25 +134,12 @@ def _is_gitignored(ws: Path, target: Path) -> bool:
     basename o el path relativo por fnmatch. Falso negativo > falso
     positivo.
     """
-    gi = ws / ".gitignore"
-    if not gi.is_file():
-        return False
-    try:
-        lines = gi.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return False
+    if rules is None:
+        rules = _read_gitignore_rules(ws)
     rel = target.relative_to(ws).as_posix()
     name = target.name
     matched = False
-    for line in lines:
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        rule = s[1:].strip() if s.startswith("!") else s
-        negated = s.startswith("!")
-        # Quitar slash final (suele aparecer en directorios: `node_modules/`)
-        if rule.endswith("/"):
-            rule = rule[:-1]
+    for rule, negated in rules:
         # Regla anclada al root: empieza con `/`. Quitar el slash y
         # exigir que matchee contra el path relativo sin posibilidad de
         # anidar.
@@ -133,10 +161,13 @@ def _is_gitignored(ws: Path, target: Path) -> bool:
     return matched
 
 
-def _is_ignored(ws: Path, p: Path) -> bool:
+def _is_ignored(
+    ws: Path, p: Path,
+    gitignore_rules: Sequence[tuple[str, bool]] | None = None,
+) -> bool:
     if _is_default_ignored(p.name):
         return True
-    if _is_gitignored(ws, p):
+    if _is_gitignored(ws, p, gitignore_rules):
         return True
     return False
 
@@ -196,7 +227,10 @@ def read_file(ws: Path, path: str) -> ReadResult:
 
 # --- List ------------------------------------------------------------
 
-def list_dir_tree(ws: Path, root: Path, max_depth: int) -> str:
+def list_dir_tree(
+    ws: Path, root: Path, max_depth: int,
+    gitignore_rules: Sequence[tuple[str, bool]] | None = None,
+) -> str:
     """Genera un árbol textual. depth=1 → solo root, depth=2 → hijos, etc.
 
     Aplica DOS filtros (ADR-016):
@@ -212,9 +246,13 @@ def list_dir_tree(ws: Path, root: Path, max_depth: int) -> str:
     out: list[str] = []
     base_depth = len(root.relative_to(ws).parts) if root != ws else 0
     truncated = False
+    scan_limited = False
+    entries_seen = 0
+    if gitignore_rules is None:
+        gitignore_rules = _read_gitignore_rules(ws)
 
     def walk(p: Path, depth: int) -> None:
-        nonlocal truncated
+        nonlocal entries_seen, scan_limited, truncated
         if len(out) >= MAX_TREE_ENTRIES:
             truncated = True
             return
@@ -222,27 +260,51 @@ def list_dir_tree(ws: Path, root: Path, max_depth: int) -> str:
             return
         rel = p.relative_to(ws)
         prefix = "  " * (len(rel.parts) - base_depth - 1) if rel.parts else ""
-        marker = "[D] " if p.is_dir() else "[F] "
-        out.append(f"{prefix}{marker}{p.name}{'/' if p.is_dir() else ''}")
-        if not p.is_dir():
+        is_link = _is_link_or_junction(p)
+        is_dir = p.is_dir() and not is_link
+        marker = "[D] " if is_dir else "[F] "
+        out.append(f"{prefix}{marker}{p.name}{'/' if is_dir else ''}")
+        if not is_dir:
+            return
+        if entries_seen >= MAX_TREE_ENTRIES:
+            scan_limited = True
             return
         try:
-            entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            scan = os.scandir(p)
         except (PermissionError, OSError):
             out.append(f"{prefix}  [permiso denegado]")
             return
-        for entry in entries:
-            if entry.name.startswith("."):
-                # Dejamos pasar .gitignore (info útil) pero NO .git/.vscode/etc.
-                if entry.name == ".gitignore":
-                    walk(entry, depth)
-                continue
-            if _is_ignored(ws, entry):
-                continue
-            walk(entry, depth + 1)
+        try:
+            visible: list[tuple[Path, bool]] = []
+            while entries_seen < MAX_TREE_ENTRIES:
+                try:
+                    entry = next(scan)
+                except StopIteration:
+                    break
+                entries_seen += 1
+                entry_path = Path(entry.path)
+                if entry.name.startswith("."):
+                    # Dejamos pasar .gitignore (info útil) pero NO .git/.vscode/etc.
+                    if entry.name == ".gitignore":
+                        visible.append((entry_path, False))
+                    continue
+                if _is_ignored(ws, entry_path, gitignore_rules):
+                    continue
+                visible.append((
+                    entry_path,
+                    entry.is_dir(follow_symlinks=False)
+                    and not _is_link_or_junction(entry_path),
+                ))
+            if entries_seen >= MAX_TREE_ENTRIES:
+                scan_limited = True
+            visible.sort(key=lambda item: (not item[1], item[0].name.lower()))
+            for entry_path, _ in visible:
+                walk(entry_path, depth if entry_path.name == ".gitignore" else depth + 1)
+        finally:
+            scan.close()
 
     walk(root, 0)
-    if truncated:
+    if truncated or scan_limited:
         out.append(
             f"⚠ listado truncado a {MAX_TREE_ENTRIES} entries. "
             f"Aplica un filtro más fino (path más específico, menor max_depth) "
@@ -262,7 +324,7 @@ def list_dir(ws: Path, path: str = ".", max_depth: int = 3) -> str:
         return f"error: {e}"
     if not p.is_dir():
         return f"error: no es directorio: {p}"
-    return list_dir_tree(ws, p, max_depth)
+    return list_dir_tree(ws, p, max_depth, _read_gitignore_rules(ws))
 
 
 # --- Helper "audit a repo" -------------------------------------------
@@ -277,10 +339,15 @@ class RepoSummary:
     tree: str
     key_files: dict[str, ReadResult]
     total_size_kb: int
+    total_size_partial: bool = False
 
     def to_prompt_text(self) -> str:
         """Render a texto para meter en el user message del auditor."""
         out = [f"Repo: {self.name}", "", "─── ESTRUCTURA ───", self.tree]
+        size_note = "estimado, parcial por presupuesto de entradas" \
+            if self.total_size_partial else "estimado"
+        out.append(
+            f"\nTamaño del repo: ~{self.total_size_kb} KB ({size_note}).")
         if self.key_files:
             out.append("")
             out.append("─── ARCHIVOS CLAVE ───")
@@ -329,7 +396,8 @@ def summarize(ws: Path, max_depth: int = 3,
 
     read-only: no escribe nada. Lo único que toca el FS es listar y leer.
     """
-    tree = list_dir(ws, ".", max_depth=max_depth)
+    gitignore_rules = _read_gitignore_rules(ws)
+    tree = list_dir_tree(ws, ws, max_depth, gitignore_rules)
     keys: dict[str, ReadResult] = {}
     for rel in key_files:
         if (ws / rel).is_file():
@@ -337,23 +405,45 @@ def summarize(ws: Path, max_depth: int = 3,
     # Si package.json/pyproject.toml está entre los leídos, ya tenemos
     # el entry point. Si no, pegar el tree igual.
     total = 0
-    try:
-        for p in ws.rglob("*"):
-            if not p.is_file():
-                continue
-            if _is_ignored(ws, p):
-                continue
-            try:
-                total += p.stat().st_size
-            except OSError:
-                pass
-    except OSError:
-        pass
+    entries_seen = 0
+    size_partial = False
+
+    def walk_size(directory: Path) -> None:
+        nonlocal total, entries_seen, size_partial
+        if size_partial:
+            return
+        try:
+            entries = os.scandir(directory)
+        except (PermissionError, OSError):
+            return
+        try:
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > MAX_TREE_ENTRIES:
+                    size_partial = True
+                    return
+                p = Path(entry.path)
+                if _is_ignored(ws, p, gitignore_rules) or _is_link_or_junction(p):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    walk_size(p)
+                elif entry.is_file(follow_symlinks=False):
+                    try:
+                        total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+                if size_partial:
+                    return
+        finally:
+            entries.close()
+
+    walk_size(ws)
     return RepoSummary(
         name=ws.name,
         tree=tree,
         key_files=keys,
         total_size_kb=total // 1024,
+        total_size_partial=size_partial,
     )
 
 
@@ -381,7 +471,8 @@ if __name__ == "__main__":  # pragma: no cover
     print(list_dir(target, ".", 2))
     print("---")
     s = summarize(target, max_depth=2)
-    print(f"total ~ {s.total_size_kb} KB")
+    size_note = ", parcial" if s.total_size_partial else ""
+    print(f"total ~ {s.total_size_kb} KB (estimado{size_note})")
     for path in s.key_files:
         r = s.key_files[path]
         print(f"[{path}] ok={r.ok} len={len(r.content)} err={r.error[:80]!r}")

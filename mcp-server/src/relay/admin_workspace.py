@@ -14,7 +14,7 @@ from .experts import (
     ModelUnavailable, build_model, structured_output_settings)
 from .app_state import DB_KEY
 from .admin_common import _get_job, _set_job
-from . import coordination
+from . import coordination, conversation_access, identity
 from .task_workspace import TaskWorkspaceError, resolved_project
 
 from .admin_cbm import CBM_INDEX_TIMEOUT_S, _cbm_env, _mark_job_done
@@ -69,7 +69,14 @@ async def _project_for_request(request: web.Request):
     conv_id = (request.query.get("conversation")
                or request.query.get("conversation_id") or "").strip()
     if not conv_id:
+        if identity.role_of(request) != "owner":
+            return None, web.json_response({"error": "Indica la conversación de los archivos"}, status=403)
         return project, None
+    try:
+        await conversation_access.require(db, conv_id, identity.requester(request),
+            "read" if request.method in {"GET", "HEAD"} else "collaborate")
+    except PermissionError:
+        return None, web.json_response({"error": "Conversación no disponible"}, status=404)
     conv = await db.get_conversation(conv_id)
     if not conv:
         return None, web.json_response(
@@ -78,6 +85,13 @@ async def _project_for_request(request: web.Request):
         return None, web.json_response(
             {"error": "la conversación pertenece a otro proyecto"}, status=400)
     try:
+        if request.method in {"GET", "HEAD"}:
+            from .task_workspace import _safe_task_paths
+            task = await db.get_conversation_task(conv_id)
+            if not task.get("workspace_path"):
+                raise TaskWorkspaceError("La conversación no tiene archivos de workspace")
+            _, workspace = _safe_task_paths(db, project, conv_id, task)
+            return {**project, "repo_path": str(workspace)}, None
         return await resolved_project(db, project, conv_id), None
     except TaskWorkspaceError as exc:
         return None, web.json_response(

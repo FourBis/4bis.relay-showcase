@@ -1,4 +1,4 @@
-"""Reanudación explícita por presupuesto y corrección de criterios pendientes."""
+"""Convierte criterios pendientes del cierre en una continuación del grafo."""
 from __future__ import annotations
 
 import json
@@ -53,8 +53,16 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
                 and all(states[d] not in (G.FALLADO, G.BLOQUEADO) for d in deps)):
             states[tid] = G.PENDIENTE
             reopened.add(tid)
-    projected = [G.Nodo.desde_fila(dict(t, estado=states[t["id"]]), t.get("deps") or ())
-                 for t in graph["tasks"]]
+    # Preview the same explicit grant that the transaction below persists.
+    # Eligibility checks the durable attempt limit; leaving the old limit in
+    # this projection would reject an otherwise authorized budget resume.
+    projected = []
+    for task in graph["tasks"]:
+        row = dict(task, estado=states[task["id"]])
+        if task["id"] in reopened:
+            previous_limit = int(2 if task.get("max_intentos") is None else task["max_intentos"])
+            row["max_intentos"] = max(previous_limit, int(task.get("intentos") or 0) + 1)
+        projected.append(G.Nodo.desde_fila(row, task.get("deps") or ()))
     if not G.listas(projected) and not any(n.estado == G.CORRIENDO for n in projected):
         return []  # Otra dependencia aún impide ejecutar: conservar todo el estado.
     statements = []
@@ -80,7 +88,7 @@ async def prepare_graph_resume(db, graph: dict) -> list[str]:
 
 
 async def graph_resume_context(db, task: dict) -> tuple[str, str]:
-    """Lee el historial anterior antes de asignar el chat del nuevo intento."""
+    """Historial del intento anterior; los nodos históricos pueden no tenerlo."""
     if not (task.get("detalle") or "").startswith((_RESUME_NOTICE, _OFF_PLAN_NOTICE)) or not task.get("chat_id"):
         return "", ""
     rows = await db.run("SELECT payload FROM chat_outputs WHERE chat_id=?", (task["chat_id"],))
@@ -177,6 +185,26 @@ async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
     reason = ("Se alcanzó el límite global de vueltas del grafo. " if not allow_continue
               else "La verificación repite criterios sin avance comprobado. " if valid
               else "El verificador no entregó una corrección válida. ")
+    task_title = "Corregir criterios pendientes de la verificación final"
+    task_detail = detail[:8000]
+    task_order = max(int(t.get("orden") or 0) for t in graph["tasks"]) + 1
+    task_state = G.PENDIENTE if proceed else G.FALLADO
+    task_error = "" if proceed else reason + str(verdict.get("feedback") or "")[:1200]
+    # Declare the candidate from this check and its verified attempt baseline.
+    # Only an exact blocked row is close metadata; an executable correction
+    # becomes another pass when it actually advances its attempt counter.
+    # Guarded SQL may skip insertion, so readers must check actual existence.
+    verdict["closure_correction"] = {
+        "version": 1, "kind": "executable_candidate" if proceed else "blocked_candidate",
+        "input_signature": verdict.get("input_signature"),
+        "input_attempts": {t["id"]: int(t.get("intentos") or 0) for t in graph["tasks"]},
+        "task": {"id": task_id, "graph_id": graph_id, "titulo": task_title,
+            "detalle": task_detail, "estado": task_state, "idempotente": 0,
+            "intentos": 0, "max_intentos": 1, "modelo": "", "chat_id": None,
+            "resultado": "", "error": task_error, "orden": task_order,
+            "archivos": "[]", "started_at": None, "ended_at": None,
+            "parent_id": None, "deps": []},
+    }
     # ponytail: un nodo independiente con ID local, sin aristas del modelo.
     # Alta + checkpoint + estado deben sobrevivir juntos a reinicios/cancelación.
     # El estado se comprueba dentro de la escritura: el veredicto puede llegar tarde.
@@ -185,10 +213,8 @@ async def continue_verification(db, graph_id: str, graph: dict, verdict: dict,
         ("INSERT INTO tasks (id, graph_id, titulo, detalle, idempotente, max_intentos, "
          "orden, estado, error) SELECT ?,?,?,?,0,1,?,?,? "
          "FROM task_graphs WHERE id=? AND estado <> 'cancelado'",
-         (task_id, graph_id, "Corregir criterios pendientes de la verificación final",
-          detail[:8000], max(int(t.get("orden") or 0) for t in graph["tasks"]) + 1,
-          G.PENDIENTE if proceed else G.FALLADO,
-          "" if proceed else reason + str(verdict.get("feedback") or "")[:1200], graph_id)),
+         (task_id, graph_id, task_title, task_detail, task_order,
+          task_state, task_error, graph_id)),
         ("UPDATE task_graphs SET verificacion_json=?, estado=?, updated_at=? "
          "WHERE id=? AND estado <> 'cancelado'",
          (json.dumps(verdict, ensure_ascii=False), "activo" if proceed else "fallado",

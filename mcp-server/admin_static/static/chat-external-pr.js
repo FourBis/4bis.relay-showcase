@@ -2,6 +2,8 @@
 import { api, apiRoot, escape } from "./api.js";
 import { modalLoad, closeModal, isModalOpen, field, formSection, emptyState, toast } from "./ui.js";
 import { issuePickerHtml, mountIssuePicker, optionalIssuePayload } from "./chat-issue.js";
+import { repositoryPickerHtml, mountRepositoryPicker } from "./chat-repository-picker.js";
+import { externalReviewHtml } from "./chat-external-review.js";
 
 const MODAL = "external-pr-modal";
 let modalSession = 0;
@@ -31,11 +33,18 @@ function human(actor) {
   return escape(actor?.github_login || actor?.relay_actor || actor?.login || "sin identidad");
 }
 
-export function externalEvidencePayload(convId, headSha, summary) {
-  const key = JSON.stringify([convId, headSha, summary]);
+export function externalEvidenceTargets(task) {
+  const linked = Number(task?.issue_number);
+  return ["pr", ...(Number.isSafeInteger(linked) && linked > 0
+    && Number(task?.issue_link?.number) === linked ? ["issue"] : [])];
+}
+
+export function externalEvidencePayload(convId, headSha, summary, target = "pr") {
+  if (!["pr","issue"].includes(target)) throw new Error("Elige PR o issue como destino de la evidencia.");
+  const key = JSON.stringify([convId, headSha, summary, target]);
   if (!evidenceRequests.has(key)) evidenceRequests.set(key, globalThis.crypto?.randomUUID?.()
     || `evidence-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  return { action: "evidence", request_id: evidenceRequests.get(key), head_sha: headSha, summary };
+  return { action: "evidence", request_id: evidenceRequests.get(key), head_sha: headSha, summary, target };
 }
 
 export function externalPanelHtml(task) {
@@ -68,7 +77,7 @@ export function externalPanelHtml(task) {
         <ul>${(snapshot.reviews || []).map(review => `<li>Revisión ${escape(review.user?.login || "")} · ${escape(review.state || "")} · ${sha(review.commit_id)}</li>`).join("")}
         ${(snapshot.checks || []).map(check => `<li>Check ${escape(check.name || "")} · ${escape(check.conclusion || check.status || "")} · ${sha(check.head_sha)}</li>`).join("")}</ul></details>` : ""}</li>`;
   }).join("");
-  return `<div class="chat-task-head"><strong>PR externo</strong>
+  return `<div class="chat-task-head"><strong>PR del proyecto</strong>
     <span class="badge ${assessment.state === "ready" ? "ok" : "warn"}">${externalStateLabel(assessment.state)}</span></div>
     <div class="chat-task-meta">${link(pr.url, `${pr.repo || "GitHub"} #${pr.number || ""}`)}
       <span>${escape(pr.state || "sin verificar")}${pr.draft ? " · Draft" : ""}</span>
@@ -85,7 +94,8 @@ export function externalPanelHtml(task) {
     <p class="chat-task-detail">${policy ? `Política: checks requeridos ${escape((policy.required_checks || []).join(", ") || "ninguno")}; declaración ${policy.require_declaration ? "requerida" : "opcional"}.` : "No hay política de evidencia configurada para este riesgo."}
       Se exige aprobación humana independiente del autor y del responsable para el SHA actual. Un check verde acredita el resultado publicado por GitHub; no equivale a aprobación humana. El estado en Relay no impide fusionar en GitHub.</p>
     <div class="chat-task-actions">${allowed.has("external_refresh") ? '<button type="button" class="btn btn-xs" data-external-action="refresh">Actualizar desde GitHub</button>' : ""}
-      ${allowed.has("external_evidence") ? '<button type="button" class="btn btn-xs btn-primary" data-external-action="evidence">Declarar evidencia</button>' : ""}</div>
+      ${allowed.has("external_evidence") ? '<button type="button" class="btn btn-xs btn-primary" data-external-action="evidence">Declarar evidencia</button>' : ""}
+      ${allowed.has("external_evidence_image") ? '<button type="button" class="btn btn-xs" data-external-action="images">Adjuntar imagen de evidencia</button>' : ""}</div>
     <details data-external-section="evidence"><summary>Evidencia declarada (${evidence.length})</summary>
       <p class="chat-task-detail">Texto aportado por una persona identificada. Relay no ejecutó estas pruebas.</p>
       ${evidence.length ? `<ul>${evidenceHtml}</ul>` : emptyState({title:"Sin evidencia declarada",sub:"Declara qué probaste para el head actual."})}</details>
@@ -93,7 +103,8 @@ export function externalPanelHtml(task) {
       ${checks.length ? `<ul class="chat-task-detail">${checkHtml}</ul>` : '<p class="chat-task-detail">GitHub no devolvió checks para este SHA.</p>'}</details>
     <details data-external-section="reviews"><summary>Revisiones GitHub (${reviews.length})</summary>
       ${reviews.length ? `<ul class="chat-task-detail">${reviewHtml}</ul>` : '<p class="chat-task-detail">Sin revisiones verificadas.</p>'}</details>
-    <details data-external-section="history"><summary>Historial conservado (${history.length})</summary><ul class="chat-task-detail">${historyHtml}</ul></details>`;
+    <details data-external-section="history"><summary>Historial conservado (${history.length})</summary><ul class="chat-task-detail">${historyHtml}</ul></details>
+    ${externalReviewHtml(task)}`;
 }
 
 function formError(message) {
@@ -101,29 +112,44 @@ function formError(message) {
   if (output) output.textContent = message;
 }
 
-export async function openExternalRegistration({ projectSlug = "", onRegistered } = {}) {
+export async function openExternalRegistration({ projectSlug = "", lockProject = false, onRegistered } = {}) {
   const session = ++modalSession;
-  let issuePicker;
-  await modalLoad({ id: MODAL, title: "Registrar PR externo", loader: async () => {
-    return await api("projects?capability=external_pr");
+  let issuePicker, prPicker, autoTitle = "";
+  await modalLoad({ id: MODAL, title: "Registrar PR", loader: async () => {
+    const catalog = await api("projects?capability=external_pr");
+    return lockProject ? {...catalog,projects:(catalog.projects || []).filter(project => project.slug === projectSlug)} : catalog;
   },
     render: ({ projects = [] }) => projects.length ? `<form id="external-register-form">${formSection({
-      title: "Trabajo hecho fuera de Relay",
-      sub: "Registra la tarea y su PR. GitHub verificará el repositorio, el autor y el commit. Tú quedas como responsable con tu identidad GitHub conectada.",
+      title: "Trabajo del equipo en este repositorio",
+      sub: "Registra un PR del mismo repositorio vinculado al proyecto, trabajado con tus propias herramientas. No necesitas iniciar un chat. GitHub verifica repositorio, autor y commit; tú quedas como responsable con tu identidad GitHub conectada. No se admiten ramas de forks.",
       body: field({label:"Proyecto autorizado",id:"external-project",required:true,control:`<select id="external-project" name="project" class="select" required>${projects.map(p => `<option value="${attrEscape(p.slug)}" ${p.slug === projectSlug ? "selected" : ""}>${escape(p.slug)}</option>`).join("")}</select>`})
-        + field({label:"URL del PR GitHub",id:"external-url",required:true,control:'<input id="external-url" name="url" type="url" class="input" required placeholder="https://github.com/organización/repositorio/pull/123">'})
-        + field({label:"Tarea / objetivo",id:"external-title",required:true,control:'<input id="external-title" name="title" class="input" maxlength="200" required>'})
+        + field({label:"URL del PR GitHub",id:"external-url",required:true,control:'<input id="external-url" name="url" type="url" class="input" required placeholder="https://github.com/org/repo/pull/123">' + repositoryPickerHtml({id:"external-url",kind:"pulls"}),hint:"Elige un PR abierto o pega una URL del mismo repositorio, incluso de un PR cerrado o fusionado."})
+        + field({label:"Tarea / objetivo",id:"external-title",required:true,control:'<input id="external-title" name="title" class="input" maxlength="200" required>',hint:"Al elegir un PR se sugiere su título mientras no edites este objetivo."})
         + field({label:"Riesgo",id:"external-risk",required:true,control:'<select id="external-risk" name="risk" class="select" required><option value="">Elige el riesgo</option><option value="low">Bajo</option><option value="medium">Medio</option><option value="high">Alto</option></select>',hint:"Se aplica la política configurada del proyecto para ese riesgo."})
         + issuePickerHtml({id:"external-issue"})
         + field({label:"Herramienta / bot utilizado (opcional)",id:"external-actor",control:'<input id="external-actor" name="actor_label" class="input" maxlength="200" placeholder="Ej. Codex, Claude, trabajo manual">',hint:"Es una declaración; el autor del PR se lee de GitHub."}),
       actions:'<button class="btn btn-primary" type="submit">Registrar PR</button>',
-    })}</form>` : emptyState({title:"No hay proyectos elegibles",sub:"Se requiere acceso de escritura y un repositorio GitHub configurado para registrar un PR."}),
+    })}</form>` : emptyState({title:"No hay proyectos elegibles",sub:lockProject ? "Este proyecto no está habilitado para registrar PR con tu cuenta. Se requiere acceso de escritura y un repositorio GitHub configurado." : "Se requiere acceso de escritura y un repositorio GitHub configurado para registrar un PR."}),
     after: () => {
       const form = document.getElementById("external-register-form");
       if (!form) return;
       const project = form.querySelector('[name="project"]');
+      const title = form.querySelector('[name="title"]');
+      const clearAutoTitle = () => {
+        if (autoTitle && title.value === autoTitle) title.value = "";
+        autoTitle = "";
+      };
+      title.addEventListener("input", () => { autoTitle = ""; });
+      prPicker = mountRepositoryPicker(form,{id:"external-url",kind:"pulls",projectSlug:project.value,
+        onChange:(_value,{source}) => { if (source !== "selection") clearAutoTitle(); },
+        onSelect:item => {
+          clearAutoTitle();
+          if (!title.value.trim()) { title.value = String(item.title || "").slice(0,200); autoTitle = title.value; }
+        }});
       issuePicker = mountIssuePicker(form, {id:"external-issue",projectSlug:project.value});
-      project.addEventListener("change", () => issuePicker.setProject(project.value));
+      project.addEventListener("change", () => {
+        prPicker.setProject(project.value); issuePicker.setProject(project.value);
+      });
       form.querySelector('[name="url"]').focus();
       form.onsubmit = async (event) => {
         event.preventDefault();
@@ -134,15 +160,24 @@ export async function openExternalRegistration({ projectSlug = "", onRegistered 
         if (values.get("actor_label")) body.actor_label = String(values.get("actor_label")).trim();
         try { Object.assign(body, optionalIssuePayload(values.get("issue"))); }
         catch (error) { formError(error.message); return; }
+        // Congelar sólo el POST de registro; consultar listas nunca bloquea la entrada manual.
+        const fields = [...form.elements].map(control => [control,control.disabled]);
+        prPicker.setBusy(true); issuePicker.setBusy?.(true);
+        fields.forEach(([control]) => { control.disabled = true; });
         button.disabled = true; button.textContent = "Verificando en GitHub…"; formError("");
         try {
           const result = await apiRoot(`/projects/${encodeURIComponent(values.get("project"))}/external-pr`, {method:"POST",body});
-          if (session !== modalSession || !isModalOpen(MODAL)) return;
-          issuePicker.destroy(); closeModal(MODAL); toast("PR externo registrado", "ok");
+          if (session !== modalSession || !isModalOpen(MODAL) || !form.isConnected) return;
+          prPicker.destroy(); issuePicker.destroy(); closeModal(MODAL); toast("PR del proyecto registrado", "ok");
           await onRegistered?.(result);
         } catch (error) {
-          if (session === modalSession && isModalOpen(MODAL)) formError(`No se pudo registrar: ${error.message}. Conservamos los datos para reintentar.`);
-        } finally { button.disabled = false; button.textContent = "Registrar PR"; }
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) formError(`No se pudo registrar: ${error.message}. Conservamos los datos para reintentar.`);
+        } finally {
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+            fields.forEach(([control,disabled]) => { control.disabled = disabled; });
+            button.textContent = "Registrar PR"; prPicker.setBusy(false); issuePicker.setBusy?.(false);
+          }
+        }
       };
     },
   });
@@ -151,11 +186,14 @@ export async function openExternalRegistration({ projectSlug = "", onRegistered 
 export async function openExternalEvidence({ convId, task, onSaved } = {}) {
   const session = ++modalSession;
   const headSha = task.external_pr?.head_sha;
+  const targets = externalEvidenceTargets(task);
   await modalLoad({ id: MODAL, title: "Declarar evidencia", loader: async () => task,
     render: () => `<form id="external-evidence-form">${formSection({title:"Declaración para el commit actual",
-      sub:"Describe las pruebas realizadas y sus resultados. La identidad se registra en el servidor. Esto no crea una aprobación ni acredita ejecución por Relay.",
-      body:field({label:"Head SHA",control:sha(headSha)}) + field({label:"Qué se probó y resultado",id:"external-summary",required:true,control:'<textarea id="external-summary" name="summary" class="input" rows="6" maxlength="12000" required></textarea>'}),
-      actions:'<button class="btn btn-primary" type="submit">Guardar declaración</button>',
+      sub:"Describe las pruebas realizadas y sus resultados. Guarda la declaración en Relay y solicita un comentario en el PR o la issue seleccionada. El envío requiere publicación configurada y autorización vigente. La identidad se registra en el servidor; la declaración no crea una aprobación ni acredita ejecución de pruebas por Relay.",
+      body:field({label:"Head SHA",control:sha(headSha)})
+        + field({label:"Destino de la evidencia",id:"external-evidence-target",control:`<select id="external-evidence-target" name="target" class="select"><option value="pr">PR</option>${targets.includes("issue") ? '<option value="issue">Issue vinculada</option>' : ''}</select>`,hint:"El destino se verifica al guardar. La solicitud se envía sólo si la publicación está configurada y tu autorización sigue vigente; guardar no confirma que el comentario ya esté publicado."})
+        + field({label:"Qué se probó y resultado",id:"external-summary",required:true,control:'<textarea id="external-summary" name="summary" class="input" rows="6" maxlength="12000" required></textarea>'}),
+      actions:'<button class="btn btn-primary" type="submit">Guardar y solicitar publicación</button>',
     })}</form>`,
     after: () => {
       const form = document.getElementById("external-evidence-form");
@@ -165,17 +203,26 @@ export async function openExternalEvidence({ convId, task, onSaved } = {}) {
         const button = form.querySelector('[type="submit"]');
         if (button.disabled) return;
         const summary = form.querySelector("textarea").value.trim();
+        const target = form.querySelector('[name="target"]').value;
         if (!summary) { formError("Describe las pruebas y sus resultados."); return; }
-        button.disabled = true; button.textContent = "Guardando…"; formError("");
+        if (!targets.includes(target)) { formError("El destino no está vinculado a esta tarea."); return; }
+        const fields = [...form.elements].map(control => [control,control.disabled]);
+        fields.forEach(([control]) => { control.disabled = true; });
+        button.textContent = "Guardando..."; formError("");
         try {
           const result = await apiRoot(`/conversations/${encodeURIComponent(convId)}/external-pr`, {
-            method:"POST",body:externalEvidencePayload(convId,headSha,summary),
+            method:"POST",body:externalEvidencePayload(convId,headSha,summary,target),
           });
-          if (session !== modalSession || !isModalOpen(MODAL)) return;
-          closeModal(MODAL); toast("Evidencia declarada guardada", "ok"); await onSaved?.(result);
+          if (session !== modalSession || !isModalOpen(MODAL) || !form.isConnected) return;
+          closeModal(MODAL); toast("Declaración guardada; solicitud de publicación registrada", "ok"); await onSaved?.(result);
         } catch (error) {
-          if (session === modalSession && isModalOpen(MODAL)) formError(`No se pudo guardar: ${error.message}. El texto se conserva para reintentar.`);
-        } finally { button.disabled = false; button.textContent = "Guardar declaración"; }
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) formError(`No se pudo confirmar el resultado: ${error.message}. El texto se conserva y el destino también.`);
+        } finally {
+          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+            fields.forEach(([control,disabled]) => { control.disabled = disabled; });
+            button.textContent = "Guardar y solicitar publicación";
+          }
+        }
       };
     },
   });

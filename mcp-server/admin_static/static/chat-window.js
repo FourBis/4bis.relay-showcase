@@ -10,6 +10,13 @@ export function getEmbeddedConversation() {
   return ID_RE.test(value) ? value : "";
 }
 
+export function returnToConversationList() {
+  const conversationId = getEmbeddedConversation();
+  if (!conversationId || !globalThis.parent || globalThis.parent === globalThis) return false;
+  globalThis.parent.postMessage({type:"relay-chat-list", conversationId}, globalThis.location.origin);
+  return true;
+}
+
 export function createConversationFrame(conversationId, title = "Conversación Relay") {
   if (!ID_RE.test(String(conversationId || ""))) return null;
   const frame = document.createElement("iframe");
@@ -44,6 +51,11 @@ export async function bootEmbeddedChat({ initChats, selectConversation,
   if (!conversationId || typeof initChats !== "function"
       || typeof selectConversation !== "function") return false;
   document.body.classList.add("chat-embedded");
+  const back = document.getElementById("chat-parent-list");
+  if (back) {
+    back.hidden = false;
+    back.addEventListener("click", returnToConversationList);
+  }
   const main = document.getElementById("main");
   const chat = document.getElementById("tab-chat");
   if (main && chat) {

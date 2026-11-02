@@ -316,7 +316,8 @@ class NightOrchestrator:
     async def run(self) -> None:
         self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         await self.db.create_night_run(
-            self.run_id, self.project["slug"], self.deadline.isoformat())
+            self.run_id, self.project["slug"], self.deadline.isoformat(),
+            requested_by=getattr(self, "relay_actor", None))
         end_reason = "no_tasks"
         error: Optional[str] = None
         pr_url: Optional[str] = None
@@ -371,6 +372,8 @@ class NightOrchestrator:
                 self.current_task = f"{task.id}: {task.title}"
                 result = await self.worker.work_one(task)
                 self.results.append(result)
+                if getattr(self.worker, "_manual_recovery", ""):
+                    raise RuntimeError(self.worker._manual_recovery)
                 if result.status == "done":
                     task.status = "done"
                     # En el modelo de rama única, `pr_url` lo asigna

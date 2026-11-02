@@ -36,13 +36,25 @@ def _managed_roles(request: web.Request) -> list[str]:
 
 async def api_users_list(request: web.Request) -> web.Response:
     roles = _managed_roles(request)
+    archived = request.query.get("archived", "0")
+    if archived not in {"0", "1"}:
+        return web.json_response({"error": "Vista de integrantes inválida."}, status=400)
+    if archived == "1" and identity.role_of(request) != "owner":
+        raise web.HTTPForbidden(text="Solo un Admin puede consultar integrantes archivados.")
     projects = await request.app[DB_KEY].list_projects()
+    users = await request.app[DB_KEY].list_users()
+    roles = _managed_roles(request)
+    if archived == "1" and identity.role_of(request) != "owner":
+        raise web.HTTPForbidden(text="Solo un Admin puede consultar integrantes archivados.")
     return web.json_response({
         "users": [{**user, "enabled": bool(user.get("enabled", 1))}
-                  for user in await request.app[DB_KEY].list_users()],
+                  for user in users
+                  if bool(user.get("archived_at")) == (archived == "1")],
         "me": identity.requester(request), "roles": roles,
         "role_labels": identity.ROLE_LABELS,
         "can_assign_projects": identity.role_of(request) == "owner",
+        "can_archive_users": identity.role_of(request) == "owner",
+        "archived": archived == "1",
         "projects": [{"slug": project["slug"], "name": project["name"]}
                      for project in projects if project.get("enabled", True)],
     })
@@ -91,6 +103,8 @@ async def _save(request: web.Request, *, email: str, role: str,
                                    manageable_roles=tuple(roles),
                                    project_slugs=project_slugs)
         except ValueError as exc:
+            if str(exc) == "user_archived":
+                return web.json_response({"error": "Esta cuenta está archivada. Restáurala antes de editar o activar su acceso."}, status=409)
             if str(exc) == "last_admin":
                 return web.json_response(
                     {"error": "Debe quedar al menos un Admin activo."}, status=409)
@@ -164,4 +178,44 @@ async def api_user_delete(request: web.Request) -> web.Response:
     user = next((u for u in users if u["email"] == email), None)
     if user is None:
         return web.json_response({"error": "No existe ese usuario."}, status=404)
+    if user.get("archived_at"):
+        if user["role"] not in _managed_roles(request):
+            raise web.HTTPForbidden(text="No puedes modificar a ese usuario.")
+        return web.json_response({"email": email, "role": user["role"], "enabled": False})
     return await _save(request, email=email, role=user["role"], name=None, enabled=False)
+
+
+async def _archive_action(request: web.Request, *, archived: bool) -> web.Response:
+    body = await _body(request)
+    if body:
+        return web.json_response({"error": "La acción no acepta cambios de rol, acceso ni proyectos."}, status=400)
+    db = request.app[DB_KEY]
+    async with db._upsert_lock:
+        if identity.role_of(request) != "owner":
+            raise web.HTTPForbidden(text="Solo un Admin puede archivar o restaurar integrantes.")
+        email = request.match_info["email"].strip().lower()
+        try:
+            await db.set_user_archived(email, archived, actor=identity.requester(request))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except ValueError as exc:
+            errors = {
+                "user_not_found": ("No existe ese usuario.", 404),
+                "last_admin": ("Debe quedar al menos un Admin activo.", 409),
+                "archive_self": ("No puedes archivar tu propia cuenta.", 409),
+            }
+            message, status = errors.get(str(exc), (str(exc), 400))
+            return web.json_response({"error": message}, status=status)
+        users = await db.list_users()
+        identity.load_roles(users)
+        target = next(user for user in users if user["email"] == email)
+    return web.json_response({"email": email, "archived": bool(target.get("archived_at")),
+                              "enabled": bool(target["enabled"] and not target.get("archived_at"))})
+
+
+async def api_user_archive(request: web.Request) -> web.Response:
+    return await _archive_action(request, archived=True)
+
+
+async def api_user_restore(request: web.Request) -> web.Response:
+    return await _archive_action(request, archived=False)

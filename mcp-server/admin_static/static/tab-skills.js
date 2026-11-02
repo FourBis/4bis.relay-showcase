@@ -638,6 +638,23 @@ async function saveInstructions() {
 
 let _browseJob = null;   // {job_id, skills[]}
 let _browsePoll = null;
+let _browseView = null;
+
+function browseCurrent(view) {
+  return !!view && _browseView === view && !$("#skills-browse-panel").hidden
+    && $("#skills-repo-url").value.trim() === view.url;
+}
+
+function browseInvalidate() {
+  _browseStopPoll();
+  _browseView?.controller?.abort();
+  _browseView = null;
+  _browseJob = null;
+  $("#skills-browse-controls").hidden = true;
+  $("#skills-browse-panel").hidden = true;
+  $("#skills-browse-btn").disabled = false;
+  $("#skills-browse-install").disabled = false;
+}
 
 async function loadCatalog() {
   const sel = $("#skills-catalog");
@@ -656,7 +673,8 @@ async function loadCatalog() {
 async function browseStart() {
   const url = $("#skills-repo-url").value.trim();
   if (!url) { toast("Pega una URL de repo o elige una del dropdown.", "err"); return; }
-  _browseStopPoll();
+  browseInvalidate();
+  const view = _browseView = {url,jobId:null,controller:null,installing:false};
   $("#skills-browse-panel").hidden = false;
   $("#skills-browse-controls").hidden = true;
   $("#skills-browse-table").querySelector("tbody").innerHTML = "";
@@ -665,26 +683,35 @@ async function browseStart() {
   $("#skills-browse-btn").disabled = true;
   try {
     const job = await api("skills/browse", { method: "POST", body: { url } });
+    if (!browseCurrent(view)) return;
+    view.jobId = job.job_id;
     _browseJob = job;
     _renderBrowse(job);
-    _browsePoll = registerPoller(browsePoll, 1200, { tabId: "skills" });
+    if (job.state !== "ready" && job.state !== "failed")
+      _browsePoll = registerPoller(() => browsePoll(view), 1200, { tabId: "skills" });
   } catch (e) {
+    if (!browseCurrent(view)) return;
     $("#skills-browse-msg").textContent = "error: " + e.message;
   } finally {
-    $("#skills-browse-btn").disabled = false;
+    if (browseCurrent(view)) $("#skills-browse-btn").disabled = false;
   }
 }
 
-async function browsePoll() {
-  if (!_browseJob) return _browseStopPoll();
+async function browsePoll(view = _browseView) {
+  if (!browseCurrent(view) || !view.jobId || view.controller) return;
+  const controller = view.controller = new AbortController();
   try {
-    const job = await api(`skills/browse/${_browseJob.job_id}`);
+    const job = await api(`skills/browse/${view.jobId}`, {signal:controller.signal});
+    if (!browseCurrent(view) || job.job_id !== view.jobId) return;
     _browseJob = job;
     _renderBrowse(job);
     if (job.state === "ready" || job.state === "failed") _browseStopPoll();
   } catch (e) {
+    if (!browseCurrent(view)) return;
     $("#skills-browse-msg").textContent = "error: " + e.message;
     _browseStopPoll();
+  } finally {
+    if (view.controller === controller) view.controller = null;
   }
 }
 
@@ -745,11 +772,12 @@ function _renderBrowseRows(skills, filter = "") {
 }
 
 function previewFromClone(relPath) {
-  if (!_browseJob) return;
+  const view = _browseView, jobId = view?.jobId;
+  if (!browseCurrent(view) || !jobId) return;
   modalLoad({
     id: "skill-modal",
     title: `Preview · ${relPath}`,
-    loader: () => api(`skills/browse/${_browseJob.job_id}/preview`
+    loader: () => api(`skills/browse/${jobId}/preview`
       + `?path=${encodeURIComponent(relPath)}`),
     render: (r) => `<pre class="chat-md max-h-[60vh]">${escape(r.content)}</pre>`,
     after: () => {
@@ -761,29 +789,39 @@ function previewFromClone(relPath) {
 }
 
 async function browseInstall() {
-  if (!_browseJob) return;
+  const view = _browseView, jobId = view?.jobId;
+  if (!browseCurrent(view) || !jobId || _browseJob?.state !== "ready" || view.installing) return;
   const paths = $$(".skill-pick").filter((c) => c.checked)
     .map((c) => c.dataset.path);
   if (!paths.length) { toast("No tildaste ninguna skill.", "err"); return; }
   const enabled = $("#skills-browse-enabled").checked;
+  const overwrite = $("#skills-browse-overwrite").checked;
+  view.installing = true;
+  $("#skills-browse-install").disabled = true;
   if (!await confirmModal({
     title: `Instalar ${paths.length} skill${paths.length === 1 ? "" : "s"}`,
-    body: `Se copian a ~/.copilot/skills.\n\n`
+    body: `Repositorio: ${view.url}\nJob: ${jobId}\nSe copian a ~/.copilot/skills.\n\n`
       + (enabled
         ? "Entran PRENDIDAS: cada una suma su bullet al system prompt de "
           + "cada push. Mira el presupuesto después."
         : "Entran APAGADAS: quedan en disco pero no se inyectan hasta "
           + "que las prendas una por una."),
     confirmText: "Instalar",
-  })) return;
+  })) {
+    view.installing = false;
+    if (browseCurrent(view)) $("#skills-browse-install").disabled = false;
+    return;
+  }
+  if (!browseCurrent(view)) { view.installing = false; return; }
 
   $("#skills-browse-install").disabled = true;
   $("#skills-browse-msg").textContent = "instalando…";
   try {
-    const r = await api(`skills/browse/${_browseJob.job_id}/install`, {
+    const r = await api(`skills/browse/${jobId}/install`, {
       method: "POST",
-      body: { paths, overwrite: $("#skills-browse-overwrite").checked, enabled },
+      body: { paths, overwrite, enabled },
     }, 60_000);
+    if (!browseCurrent(view)) return;
     const ok = (r.installed || []).length;
     const errs = r.errors || [];
     $("#skills-browse-msg").innerHTML = `${ok} instaladas`
@@ -797,17 +835,17 @@ async function browseInstall() {
     loadInstalled();
     loadBudget();
   } catch (e) {
+    if (!browseCurrent(view)) return;
     $("#skills-browse-msg").innerHTML = `<span class="fail">${escape(e.message)}</span>`;
   } finally {
-    $("#skills-browse-install").disabled = false;
+    view.installing = false;
+    if (browseCurrent(view)) $("#skills-browse-install").disabled = false;
   }
 }
 
 async function browseDiscard() {
-  _browseStopPoll();
   const job = _browseJob;
-  _browseJob = null;
-  $("#skills-browse-panel").hidden = true;
+  browseInvalidate();
   if (job) {
     try { await api(`skills/browse/${job.job_id}`, { method: "DELETE" }); }
     catch (e) { _dbg("discard", e.message); }
@@ -825,8 +863,9 @@ export function initSkills() {
   onClick("#instructions-edit", openInstructions);
   onClick("#instructions-save", saveInstructions);
   $("#skills-catalog").onchange = (e) => {
-    if (e.target.value) $("#skills-repo-url").value = e.target.value;
+    if (e.target.value) { browseInvalidate(); $("#skills-repo-url").value = e.target.value; }
   };
+  $("#skills-repo-url").addEventListener("input", browseInvalidate);
   onClick("#skills-browse-btn", browseStart);
   onClick("#skills-browse-close", browseDiscard);
   onClick("#skills-browse-install", browseInstall);

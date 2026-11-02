@@ -170,6 +170,9 @@ async def _on_startup(app: web.Application) -> None:
     experts.load_catalog(await db.list_models())
     # Los avisos resuelven los valores efectivos, incluida system_config.
     relay_config.set_runtime_config(await db.all_config())
+    if relay_config.runtime_identity_enabled():
+        from . import deployment_metadata
+        app[deployment_metadata.RUNTIME_KEY] = await asyncio.to_thread(deployment_metadata.capture_runtime)
     _avisar_globales_apagados()
     # Chats que quedaron en `running` de un relay anterior. Va ANTES de
     # sanar los grafos porque `sanar` repara las TAREAS y esto repara la
@@ -277,6 +280,8 @@ async def _on_startup(app: web.Application) -> None:
     app[SWEEPER_KEY] = asyncio.create_task(_autoclose_sweeper(app))
     app[EXPORT_RETRY_KEY] = asyncio.create_task(_export_retry_loop(app))
     await task_service.recover(db)
+    from . import external_review_runtime
+    await external_review_runtime.recover(db)
     app[task_service.TASK_RUNNERS_KEY] = {}
     app[task_service.ISSUE_SYNC_RUNNERS_KEY] = {}
     app[task_service.ISSUE_SYNC_LIMIT_KEY] = asyncio.Semaphore(2)
@@ -487,6 +492,8 @@ async def _frenar_productores(app: web.Application) -> None:
 
 async def _on_cleanup(app: web.Application) -> None:
     await _frenar_productores(app)
+    from . import external_review_runtime
+    await external_review_runtime.stop(app)
     await _drain_running_experts(app)
     # F1: apagar reaper y matar los subprocesos MCP vivos del pool.
     reaper = app.get(MCP_REAPER_KEY)

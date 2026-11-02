@@ -68,8 +68,10 @@ espacio principal. No hay una nueva grilla de tarjetas de navegación.
 
 ## Persistencia y límites explícitos
 
-`4bis.workspace.v1` en localStorage guarda geometría, estados e identificadores;
-no guarda el texto de las respuestas ni los datos de las tablas. Los objetos se
+La clave `4bis.workspace.v2:<cuenta>` en localStorage guarda geometría, estados
+e identificadores por cuenta. La disposición anterior sin propietario se elimina
+sin atribuir sus referencias a quien inicia sesión después. Cerrar sesión borra
+la disposición de esa cuenta. Esta disposición no guarda el texto de las respuestas ni los datos de las tablas. Los objetos se
 recuperan desde la conversación y comprueban la huella de la respuesta antes de
 mostrarla. Si el origen cambia o desaparece, muestran un error con recuperación.
 
@@ -124,3 +126,37 @@ foco de teclado y ancho móvil. Ambos scripts requieren Playwright instalado en 
 entorno de pruebas; las capturas quedan en la carpeta temporal del sistema.
 
 Resultados y límites de esta entrega: [Validación](VALIDATION.md).
+
+## Mantenimiento del candidato de noviembre
+
+Desde un chat separado, **Mis conversaciones** vuelve al listado del workspace.
+Las preguntas interactivas se desactivan cuando su vista deja de estar visible.
+Si editas el compositor, cambias modelos o adjuntas archivos mientras respondes,
+se conserva ese borrador: la respuesta registrada no envía otro mensaje sola.
+
+Los editores de archivos y diagramas muestran y conservan su proyecto y
+conversación de destino durante la operación. Cambiar el foco no redirige un
+guardado ya iniciado. Ante un guardado sin confirmación conserva el contenido
+y revisa el aviso antes de reenviar; no hay reconciliación automática entre
+recargas o clientes distintos.
+
+Estado y En curso permiten recorrer las páginas del listado disponible. Un
+error del sondeo de actividad no demuestra por sí solo que Relay se haya caído.
+
+Estos cambios tienen revisión estática; la comprobación visual de esta rama
+sigue pendiente. Consulta el [recibo de mantenimiento](qa/maintenance-2026-11-01.md).
+
+## Acceso y solicitudes del candidato de paridad
+
+Los filtros personales y compartidos, **Compartir** y las capacidades de cada
+hilo se describen en [Acceso a conversaciones](CONVERSATION_ACCESS.md).
+El borrador de cada proyecto y los envíos pendientes permanecen en memoria de
+la página; sus [recibos de recuperación](REQUEST_RECOVERY.md) no prometen
+persistir ese texto al recargar. La UI conserva la identidad del pedido mientras
+consulta un resultado incierto y separa una nueva edición de ese intento.
+
+La revisión externa, su evidencia PNG y el inbox tienen sus propios estados y
+permisos. La [demo ampliada](DEMO.md) permite explorar recorridos sintéticos;
+no se conecta al servidor ni verifica su funcionamiento. Los cambios de esta
+rama sólo tienen [revisión estática](qa/parity-2026-11-01.md); no se comprobaron
+geometría, foco o superposiciones en un navegador.

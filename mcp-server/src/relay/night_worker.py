@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -11,15 +13,19 @@ from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 
 from . import config
 from .experts import cbm_binary_path, cbm_call
-from .night_plan import NightConfig, resolve_cwd_for_cmd, run_branch_name, run_gate
+from .night_plan import GateCleanupError, NightConfig, resolve_cwd_for_cmd, run_branch_name, run_gate
 from .night_generator import NIGHT_WORK_CONTRACT
-from .pr_text import neutralize_gh_pr_create_body
 from .night_types import (
     COMMIT_TRAILER, EXPERT_TIMEOUT_S, FORBIDDEN_PATTERNS, GATE_TIMEOUT_S,
     GIT_TIMEOUT_S, TRANSIENT_BUILD_SIGNATURES, NightTask, TaskResult,
 )
 
 logger = logging.getLogger("relay.night")
+
+
+class NightRecoveryError(RuntimeError):
+    """El worktree aislado de la tarea se conserva para recuperación manual."""
+
 
 class BranchWorker:
     """Fase 2: una tarea → una rama → trabajo → gates → commit o rollback.
@@ -36,6 +42,7 @@ class BranchWorker:
     ) -> None:
         self.project = project
         self.repo = project["repo_path"]
+        self.source_repo = self.repo
         self.cfg = cfg
         self.run_id = run_id
         # Rama ÚNICA del run (Iter 5.1). Si no viene del orquestador,
@@ -70,6 +77,9 @@ class BranchWorker:
         # porque el atributo no existía → _summarize_block_diff quedaba
         # vacío y los checkpoints interactivos iban sin contexto de diff.
         self.last_commit_sha: Optional[str] = None
+        self._workspace_ready = False
+        self._workspace_path: Optional[Path] = None
+        self._manual_recovery = ""
 
     def _set_step(self, step: str) -> None:
         self.current_step = step
@@ -122,6 +132,7 @@ class BranchWorker:
         Para `gh`, donde el título/body vienen del LLM: sin cmd.exe no hay
         que escapar comillas, %, &, ^ ni newlines (evita inyección/roturas)."""
         if program == "gh" and args[:2] == ("pr", "create"):
+            from .pr_text import neutralize_gh_pr_create_body
             args = neutralize_gh_pr_create_body(args)
         proc = await asyncio.create_subprocess_exec(
             program, *args, cwd=self.repo,
@@ -214,7 +225,7 @@ class BranchWorker:
         from .admin import _cbm_project_name
         raw = await cbm_call(
             "search_graph",
-            {"query": task.title, "project": _cbm_project_name(self.repo),
+            {"query": task.title, "project": _cbm_project_name(self.source_repo),
              "limit": 10},
             timeout=15.0)
         return raw[:4000] if raw and not raw.startswith('{"error"') else ""
@@ -281,6 +292,8 @@ class BranchWorker:
                 # Warmup: el pre-flight se come el restore en frío flaky
                 # para que el gate final arranque caliente.
                 rc, out = await self._sh(self.cfg.build_cmd, timeout=180.0)
+        except GateCleanupError:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("pre_flight_build explotó: %r", e)
             return ""
@@ -309,24 +322,41 @@ class BranchWorker:
                 f"(o como parte de tu tarea) — el gate al final exigirá "
                 f"que build y tests pasen.\n```\n{body}\n```\n")
 
-    async def _diff_stats(self) -> tuple[int, list[str]]:
-        """(líneas cambiadas, archivos tocados) vs working tree."""
-        rc, out = await self._git("diff", "--numstat")
-        rc2, untracked = await self._git("ls-files", "--others", "--exclude-standard")
+    async def _diff_stats(self, *, tree: str = "", checkpoint: str = "HEAD") -> tuple[int, list[str]]:
+        """Count the complete candidate, including staged changes.
+
+        Without ``tree`` this inspects tracked working files against HEAD
+        plus untracked files. With ``tree`` it inspects only the immutable
+        staged snapshot that the caller will compare to the resulting commit.
+        NUL-delimited names keep tabs/newlines and literal pathspecs intact.
+        """
+        args = ("diff", "--numstat", "--no-renames", "-z", checkpoint)
+        rc, out = await self._git(*args, *((tree,) if tree else ()))
+        if rc != 0:
+            raise NightRecoveryError("no se pudo verificar el diff completo de la tarea")
+        untracked = ""
+        if not tree:
+            rc2, untracked = await self._git("ls-files", "--others", "--exclude-standard", "-z")
+            if rc2 != 0:
+                raise NightRecoveryError("no se pudieron verificar los archivos nuevos de la tarea")
         lines = 0
         files: list[str] = []
-        for ln in out.splitlines():
-            parts = ln.split("\t")
+        for entry in out.split("\0"):
+            if not entry:
+                continue
+            parts = entry.split("\t", 2)
             if len(parts) == 3:
                 add, rem, path = parts
                 lines += (int(add) if add.isdigit() else 0)
                 lines += (int(rem) if rem.isdigit() else 0)
                 files.append(path)
-        for path in untracked.splitlines():
-            if path.strip():
-                files.append(path.strip())
+            else:
+                raise NightRecoveryError("el diff de la tarea no tiene un formato verificable")
+        for path in untracked.split("\0"):
+            if path:
+                files.append(path)
                 try:
-                    lines += len((Path(self.repo) / path.strip())
+                    lines += len((Path(self.repo) / path)
                                  .read_text(encoding="utf-8", errors="ignore")
                                  .splitlines())
                 except OSError:
@@ -346,12 +376,18 @@ class BranchWorker:
 
     async def work_one(self, task: NightTask) -> TaskResult:
         t0 = time.monotonic()
-        base = self.cfg.base_branch
         branch = self.branch
         res = TaskResult(task_id=task.id, status="failed", branch=branch)
         self._last_verdict = ""
         self._last_verdict_feedback = ""
         self._set_step("precheck")
+        if (not self._workspace_ready or self._manual_recovery
+                or self._workspace_path != Path(self.repo).resolve()
+                or Path(self.repo).is_symlink() or getattr(Path(self.repo), "is_junction", lambda: False)()):
+            res.error = self._manual_recovery or "falta preparar el worktree privado del run"
+            self._manual_recovery = res.error
+            res.duration_s = time.monotonic() - t0
+            return res
 
         # Precondiciones: working tree limpio. La rama ÚNICA del run la
         # creó el orquestador al arrancar (en `ensure_branch`) — si no
@@ -360,21 +396,25 @@ class BranchWorker:
         rc, out = await self._git("status", "--porcelain")
         if rc != 0 or out.strip():
             res.error = "working tree sucio o no-git: tarea salteada"
+            self._manual_recovery = res.error
             res.duration_s = time.monotonic() - t0
             return res
         rc, _ = await self._git("rev-parse", "--verify", "--quiet", branch)
         if rc != 0:
             res.error = (f"rama del run {branch!r} no existe: el "
                          "orquestador debe crearla antes de work_one")
+            self._manual_recovery = res.error
             res.duration_s = time.monotonic() - t0
             return res
 
-        # Asegurar que estamos EN la rama (el orquestador hace checkout
-        # al crearla, pero si el work_one se llama interactivamente /
-        # por tests, podemos estar en base).
-        rc, out = await self._git("checkout", branch)
-        if rc != 0:
-            res.error = f"checkout {branch} falló: {out[-500:]}"
+        rc, out = await self._git("rev-parse", "HEAD")
+        checkpoint = out.strip()
+        ref_rc, ref_out = await self._git("rev-parse", f"refs/heads/{branch}")
+        detached_rc, _ = await self._git("symbolic-ref", "--quiet", "HEAD")
+        if (rc != 0 or ref_rc != 0 or detached_rc != 1
+                or not re.fullmatch(r"[0-9a-f]{40,64}", checkpoint) or ref_out.strip() != checkpoint):
+            res.error = "el HEAD privado y la rama del run no coinciden; no se modifica el checkout"
+            self._manual_recovery = res.error
             res.duration_s = time.monotonic() - t0
             return res
 
@@ -407,52 +447,80 @@ class BranchWorker:
             lines, files = await self._diff_stats()
             forbidden = self._forbidden_touched(files)
             if forbidden:
-                await self._rollback(branch)
-                res.status = "rolled_back"
-                res.error = f"tocó paths prohibidos: {', '.join(forbidden[:5])}"
-                return res
+                return await self._rollback_result(res, checkpoint, f"tocó paths prohibidos: {', '.join(forbidden[:5])}")
             if lines == 0:
-                await self._rollback(branch)
-                res.status = "rolled_back"
-                res.error = "el experto no produjo cambios"
-                return res
+                return await self._rollback_result(res, checkpoint, "el experto no produjo cambios")
             if lines > self.cfg.max_diff_lines:
-                await self._rollback(branch)
-                res.status = "rolled_back"
-                res.error = f"diff {lines} líneas > max_diff_lines={self.cfg.max_diff_lines}"
-                return res
+                return await self._rollback_result(res, checkpoint, f"diff {lines} líneas > max_diff_lines={self.cfg.max_diff_lines}")
 
             self._set_step("gates")
             ok, gate_err = await self._run_gates()
             if not ok:
-                await self._rollback(branch)
-                res.status = "rolled_back"
-                res.error = gate_err
-                return res
+                return await self._rollback_result(res, checkpoint, gate_err)
 
-            # Verde: commit con trailer en la rama ÚNICA del run. El
-            # push + PR se hace UNA vez al final del run
-            # (NightOrchestrator.finalize_pr) — no por tarea.
+            # A build/test can stage or generate additional changes. Validate
+            # the final staged tree, not the earlier expert-only working diff.
+            self._set_step("final_diff")
+            rc, out = await self._git("add", "-A")
+            if rc != 0:
+                return await self._rollback_result(res, checkpoint, f"git add falló: {out[-500:]}")
+            tree_rc, tree_out = await self._git("write-tree")
+            candidate_tree = tree_out.strip()
+            if tree_rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", candidate_tree):
+                raise NightRecoveryError("no se confirmó el árbol final staged; se conserva el worktree")
+            lines, files = await self._diff_stats(tree=candidate_tree, checkpoint=checkpoint)
+            forbidden = self._forbidden_touched(files)
+            if forbidden:
+                return await self._rollback_result(res, checkpoint, f"los gates tocaron paths prohibidos: {', '.join(forbidden[:5])}")
+            if lines == 0:
+                return await self._rollback_result(res, checkpoint, "no hay cambios finales para commitear")
+            if lines > self.cfg.max_diff_lines:
+                return await self._rollback_result(res, checkpoint, f"diff final {lines} líneas > max_diff_lines={self.cfg.max_diff_lines}")
+
+            # Keep normal Git commit hooks/signing. If a hook or an unexpected
+            # writer changes the index, retain the private commit for recovery
+            # instead of publishing a tree that did not pass the final gate.
             self._set_step("commit")
-            await self._git("add", "-A")
             msg = f"{task.title}\n\n{COMMIT_TRAILER.format(run_id=self.run_id)}"
             rc, out = await self._git("commit", "-m", msg)
             if rc != 0:
-                await self._rollback(branch)
-                res.status = "rolled_back"
-                res.error = f"commit falló: {out[-500:]}"
-                return res
+                return await self._rollback_result(res, checkpoint, f"commit falló: {out[-500:]}")
             # Capturar SHA del commit fresco para que el próximo
             # _maybe_ask_block_decision pueda resumir el diff. Bug fix
             # 2026-07-18: este atributo no existía y getattr devolvía
             # siempre None → _summarize_block_diff vacío → checkpoints
             # interactivos sin contexto.
             sha_rc, sha_out = await self._git("rev-parse", "HEAD")
-            if sha_rc == 0 and sha_out.strip():
-                self.last_commit_sha = sha_out.strip().splitlines()[0]
+            sha = sha_out.strip()
+            if sha_rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+                raise NightRecoveryError("commit creado pero no se confirmó su SHA; se conserva el worktree")
+            committed_tree_rc, committed_tree = await self._git("rev-parse", "HEAD^{tree}")
+            if committed_tree_rc != 0 or committed_tree.strip() != candidate_tree:
+                raise NightRecoveryError(f"commit {sha} conservado; su árbol difiere del validado y no se publica")
+            parent_rc, parent = await self._git("rev-parse", "HEAD^")
+            clean_rc, pending = await self._git("status", "--porcelain", "--untracked-files=all")
+            if parent_rc != 0 or parent.strip() != checkpoint or clean_rc != 0 or pending.strip():
+                raise NightRecoveryError(f"commit {sha} conservado; parentesco o limpieza posterior no verificables")
+            # Detached private HEAD: advance only our run ref, with compare-and-swap.
+            attached_rc, attached = await self._git("worktree", "list", "--porcelain")
+            if attached_rc != 0 or f"branch refs/heads/{branch}" in attached.splitlines():
+                raise NightRecoveryError(f"commit {sha} conservado; rama del run ocupada o no verificable")
+            publish_rc, _ = await self._git("update-ref", f"refs/heads/{branch}", sha, checkpoint)
+            if publish_rc != 0:
+                raise NightRecoveryError(f"commit {sha} conservado; la rama cambió y no se publicó el resultado")
+            self.last_commit_sha = sha
 
             res.status = "done"
             return res
+        except (NightRecoveryError, GateCleanupError) as exc:
+            self._manual_recovery = f"Recuperación manual requerida: {exc}"
+            res.error = self._manual_recovery
+            return res
+        except asyncio.CancelledError:
+            # Cancellation may originate in an expert/Git subprocess as well
+            # as a gate. Retain all data rather than race unknown writers.
+            self._manual_recovery = "Tarea cancelada; worktree retenido sin restauración automática"
+            raise
         except Exception as e:  # noqa: BLE001 — una tarea rota no voltea el run
             logger.exception("night task %s explotó", task.id)
             # Persistir el traceback completo en state/ para diagnóstico
@@ -469,75 +537,66 @@ class BranchWorker:
                     encoding="utf-8")
             except OSError:
                 pass
-            await self._rollback(branch)
-            res.status = "rolled_back"
             # str(e) puede ser '' en asyncio.TimeoutError → el reporte
             # queda "TimeoutError: ". Agregamos el contexto: en qué paso
             # de la Fase 2 estábamos (work / gates / commit / push).
             msg = str(e) or f"(sin mensaje, ver state/agents/night-runs/{self.run_id}/task_{task.id}_error.txt)"
-            res.error = f"{type(e).__name__} (en {self.current_step}): {msg}"
-            return res
+            return await self._rollback_result(res, checkpoint, f"{type(e).__name__} (en {self.current_step}): {msg}")
         finally:
-            # SIEMPRE volver a base (la próxima tarea parte de base y
-            # hace checkout a la rama del run; la rama ÚNICA persiste
-            # con todos sus commits buenos).
-            await self._git("checkout", base)
+            # Keep the run's detached private workspace. Never switch the
+            # user's checkout or carry a dirty index onto another branch.
             res.duration_s = time.monotonic() - t0
             # Estado vivo consumido: la tarea terminó. Limpiar para que
             # live_snapshot() devuelva None entre tareas.
             self.current_step = ""
             self.progress = None
 
-    async def _rollback(self, branch: str) -> None:
-        """Rollback NO destructivo (Iter 5.1).
+    async def _rollback_result(self, result: TaskResult, checkpoint: str, reason: str) -> TaskResult:
+        try:
+            await self._rollback(checkpoint)
+        except NightRecoveryError as exc:
+            self._manual_recovery = f"{reason}; recuperación manual requerida: {exc}"
+            result.status, result.error = "failed", self._manual_recovery
+        else:
+            result.status, result.error = "rolled_back", reason
+        return result
 
-        Antes: `git branch -D` borraba la rama entera. Con el modelo
-        de rama única, los commits buenos de las tareas previas TIENEN
-        que sobrevivir — descartamos solo el trabajo de ESTA tarea.
+    async def _rollback(self, checkpoint: str) -> None:
+        """Restore only the owned private worktree to this task's clean HEAD.
 
-        Cuándo se llama: desde `work_one` cuando el experto no
-        produjo cambios, gates rojos, paths prohibidos, TDD sin
-        test_cmd, o el commit mismo falló. **Antes del commit** = el
-        commit de ESTA tarea todavía NO existe en la rama; los de
-        tareas anteriores sí.
-
-        Estrategia: `git checkout -- .` + `git clean -fd` (descarta
-        working tree), después `git checkout base` (HEAD fuera de la
-        rama). NO tocamos la historia — el último commit (de la tarea
-        anterior, si lo hubo) sigue intacto en la rama.
-
-        Caso especial post-commit: si la tarea alcanzó a commitear y
-        algo posterior falló (push, pr create, etc.), el orquestador
-        llama `git reset --hard HEAD~1` explícitamente antes del
-        rollback — `_rollback` no lo hace porque puede NO saber si
-        hay un commit propio que descartar.
+        No reset of history, no clean and no checkout of the user's base.
+        Untracked files survive and stop the run for explicit recovery.
         """
-        await self._git("checkout", "--", ".")
-        await self._git("clean", "-fd")
-        # Salir de la rama (a base). La rama queda intacta con los
-        # commits de tareas previas. work_one.finally vuelve a base
-        # explícitamente — esto es defensa en profundidad.
-        base = self.cfg.base_branch
-        await self._git("checkout", base)
+        if (not self._workspace_ready or self._workspace_path != Path(self.repo).resolve()
+                or Path(self.repo).resolve() == Path(self.source_repo).resolve()
+                or Path(self.repo).is_symlink() or getattr(Path(self.repo), "is_junction", lambda: False)()):
+            raise NightRecoveryError("el checkout no pertenece al worker; no se restaura")
+        rc, head = await self._git("rev-parse", "HEAD")
+        symbolic_rc, _ = await self._git("symbolic-ref", "--quiet", "HEAD")
+        if rc != 0 or head.strip() != checkpoint or symbolic_rc != 1:
+            raise NightRecoveryError("HEAD cambió o no está detached; se conserva el trabajo")
+        rc, _ = await self._git("restore", f"--source={checkpoint}", "--staged", "--worktree", "--", ".")
+        if rc != 0:
+            raise NightRecoveryError("falló la restauración del índice/worktree; no se cambia de rama")
+        rc, status = await self._git("status", "--porcelain", "--untracked-files=all")
+        if rc != 0 or status.strip():
+            raise NightRecoveryError("quedan cambios o archivos nuevos preservados; no se cambia de rama")
 
     async def ensure_branch(self) -> Optional[str]:
-        """Crea la rama ÚNICA del run si no existe, desde base limpio.
+        """Prepare a retained private detached worktree, never a shared checkout.
 
-        Llamado por el orquestador UNA vez al arrancar el run. Idempotente:
-        si la rama ya existe (caso 'resume' post-crash), la reutiliza.
-        Devuelve mensaje de error o None si todo OK.
-
-        Bug fix 2026-07-20: hace `git fetch origin` best-effort antes de
-        detectar/crear la rama. Sin esto, si el local tiene días de stale
-        data, el bot opera sobre refs viejas. Caso anonimizado: WorkshopDemo
-        tenía develop local atrasado del origin por varios commits, el
-        night run basó la rama sobre develop viejo y el experto propuso
-        cambios ya mergeados. Mismo problema que un chat que
-        gatilló este fix: el LLM responde coherente con lo que ve, pero
-        lo que ve no es lo que está en el remoto.
+        Record intent before worktree creation. An interrupted/moved workspace
+        requires recovery; it is not silently recreated or automatically removed.
         """
+        if self._workspace_ready:
+            return self._manual_recovery or None
         base = self.cfg.base_branch
         branch = self.branch
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.run_id):
+            return "run_id inválido para el workspace privado"
+        rc, status = await self._git("status", "--porcelain")
+        if rc != 0 or status.strip():
+            return "checkout de origen sucio o no verificable; no se prepara el run"
         # Best-effort fetch. Si falla (red/auth), sigo con local stale.
         try:
             from .git_flow import fetch_origin_safe
@@ -549,27 +608,57 @@ class BranchWorker:
             return f"git status falló (rc={rc}): {out[-200:]}"
         if out.strip():
             return f"working tree sucio al arrancar: {out.strip()[:200]}"
-        # El fetch de arriba solo movía `origin/*`: la rama del run seguía
-        # saliendo del base LOCAL stale (bug 2026-07-27, mismo síntoma que
-        # el del 20/7). Solo fast-forward; si divergió no toca nada y el
-        # run sale del local (sus commits importan).
-        try:
-            from .git_flow import sync_base_with_origin
-            await sync_base_with_origin(self.repo, base)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("ensure_branch: ff del base explotó: %r", e)
-        rc, _ = await self._git("rev-parse", "--verify", "--quiet", branch)
-        if rc == 0:
-            # Ya existe: asumimos resume (post-crash). Checkout a la
-            # rama para que la primera tarea opere sobre ella.
-            rc, out = await self._git("checkout", branch)
-            return None if rc == 0 else f"checkout rama existente falló: {out[-200:]}"
-        rc, out = await self._git("checkout", "-b", branch, base)
+        # Select the fetched ref without fast-forwarding a user's checked-out
+        # base or moving any existing local branch.
+        start_ref = base
+        if not base.startswith("origin/"):
+            remote_rc, _ = await self._git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base}")
+            if remote_rc == 0:
+                start_ref = f"refs/remotes/origin/{base}"
+        rc, _ = await self._git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
         if rc != 0:
-            return f"checkout -b {branch} falló: {out[-200:]}"
-        # Volvemos a base — las tareas harán checkout a la rama en
-        # cada work_one.
-        await self._git("checkout", base)
+            rc, out = await self._git("branch", branch, start_ref)
+            if rc != 0:
+                return f"no se pudo crear la rama del run: {out[-200:]}"
+        rc, worktrees = await self._git("worktree", "list", "--porcelain")
+        if rc != 0 or f"branch refs/heads/{branch}" in worktrees.splitlines():
+            return "la rama del run está ocupada por otro checkout; no se mueve"
+        workspace_root = config.db_path().parent / "night-workspaces"
+        workspace = workspace_root / self.run_id
+        manifest = workspace_root / f"{self.run_id}.json"
+        identity = {"run_id": self.run_id, "branch": branch,
+                    "source_repo": str(Path(self.source_repo).resolve()),
+                    "workspace": str(workspace.resolve())}
+        try:
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            if manifest.exists():
+                if json.loads(manifest.read_text(encoding="utf-8")) != identity or not workspace.is_dir():
+                    return "workspace previo ausente o identidad distinta; recuperación manual requerida"
+            else:
+                if workspace.exists() or workspace.is_symlink():
+                    return "la ruta privada ya está ocupada; no se reutiliza ni se borra"
+                with manifest.open("x", encoding="utf-8") as stream:
+                    json.dump(identity, stream)
+                rc, out = await self._git("worktree", "add", "--detach", str(workspace), f"refs/heads/{branch}")
+                if rc != 0:
+                    return f"worktree no confirmado; se conserva intención para recuperación: {out[-200:]}"
+            from .git_flow import _git
+            rc, top = await _git(str(workspace), "rev-parse", "--show-toplevel")
+            common_rc, common = await _git(str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir")
+            source_rc, source_common = await self._git("rev-parse", "--path-format=absolute", "--git-common-dir")
+            detached_rc, _ = await _git(str(workspace), "symbolic-ref", "--quiet", "HEAD")
+            if (workspace.is_symlink() or getattr(workspace, "is_junction", lambda: False)()
+                    or rc != 0 or Path(top.strip()).resolve() != workspace.resolve()
+                    or common_rc != 0 or source_rc != 0
+                    or Path(common.strip()).resolve() != Path(source_common.strip()).resolve()
+                    or detached_rc != 1):
+                return "identidad del worktree privado no verificable; no se utiliza"
+        except (OSError, ValueError) as exc:
+            return f"workspace privado no preparado: {type(exc).__name__}"
+        self.repo = str(workspace)
+        self.project = {**self.project, "repo_path": self.repo}
+        self._workspace_path = workspace.resolve()
+        self._workspace_ready = True
         return None
 
     async def finalize_pr(self, tasks: list[NightTask],
@@ -582,6 +671,9 @@ class BranchWorker:
         """
         base = self.cfg.base_branch
         branch = self.branch
+        if self._manual_recovery:
+            logger.warning("finalize_pr: workspace retained for manual recovery; no push")
+            return None
         done = [r for r in results if r.status == "done"]
         if not done:
             logger.info(

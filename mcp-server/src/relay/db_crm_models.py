@@ -257,7 +257,7 @@ class DatabaseCrmModelsMixin:
 
     async def list_users(self) -> list[dict]:
         rows = await self.run(
-            "SELECT email, role, display_name, enabled, created_at, "
+            "SELECT email, role, display_name, enabled, archived_at, created_at, "
             "project_slugs_json "
             "FROM users ORDER BY email")
         users = []
@@ -317,9 +317,11 @@ class DatabaseCrmModelsMixin:
         try:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT role, enabled, display_name, project_slugs_json "
+                "SELECT role, enabled, archived_at, display_name, project_slugs_json "
                 "FROM users WHERE email=? COLLATE NOCASE",
                 (email,)).fetchone()
+            if current is not None and current["archived_at"]:
+                raise ValueError("user_archived")
             if manageable_roles is not None and (
                     role not in manageable_roles
                     or (current is not None
@@ -338,7 +340,7 @@ class DatabaseCrmModelsMixin:
                 if role != "owner" or not enabled:
                     active_owners = conn.execute(
                         "SELECT COUNT(*) FROM users "
-                        "WHERE role='owner' AND enabled=1").fetchone()[0]
+                        "WHERE role='owner' AND enabled=1 AND archived_at IS NULL").fetchone()[0]
                     if active_owners <= 1:
                         raise ValueError("last_admin")
 
@@ -369,6 +371,49 @@ class DatabaseCrmModelsMixin:
         finally:
             conn.close()
 
+    async def set_user_archived(self, email: str, archived: bool, *, actor: str) -> None:
+        """Retire/restore an identity without deleting its grants, accounts or history."""
+        if not isinstance(email, str) or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()):
+            raise ValueError("email inválido")
+        if type(archived) is not bool or not isinstance(actor, str) or not actor.strip():
+            raise ValueError("Acción de archivo inválida")
+        await self._in_thread(self._set_user_archived_sync, email.strip().lower(), archived, actor.strip().lower())
+
+
+    def _set_user_archived_sync(self, email: str, archived: bool, actor: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # The existing trusted local identity has no users row. All named
+            # actors must still be enabled owners inside this transaction.
+            if actor != "owner":
+                current_actor = conn.execute("SELECT role,enabled,archived_at FROM users WHERE email=?", (actor,)).fetchone()
+                if (not current_actor or current_actor["role"] != "owner"
+                        or not current_actor["enabled"] or current_actor["archived_at"]):
+                    raise PermissionError("Solo un Admin activo puede archivar o restaurar integrantes.")
+            current = conn.execute("SELECT role,enabled,archived_at FROM users WHERE email=?", (email,)).fetchone()
+            if not current:
+                raise ValueError("user_not_found")
+            if archived and current["role"] == "owner" and current["enabled"] and not current["archived_at"]:
+                owners = conn.execute("SELECT COUNT(*) FROM users WHERE role='owner' AND enabled=1 "
+                                      "AND archived_at IS NULL").fetchone()[0]
+                if owners <= 1:
+                    raise ValueError("last_admin")
+            if archived and actor == email:
+                raise ValueError("archive_self")
+            if archived and not current["archived_at"]:
+                conn.execute("UPDATE users SET archived_at=?,enabled=0 WHERE email=?", (now_iso(), email))
+            elif not archived and current["archived_at"]:
+                # Restoration makes the identity visible, but never restores access.
+                conn.execute("UPDATE users SET archived_at=NULL,enabled=0 WHERE email=?", (email,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
     async def delete_user(self, email: str) -> bool:
         """Hard delete compatible con callers legacy; protege último owner."""
         if not isinstance(email, str):
@@ -391,7 +436,7 @@ class DatabaseCrmModelsMixin:
             if current["role"] == "owner" and current["enabled"]:
                 active_owners = conn.execute(
                     "SELECT COUNT(*) FROM users "
-                    "WHERE role='owner' AND enabled=1").fetchone()[0]
+                    "WHERE role='owner' AND enabled=1 AND archived_at IS NULL").fetchone()[0]
                 if active_owners <= 1:
                     raise ValueError("last_admin")
             conn.execute("DELETE FROM users WHERE email=? COLLATE NOCASE",

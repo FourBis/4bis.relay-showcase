@@ -5,7 +5,11 @@ import logging
 import os
 import re
 import shutil
+import stat
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -77,6 +81,56 @@ class SkillCache:
 
 _NAME_UNSAFE_RE = re.compile(r"[^a-z0-9-]+")
 
+# All in-process writers, including draft approval and browser publication,
+# share this lock. Async locks cannot protect their to_thread workers.
+_MUTATION_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
+_MUTATION_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _skill_mutation_lock(base_dir: Path, dir_name: str):
+    """Serialize a destination in this process; this is not an OS/process lock."""
+    key = os.path.normcase(str(base_dir.resolve() / dir_name))
+    with _MUTATION_LOCKS_GUARD:
+        lock, users = _MUTATION_LOCKS.get(key, (threading.RLock(), 0))
+        _MUTATION_LOCKS[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _MUTATION_LOCKS_GUARD:
+            _, users = _MUTATION_LOCKS[key]
+            if users == 1:
+                del _MUTATION_LOCKS[key]
+            else:
+                _MUTATION_LOCKS[key] = (lock, users - 1)
+
+
+def _plain_entry(path: Path, *, directory: bool = False) -> bool:
+    """Check the entry itself, including dangling links and Windows junctions."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if (stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))):
+        raise ValueError("la skill contiene un enlace o una entrada no regular")
+    return True
+
+
+def _write_text_atomic(target: Path, content: str) -> None:
+    """An incomplete write never replaces the current SKILL.md/backup."""
+    fd, temporary = tempfile.mkstemp(prefix=".skill-write-", dir=target.parent)
+    staged = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as writer:
+            writer.write(content)
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+
 def sanitize_skill_name(name: str) -> str:
     """Normaliza a kebab-case seguro para nombre de carpeta.
 
@@ -137,13 +191,28 @@ def write_skill_sync(
     safe = sanitize_skill_name(name)
     if not safe:
         raise ValueError(f"nombre de skill inválido: {name!r}")
+    base_dir = base_dir.resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
     target = base_dir / safe / "SKILL.md"
-    if target.exists() and not overwrite:
-        raise FileExistsError(str(target))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_skill_md(safe, description, content,
-                                      frontmatter_extra=frontmatter_extra),
-                      encoding="utf-8")
+    with _skill_mutation_lock(base_dir, safe):
+        exists = _plain_entry(target.parent, directory=True)
+        if exists and not overwrite:
+            raise FileExistsError(str(target))
+        # mkdir(exist_ok=False) also refuses an external creator that appeared
+        # after our check; we do not replace its directory on a no-overwrite call.
+        if not exists:
+            target.parent.mkdir()
+        _plain_entry(target)
+        try:
+            _write_text_atomic(target, render_skill_md(
+                safe, description, content, frontmatter_extra=frontmatter_extra))
+        except BaseException:
+            if not exists:
+                try:
+                    target.parent.rmdir()  # only our still-empty reservation
+                except OSError:
+                    pass
+            raise
     return target
 
 def list_skills_sync(base_dir: Path) -> list[dict]:
@@ -245,22 +314,32 @@ def overwrite_skill_sync(
     Devuelve True si escribió, None si la skill no existe (o el nombre
     es sospechoso: `_safe_skill_dir` valida el path traversal).
     """
+    base_dir = base_dir.resolve()
     target = _safe_skill_dir(base_dir, dir_name)
-    if target is None or not target.is_dir():
+    if target is None:
         return None
-    skill_md = target / "SKILL.md"
-    if not skill_md.is_file():
-        return None
-    shutil.copy2(skill_md, skill_md.with_suffix(".md.bak"))
-    skill_md.write_text(content, encoding="utf-8")
+    with _skill_mutation_lock(base_dir, dir_name):
+        if not _plain_entry(target, directory=True):
+            return None
+        skill_md = target / "SKILL.md"
+        if not _plain_entry(skill_md):
+            return None
+        backup = skill_md.with_suffix(".md.bak")
+        _plain_entry(backup)
+        _write_text_atomic(backup, skill_md.read_text(encoding="utf-8"))
+        _write_text_atomic(skill_md, content)
     return True
 
 def delete_skill_sync(base_dir: Path, dir_name: str) -> bool:
     """Borra el directorio entero de la skill. True si existía y borró."""
+    base_dir = base_dir.resolve()
     target = _safe_skill_dir(base_dir, dir_name)
-    if target is None or not target.is_dir():
+    if target is None:
         return False
-    shutil.rmtree(target)
+    with _skill_mutation_lock(base_dir, dir_name):
+        if not _plain_entry(target, directory=True):
+            return False
+        shutil.rmtree(target)
     return True
 
 SKILL_STATES = ("auto", "manual", "off")
@@ -272,6 +351,19 @@ def skill_state(s: Skill) -> str:
     return "manual" if s.manual else "auto"
 
 def _set_frontmatter_keys(skill_md: Path, keys: dict[str, str]) -> bool:
+    """Update a published skill under the same lock as install/edit/delete."""
+    base_dir = skill_md.parent.parent.resolve()
+    dir_name = skill_md.parent.name
+    target = _safe_skill_dir(base_dir, dir_name)
+    if target is None or skill_md.name != "SKILL.md":
+        return False
+    with _skill_mutation_lock(base_dir, dir_name):
+        if not _plain_entry(target, directory=True) or not _plain_entry(target / "SKILL.md"):
+            return False
+        return _rewrite_frontmatter(target / "SKILL.md", keys)
+
+
+def _rewrite_frontmatter(skill_md: Path, keys: dict[str, str]) -> bool:
     """Reescribe `key: value` en el frontmatter. True si aplicó.
 
     Toca SOLO esas líneas (o las agrega al final del bloque `---`): el
@@ -297,7 +389,7 @@ def _set_frontmatter_keys(skill_md: Path, keys: dict[str, str]) -> bool:
             block = block.rstrip("\n") + f"\n{key}: {value}"
     new_text = text[:m.start(1)] + block + text[m.end(1):]
     try:
-        skill_md.write_text(new_text, encoding="utf-8")
+        _write_text_atomic(skill_md, new_text)
     except OSError:
         return False
     return True

@@ -7,6 +7,7 @@ espaldas de posibles cambios que el usuario haya movido.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -50,6 +51,33 @@ async def _git(repo: str | Path, *args: str, check: bool = True) -> str:
     return await asyncio.to_thread(_run_git, repo, *args, check=check, env=env)
 
 
+def _run_git_bytes(
+    repo: str | Path, *args: str, input_data: bytes | None = None,
+    check: bool = True,
+) -> bytes | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args], input=input_data,
+            capture_output=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TaskWorkspaceError(
+            "la operación Git excedió el límite de 60 segundos") from exc
+    if check and proc.returncode:
+        detail = (proc.stderr or proc.stdout or b"git fallo").decode(
+            "utf-8", errors="replace").strip()[-500:]
+        raise TaskWorkspaceError(f"git {' '.join(args[:2])}: {detail}")
+    return proc.stdout if proc.returncode == 0 else None
+
+
+async def _git_bytes(
+    repo: str | Path, *args: str, input_data: bytes | None = None,
+    check: bool = True,
+) -> bytes | None:
+    return await asyncio.to_thread(
+        _run_git_bytes, repo, *args, input_data=input_data, check=check)
+
+
 async def _persist(db: Any, conv_id: str, **fields: Any) -> dict:
     return await db.update_conversation_task(conv_id, **fields)
 
@@ -88,11 +116,17 @@ async def _worktrees(repo: str | Path) -> list[dict[str, str]]:
     return rows
 
 
-async def _strict_develop_guard(source: Path) -> tuple[str, str]:
+async def _strict_develop_guard(
+    source: Path, *, allow_source_changes: bool = False,
+    source_snapshot: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     """Fetch + validación estricta y fast-forward de develop."""
     root = await _git(source, "rev-parse", "--show-toplevel", check=False)
     if not root or _norm(root) != _norm(source):
         raise TaskWorkspaceError("repo_path no es la raíz exacta de un repositorio Git")
+    if allow_source_changes:
+        if not source_snapshot:
+            raise TaskWorkspaceError("faltan cambios locales capturados para importar")
     try:
         await _git(source, "fetch", "origin")
     except TaskWorkspaceError as exc:
@@ -103,7 +137,12 @@ async def _strict_develop_guard(source: Path) -> tuple[str, str]:
     if not local or not remote:
         raise TaskWorkspaceError("faltan develop local u origin/develop")
 
-    if not await _status_clean(source):
+    if allow_source_changes:
+        current_snapshot = await _local_changes_snapshot(source)
+        if source_snapshot != current_snapshot:
+            raise TaskWorkspaceError(
+                "los cambios locales cambiaron durante fetch; vuelve a revisar antes de importar")
+    elif not await _status_clean(source):
         raise TaskWorkspaceError("el checkout actual tiene cambios staged, tracked o untracked")
 
     develop_tree: Path | None = None
@@ -140,8 +179,41 @@ async def _strict_develop_guard(source: Path) -> tuple[str, str]:
     return local, remote
 
 
+async def _local_changes_snapshot(source: Path) -> dict[str, Any]:
+    branch = await _git(source, "symbolic-ref", "--quiet", "--short", "HEAD",
+                        check=False)
+    if not branch:
+        raise TaskWorkspaceError("no se importan cambios desde HEAD detached")
+    if branch.casefold() in {"develop", "master"}:
+        raise TaskWorkspaceError("no se importan cambios desde ramas develop o master")
+    untracked = await _git_bytes(
+        source, "ls-files", "--others", "--exclude-standard", "-z")
+    if untracked:
+        raise TaskWorkspaceError("hay archivos untracked; no se importan cambios locales")
+    conflicts = await _git_bytes(source, "ls-files", "--unmerged", "-z")
+    if conflicts:
+        raise TaskWorkspaceError("hay conflictos Git sin resolver; no se importan cambios locales")
+    head = await _git(source, "rev-parse", "HEAD")
+    patch = await _git_bytes(source, "diff", "--binary", "--full-index", "HEAD")
+    if not patch:
+        raise TaskWorkspaceError("no hay cambios tracked que importar")
+    raw_files = await _git_bytes(source, "diff", "--name-only", "-z", "HEAD")
+    try:
+        files = sorted(item.decode("utf-8") for item in raw_files.split(b"\0") if item)
+    except UnicodeDecodeError as exc:
+        raise TaskWorkspaceError("un nombre de archivo no es UTF-8 válido") from exc
+    return {
+        "source_branch": branch,
+        "source_head": head,
+        "files": files,
+        "patch": patch,
+        "patch_sha256": hashlib.sha256(patch).hexdigest(),
+    }
+
+
 async def initialize_task(
-    db: Any, project: dict, conv_id: str, *, read_only: bool = False, promote: bool = False,
+    db: Any, project: dict, conv_id: str, *, read_only: bool = False,
+    promote: bool = False, import_local_changes: bool = False,
 ) -> dict:
     """Serializa el único aprovisionamiento permitido por conversación."""
     locks = getattr(db, "_task_workspace_init_locks", None)
@@ -153,7 +225,8 @@ async def initialize_task(
     async with lock:
         try:
             return await _initialize_task(
-                db, project, conv_id, read_only=read_only, promote=promote)
+                db, project, conv_id, read_only=read_only, promote=promote,
+                import_local_changes=import_local_changes)
         except Exception as exc:
             task = await db.get_conversation_task(conv_id)
             # Sólo un fallo anterior a la intención Git es reintentable. Si
@@ -168,8 +241,28 @@ async def initialize_task(
             raise
 
 
+async def initialize_no_checkout(db: Any, project: dict, conv_id: str) -> dict:
+    """Persist an explicit new read-only chat without reserving a Git tree."""
+    current = await db.get_project(project["slug"])
+    if not current or not current.get("enabled"):
+        raise TaskWorkspaceError("el proyecto fue deshabilitado o eliminado")
+    repo = current.get("repo_path") or ""
+    if not repo or not Path(repo).is_dir():
+        raise TaskWorkspaceError("el proyecto no tiene un directorio existente")
+    task = await db.get_conversation_task(conv_id)
+    if (task.get("no_checkout") is True and task.get("mode") == "read_only"
+            and task.get("read_only") is True):
+        return task
+    if task.get("mode") or task.get("source_repo") or task.get("workspace_path"):
+        raise TaskWorkspaceError("la conversación ya tiene una identidad de workspace")
+    return await _persist(db, conv_id, mode="read_only", no_checkout=True,
+        read_only=True, requested_read_only=True, publish_allowed=False,
+        tracking={"enabled": False}, state="ready", workspace_state="not_applicable", workspace_error="")
+
+
 async def _initialize_task(
-    db: Any, project: dict, conv_id: str, *, read_only: bool = False, promote: bool = False,
+    db: Any, project: dict, conv_id: str, *, read_only: bool = False,
+    promote: bool = False, import_local_changes: bool = False,
 ) -> dict:
     """Crea una sola vez el workspace de ``conv_id`` y persiste su estado."""
     existing = await db.get_conversation_task(conv_id)
@@ -178,6 +271,12 @@ async def _initialize_task(
     upgrading = promote and existing.get("mode") == "read_only" and not read_only
     if upgrading:
         _safe_task_paths(db, project, conv_id, existing)
+    if import_local_changes and (
+            read_only or promote or not existing.get("creation_failed")
+            or existing.get("mode") or existing.get("source_repo")
+            or existing.get("workspace_path")):
+        raise TaskWorkspaceError(
+            "la importación sólo aplica a una creación fallida sin workspace")
     # task_json también guarda autorización/rol antes de provisionar. Sólo
     # mode+raíces significan que ya hubo una intención de workspace.
     if not upgrading and (existing.get("mode") or existing.get("source_repo")
@@ -188,9 +287,16 @@ async def _initialize_task(
             return await _persist(db, conv_id, state="ready")
         return inspected
 
-    source = Path(project.get("repo_path") or "").resolve()
+    if not project.get("repo_path"):
+        raise TaskWorkspaceError("el proyecto no tiene un repo_path existente")
+    source = Path(project["repo_path"]).resolve()
     if not source.is_dir():
         raise TaskWorkspaceError("el proyecto no tiene un repo_path existente")
+    from . import git_flow
+    if not await git_flow.is_git_repo(str(source)):
+        # This is an explicit initialization, not an inferred migration of an
+        # old empty task_json encountered by a reader or a background poller.
+        return await initialize_no_checkout(db, project, conv_id)
     task_id = _task_uuid(conv_id)
     if read_only:
         head = await _ref(source, "HEAD")
@@ -202,7 +308,11 @@ async def _initialize_task(
             requested_read_only=True, read_only=True,
         )
 
-    head, remote = await _strict_develop_guard(source)
+    source_snapshot = (await _local_changes_snapshot(source)
+                       if import_local_changes else None)
+    head, remote = await _strict_develop_guard(
+        source, allow_source_changes=import_local_changes,
+        source_snapshot=source_snapshot)
     origin_url = await _git(source, "remote", "get-url", "origin")
     branch = f"codex/task-{task_id}"
     workspace = _workspace_path(db, task_id)
@@ -214,6 +324,10 @@ async def _initialize_task(
 
     # La intención va primero: si el proceso cae durante worktree add, el
     # reinicio bloquea y conserva evidencia en vez de recrear.
+    local_changes = ({key: value for key, value in source_snapshot.items()
+                      if key != "patch"}
+                     | {"preserved": True, "already_integrated": False}
+                     if source_snapshot else None)
     await _persist(
         db, conv_id, mode="write", state="provisioning",
         workspace_state="provisioning", workspace_error="",
@@ -221,12 +335,25 @@ async def _initialize_task(
         head_sha=head, remote_sha=remote, origin_url=origin_url, error="",
         creation_failed=False,
         requested_read_only=False, read_only=False,
+        **({"local_changes": local_changes} if local_changes else {}),
     )
     workspace.parent.mkdir(parents=True, exist_ok=True)
     try:
         await _git(source, "worktree", "add", "-b", branch,
                    str(workspace), "develop")
         await _validate_identity(source, workspace, branch)
+        if source_snapshot:
+            patch = source_snapshot["patch"]
+            reverse = await _git_bytes(
+                workspace, "apply", "--reverse", "--check", "-",
+                input_data=patch, check=False)
+            if reverse is not None:
+                local_changes["already_integrated"] = True
+                await _persist(db, conv_id, local_changes=local_changes)
+            else:
+                await _git_bytes(workspace, "apply", "--check", "-",
+                                 input_data=patch)
+                await _git_bytes(workspace, "apply", "-", input_data=patch)
     except Exception as exc:
         await _persist(db, conv_id, state="blocked", error=str(exc),
                        workspace_state="blocked", workspace_error=str(exc))
@@ -293,6 +420,10 @@ async def inspect_workspace(
     task = await db.get_conversation_task(conv_id)
     if not task:
         return {"state": "missing", "error": "conversación sin task_json"}
+    if task.get("no_checkout") is True:
+        if task.get("mode") != "read_only" or task.get("read_only") is not True:
+            raise TaskWorkspaceError("identidad sin checkout inválida")
+        return task
     if task.get("mode") == "external_pr":
         return task
     if task.get("creation_failed") and not task.get("mode"):
@@ -363,6 +494,17 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
     task = await db.get_conversation_task(conv_id)
     if not task:
         return dict(project)
+    if task.get("no_checkout") is True:
+        if task.get("mode") != "read_only" or task.get("read_only") is not True:
+            raise TaskWorkspaceError("identidad sin checkout inválida")
+        current = await db.get_project(project["slug"])
+        if not current or not current.get("enabled"):
+            raise TaskWorkspaceError("el proyecto fue deshabilitado o eliminado")
+        repo = current.get("repo_path") or ""
+        if not repo or not Path(repo).is_dir():
+            raise TaskWorkspaceError("el directorio del proyecto ya no está disponible")
+        return {**current, "_task_id": conv_id, "_task_mode": "read_only",
+                "defaults_json": {**(current.get("defaults_json") or {}), "read_only": True}}
     if task.get("mode") == "external_pr":
         raise TaskWorkspaceError("Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.")
     task = await inspect_workspace(db, project, conv_id)
@@ -377,6 +519,8 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
     defaults = dict(resolved.get("defaults_json") or {})
     if task.get("mode") == "read_only":
         defaults["read_only"] = True
+    if task.get("mcp_private"):
+        defaults.update(mcp_private=True, read_only=True, sql_tools=False, native_shell=False)
     resolved["defaults_json"] = defaults
     return resolved
 

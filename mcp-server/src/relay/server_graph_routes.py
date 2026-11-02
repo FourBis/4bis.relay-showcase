@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from typing import Optional
 
 from aiohttp import web
@@ -19,6 +19,65 @@ from .server_graph_helpers import (
     _PLANIFICANDO, _cancelar_grafo, _grafo_en_curso, _grafo_publico, _grafo_sintetico, _largar_grafo,
     _finish_graph_cancel, _graph_control_lock, _stages_de,
 )
+
+
+def _graph_verifier_enabled(project):
+    return bool(project and project.get("enabled", True)
+                and (project.get("defaults_json") or {}).get("graph_verifier", True))
+
+
+async def _graph_public_with_policy(db, graph):
+    project = await db.get_project(graph.get("project_slug") or "")
+    return _grafo_publico(graph, verifier_enabled=_graph_verifier_enabled(project))
+
+
+async def _graph_read_response(request, *, graph=None, conversation_id="", payload=None,
+                               shape="item", with_running=False, status=200):
+    """Authorize the final response and its verifier policy in one snapshot."""
+    from . import conversation_access
+    db, actor = request.app[DB_KEY], identity.requester(request)
+    def snapshot(conn):
+        user = conversation_access.user_tx(conn, actor)
+        if not user:
+            raise PermissionError("Grafo no disponible")
+        if conversation_id:
+            conversation_access.require_tx(conn, conversation_id, actor, "read")
+        if graph is None:
+            return None
+        current = conn.execute(
+            "SELECT conversation_id,project_slug FROM task_graphs WHERE id=?",
+            (graph["id"],)).fetchone()
+        if (not current
+                or (current["conversation_id"] or "") != (graph.get("conversation_id") or "")
+                or current["project_slug"] != graph.get("project_slug")):
+            raise PermissionError("El origen del grafo cambió")
+        cid = current["conversation_id"] or ""
+        if conversation_id and cid != conversation_id:
+            raise PermissionError("El grafo pertenece a otra conversación")
+        if cid:
+            conversation_access.require_tx(conn, cid, actor, "read")
+        elif user.get("role") != "owner":
+            # Historical graphs without a conversation retain administrative
+            # access; a graph ID or its project never grants a member access.
+            raise PermissionError("Grafo no disponible")
+        row = conn.execute("SELECT * FROM projects WHERE slug=? COLLATE NOCASE",
+                           (current["project_slug"],)).fetchone()
+        project = db._parse_project(dict(row)) if row else None
+        return _grafo_publico(graph, verifier_enabled=_graph_verifier_enabled(project))
+    try:
+        view = await conversation_access.transaction(db, snapshot)
+    except PermissionError:
+        return web.json_response({"error": "not found"}, status=404,
+                                 headers={"Cache-Control": "no-store"})
+    # No await follows the final ACL/policy snapshot, including live flags.
+    if graph is not None:
+        if with_running:
+            view["corriendo"] = bool(_grafo_en_curso(request.app, graph["id"]))
+        payload = ({"modo": "grafo", "grafo": view} if shape == "plan"
+                   else {"graph": view} if shape == "list" else view)
+    return web.json_response(payload, status=status, headers={"Cache-Control": "no-store"})
+
+
 @_require_auth
 @coordination.guard_workspace(DB_KEY)
 async def graphs_create(request: web.Request) -> web.Response:
@@ -175,12 +234,8 @@ async def conversation_plan(request: web.Request) -> web.Response:
     db = request.app[DB_KEY]
     conv_id = request.match_info["id"]
     if await db.get_conversation(conv_id) is None:
-        return web.json_response({"error": "not found"}, status=404)
-
-    def _grafo(g: dict, corriendo: bool) -> web.Response:
-        salida = _grafo_publico(g)
-        salida["corriendo"] = corriendo
-        return web.json_response({"modo": "grafo", "grafo": salida})
+        return await _graph_read_response(request, conversation_id=conv_id,
+                                          payload={"error": "not found"}, status=404)
 
     # El grafo del hilo —el vivo si hay, si no el último— gana **mientras
     # siga siendo lo que está pasando**.
@@ -203,7 +258,8 @@ async def conversation_plan(request: web.Request) -> web.Response:
         vivo = bool(_grafo_en_curso(request.app, g["id"]))
         if vivo or not await db.hay_turnos_humanos_despues(
                 conv_id, g.get("updated_at") or g.get("created_at") or ""):
-            return _grafo(g, vivo)
+            return await _graph_read_response(request, graph=g, conversation_id=conv_id,
+                                              shape="plan", with_running=True)
 
     # Sin grafo real (o con uno ya superado): un nodo por turno,
     # encadenado (Etapa A, P1). Si hay un run "running" en el hilo,
@@ -240,7 +296,8 @@ async def conversation_plan(request: web.Request) -> web.Response:
         chats_para_grafo, corriendo=corriendo, expandir_pasos=hay_markers,
         preguntas_por_chat={(c.get("id") or ""): (c.get("id") or "")
                             in con_pregunta for c in chats_para_grafo})
-    return web.json_response({"modo": "grafo", "grafo": salida})
+    return await _graph_read_response(request, conversation_id=conv_id,
+                                      payload={"modo": "grafo", "grafo": salida})
 
 
 
@@ -250,10 +307,8 @@ async def graphs_get(request: web.Request) -> web.Response:
     db = request.app[DB_KEY]
     g = await db.get_task_graph(request.match_info["id"])
     if g is None:
-        return web.json_response({"error": "not found"}, status=404)
-    salida = _grafo_publico(g)
-    salida["corriendo"] = bool(_grafo_en_curso(request.app, request.match_info["id"]))
-    return web.json_response(salida)
+        return await _graph_read_response(request, payload={"error": "not found"}, status=404)
+    return await _graph_read_response(request, graph=g, with_running=True)
 
 
 @_require_auth
@@ -265,8 +320,8 @@ async def graphs_list(request: web.Request) -> web.Response:
         return web.json_response({"error": "mandá `conversation`"}, status=400)
     g = await db.active_task_graph(conv)
     if g is None:
-        return web.json_response({"graph": None})
-    return web.json_response({"graph": _grafo_publico(g)})
+        return await _graph_read_response(request, conversation_id=conv, payload={"graph": None})
+    return await _graph_read_response(request, graph=g, conversation_id=conv, shape="list")
 
 
 @_require_auth
@@ -306,8 +361,8 @@ async def _resume_with_workspace(request: web.Request) -> web.Response:
 async def _resume_graph(request: web.Request) -> web.Response:
     """POST /graphs/{id}/resume — retoma un grafo cortado.
 
-    Reabre cortes de presupuesto mediante esta acción explícita. Un grafo
-    ya corriendo o sin trabajo ejecutable devuelve 409 sin relanzarlo.
+    Sana las ejecuciones interrumpidas y reabre los cortes por presupuesto o desvío
+    al recibir esta acción explícita. Un grafo vivo devuelve 409.
     """
     db = request.app[DB_KEY]
     graph_id = request.match_info["id"]
@@ -324,21 +379,68 @@ async def _resume_graph(request: web.Request) -> web.Response:
             {"error": f"el proyecto {g.get('project_slug')!r} ya no existe"},
             status=409)
     from . import task_service
-    conv_id = g.get("conversation_id")
-    state = await db.get_conversation_task(conv_id) if conv_id else {}
-    if not await identity.can_control_graph(request, db, g):
-        return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
-    if state.get("state") in task_service.STOPPED:
-        return web.json_response(
-            {"error": "La tarea está detenida; continúa desde sus controles",
-             "graph_id": graph_id}, status=409)
-    from .orchestrator_recovery import prepare_graph_resume
-    await prepare_graph_resume(db, g)
+
+    async def control_denial(graph):
+        if not await identity.can_control_graph(request, db, graph):
+            return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
+        cid = graph.get("conversation_id")
+        state = await db.get_conversation_task(cid) if cid else {}
+        if (state.get("state") in task_service.STOPPED
+                or cid in getattr(db, "_task_cancellations", {})):
+            return web.json_response(
+                {"error": "La tarea está detenida; continúa desde sus controles",
+                 "graph_id": graph_id}, status=409)
+        # Cancellation reserves its marker before waiting for this graph lock.
+        # Recheck after await-heavy ACL/state/repair work, not only on entry.
+        if _grafo_en_curso(request.app, graph_id):
+            return web.json_response(
+                {"error": "ese grafo ya está corriendo o cerrándose", "graph_id": graph_id}, status=409)
+
+    denial = await control_denial(g)
+    if denial is not None:
+        return denial
+    # A legacy cancelled/failed graph can contain an exhausted pending node.
+    # Heal under the existing conversation/workspace/graph controls BEFORE
+    # eligibility, so it can expose its question without granting an attempt.
+    repair = asyncio.create_task(orquestador.sanar(db, graph_id))
+    try:
+        await asyncio.shield(repair)
+    except asyncio.CancelledError:
+        # Keep the controls until waiting-state AND question have settled.
+        while not repair.done():
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(repair)
+        with suppress(asyncio.CancelledError, Exception):
+            repair.result()
+        raise
     g = await db.get_task_graph(graph_id)
+    if g is None:
+        return web.json_response({"error": "not found"}, status=404)
+    denial = await control_denial(g)
+    if denial is not None:
+        return denial
     from . import grafo as G
+    from .orchestrator_recovery import prepare_graph_resume
+    from .orchestrator_verification import verification_pending, metadata_close_pending
+    verifier_enabled = _graph_verifier_enabled(project)
+
+    def closing_only(graph):
+        return (verification_pending(graph, verifier_enabled=verifier_enabled)
+                or metadata_close_pending(graph, verifier_enabled=verifier_enabled))
+
+    verification_only = closing_only(g)
+    # A proven final check never grants attempts to budget-failed nodes or
+    # enters the normal correction scheduler. Preserve normal Retomar otherwise.
+    if not verification_only:
+        await prepare_graph_resume(db, g)
+    g = await db.get_task_graph(graph_id)
+    if g is None:
+        return web.json_response({"error": "not found"}, status=404)
     nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in g["tasks"]]
-    verification_pending = G.estado_visible(nodes, g["estado"]) == "verificacion_pendiente"
-    if (not verification_pending and not G.listas(nodes)
+    if verification_only and not closing_only(g):
+        return web.json_response({"error": "El cierre cambió; revisa el plan antes de retomarlo.",
+                                  "graph_id": graph_id}, status=409)
+    if (not verification_only and not G.listas(nodes)
             and not any(n.estado == G.CORRIENDO for n in nodes)):
         reason = ("Responde la pregunta pendiente antes de retomar."
                   if any(n.estado == G.ESPERANDO for n in nodes)
@@ -347,12 +449,19 @@ async def _resume_graph(request: web.Request) -> web.Response:
                   else "El plan ya terminó.")
         return web.json_response({"error": "No hay tareas que se puedan retomar. " + reason,
                                   "graph_id": graph_id}, status=409)
+    denial = await control_denial(g)
+    if denial is not None:
+        return denial
     # Un grafo cancelado o fallado vuelve a `activo`: retomarlo es
     # justamente decir "esto sigue". Si no, `estado_del_grafo` lo dejaría
     # como estaba y el panel mostraría un plan muerto avanzando.
     if g["estado"] != "activo":
         await db.set_task_graph_state(graph_id, "activo")
-    _largar_grafo(request.app, project, graph_id, identity.requester(request))
+        denial = await control_denial(g)
+        if denial is not None:
+            return denial
+    _largar_grafo(request.app, project, graph_id, identity.requester(request),
+                  **({"verification_only": True} if verification_only else {}))
     return web.json_response(
         _grafo_publico(await db.get_task_graph(graph_id)), status=202)
 
@@ -396,6 +505,8 @@ async def expert_questions_list(request: web.Request) -> web.Response:
         chat_id=request.query.get("chat") or None,
         only_open=only_open)
     out = []
+    from .private_mcp_access import visible_rows
+    rows = await visible_rows(request, rows, kind="question")
     for r in rows:
         try:
             pregunta = json.loads(r.get("question_json") or "{}")
@@ -552,6 +663,15 @@ async def _answer_question(request, q, graph, body):
     # la tarea.
     grafo_info = await _retomar_grafo_tras_respuesta(
         request, q, pregunta, choice, texto, etiqueta)
+    if (grafo_info is None and graph.get("id") and (
+            q.get("kind") == "grafo" and pregunta.get("graph_id") == graph["id"]
+            or q.get("chat_id") and any(t.get("chat_id") == q["chat_id"]
+                                       for t in graph.get("tasks", [])))):
+        # The answer was saved for this graph. A blocked/failed continuation
+        # must not become a generic chat prompt that the UI auto-submits.
+        grafo_info = {"graph_id": graph["id"], "decision": choice or "responder",
+                      "corriendo": False,
+                      "blocked": "Respuesta guardada; revisa el plan antes de retomarlo."}
 
     return web.json_response({
         "ok": True, "id": q_id, "answer": etiqueta,
@@ -582,7 +702,7 @@ async def _retomar_grafo_tras_respuesta(
        antes se descartaba en silencio — la tarea se reintentaba a
        ciegas y el grafo se reanudaba igual, así que no se notaba.
        Va `texto` pelado, NO `etiqueta`: pegarle al detalle de la tarea
-       "Reintentala igual" no le dice nada al run siguiente.
+       "Reinténtala igual" no le dice nada al run siguiente.
     2. **La hizo el nodo desde adentro** (`ask_human`): el humano no
        decidió nada sobre la tarea, contestó algo que la tarea
        necesitaba. Vuelve a `pendiente` con la respuesta pegada al
@@ -612,10 +732,49 @@ async def _retomar_grafo_tras_respuesta(
 
         g = await db.get_task_graph(gid)
         project = await db.get_project((g or {}).get("project_slug") or "")
-        if not g or not project or _grafo_en_curso(request.app, gid):
-            return {"graph_id": gid, "decision": decision,
-                    "corriendo": bool(_grafo_en_curso(request.app, gid))}
-        from . import identity
+        info = {"graph_id": gid, "decision": decision, "corriendo": False}
+        if not g or not project:
+            return {**info, "blocked": "El plan o su proyecto ya no está disponible."}
+
+        async def continuation_status(graph):
+            from . import task_service
+            cid = graph.get("conversation_id")
+            state = await db.get_conversation_task(cid) if cid else {}
+            # Check the central ACL after the other reads, immediately before
+            # the synchronous registry checks and eventual launch.
+            if not await identity.can_control_graph(request, db, graph):
+                return {**info, "blocked": "Ya no tienes permiso para continuar este plan."}
+            if (gid in getattr(db, "_graph_cancellations", {})
+                    or cid in getattr(db, "_task_cancellations", {})):
+                return {**info, "blocked": "La cancelación todavía está en curso."}
+            worker = request.app[GRAFOS_KEY].get(gid)
+            live = worker is not None and not worker.done() and not worker.cancelling()
+            paused_live = state.get("state") == "paused" and live
+            if state.get("state") in task_service.STOPPED and not paused_live:
+                return {**info, "blocked": "La tarea está detenida; revisa sus controles."}
+            denial = _question_actor_error(request, gid)
+            if denial is not None:
+                return {**info, "blocked": "El plan está controlado por otra persona."}
+            if worker is not None:
+                return ({**info, "corriendo": True} if live else
+                        {**info, "blocked": "El proceso anterior todavía está cerrándose."})
+
+        status = await continuation_status(g)
+        if status is not None:
+            return status
+        # The explicit answer resumes the graph as well as its node. Leaving
+        # a legacy cancelled graph cancelled skips normal final verification
+        # and masks completed work in the UI. Stop decisions returned above.
+        if g.get("estado") != "activo":
+            await db.set_task_graph_state(gid, "activo")
+            g = await db.get_task_graph(gid)
+            if g is None:
+                return {**info, "blocked": "El plan ya no está disponible."}
+            # Cancellation reserves its marker before waiting for our lock;
+            # never overtake a newer stop while activation was awaiting SQL.
+            status = await continuation_status(g)
+            if status is not None:
+                return status
         _largar_grafo(request.app, project, gid, identity.requester(request))
         return {"graph_id": gid, "decision": decision, "corriendo": True}
     except Exception:  # noqa: BLE001

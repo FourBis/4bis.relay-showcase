@@ -58,6 +58,30 @@ export function dtView(columns, state, pageSize) {
   return { slice, all, pages, page };
 }
 
+// Para tablas cuyo thead y acciones ya viven en index.html. Conserva los
+// botones y el foco entre refrescos; dtView sigue siendo la fuente de límites.
+export function updateTablePager(table, view, onPage) {
+  if (!table) return;
+  const id = `${table.id}-pager`;
+  let footer = document.getElementById(id);
+  if (!footer) {
+    footer = document.createElement("nav"); footer.id = id; footer.className = "dt-footer";
+    footer.setAttribute("aria-label", "Páginas de la lista");
+    footer.innerHTML = '<span data-page-label role="status" aria-live="polite"></span><span class="dt-pages"><button type="button" class="btn btn-xs" data-page="prev">Anterior</button><button type="button" class="btn btn-xs" data-page="next">Siguiente</button></span>';
+    (table.closest(".table-wrap") || table).after(footer);
+  }
+  const focused = document.activeElement;
+  const hadFocus = footer.contains(focused);
+  const prev = footer.querySelector('[data-page="prev"]'), next = footer.querySelector('[data-page="next"]');
+  footer.querySelector("[data-page-label]").textContent = `Página ${view.page + 1} de ${view.pages} · ${view.all.length} filas`;
+  prev.disabled = view.page <= 0; next.disabled = view.page >= view.pages - 1;
+  prev.onclick = () => { if (!prev.disabled) return onPage(view.page - 1); };
+  next.onclick = () => { if (!next.disabled) return onPage(view.page + 1); };
+  footer.hidden = view.pages <= 1;
+  if (hadFocus && footer.hidden) { table.tabIndex = -1; table.focus({preventScroll:true}); }
+  else if (hadFocus && focused.disabled) (prev.disabled ? next : prev).focus();
+}
+
 /**
  * dataTable(mount, opts) -> controlador
  *

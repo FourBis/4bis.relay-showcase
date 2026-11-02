@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 from . import shell_environment, shell_process, shell_syntax
+from .secret_redaction import redact_text
 
 logger = logging.getLogger("relay.shell")
 
@@ -79,13 +80,14 @@ async def run(
     buf = bytearray()
     drenaje = asyncio.create_task(shell_process._drain(proc.stdout, buf, shell_environment.MAX_CAPTURE_BYTES))
     timed_out = False
-    huerfano = False
+    hijo_terminado = False
     try:
-        huerfano = await asyncio.wait_for(
+        await asyncio.wait_for(
             shell_process._esperar_al_hijo(proc), timeout=timeout)
+        hijo_terminado = True
     except asyncio.TimeoutError:
         timed_out = True
-        shell_process._kill_tree(proc)
+        await shell_process._kill_tree_async(proc)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=10)
     except asyncio.CancelledError:
@@ -97,26 +99,24 @@ async def run(
         # Playwright seguían vivos horas después del run que los lanzó,
         # tomando puertos y perfiles de Chromium que hacían fallar a los
         # intentos siguientes.
-        shell_process._kill_tree(proc)
+        await shell_process._kill_tree_async(proc)
         raise
     finally:
         # El drenaje termina solo cuando el proceso cierra el pipe; si lo
         # matamos, puede quedar colgado: se le da un margen y se corta.
-        # Con `huerfano` sabemos que el pipe está en manos de un nieto y
-        # que no va a cerrar nunca: ese margen ya se pagó como
-        # `GRACIA_PIPES_S`, y esperarlo de nuevo son 10s regalados por
-        # comando (medido: 12,5s para un `Start-Process` que vuelve al
-        # prompt en menos de uno).
+        # La gracia empieza DESPUÉS de la salida del hijo y fuera de su
+        # timeout: un nieto que hereda stdout no convierte un exit válido
+        # en timeout ni agrega otros diez segundos de espera.
         try:
-            await asyncio.wait_for(drenaje, timeout=0.1 if huerfano else 10)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            drenaje.cancel()
-        if huerfano:
-            # Nuestra punta del pipe no sirve más y el proceso ya murió,
-            # así que `close()` no mata nada: solo suelta el handle. Sin
-            # esto queda un transport vivo por cada comando de estos.
-            with contextlib.suppress(Exception):
-                proc._transport.close()  # noqa: SLF001
+            await asyncio.wait_for(
+                drenaje, timeout=shell_process.GRACIA_PIPES_S if hijo_terminado else 10)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            if drenaje.cancelled():
+                # wait_for ya canceló el lector; soltar también el handle.
+                with contextlib.suppress(Exception):
+                    proc._transport.close()  # noqa: SLF001
 
     out = shell_environment._decodificar(buf)
     if len(buf) >= shell_environment.MAX_CAPTURE_BYTES:
@@ -151,6 +151,69 @@ async def run(
 #: Dónde van los logs de los procesos largados en background.
 BG_LOG_DIR = Path(os.environ.get(
     "FOURBIS_SHELL_BG_DIR", str(Path.home() / ".4bis" / "bg")))
+_BG_LOG_NAME_RE = re.compile(r"\d{8}-\d{6}-[a-z0-9][a-z0-9-]*-[a-z0-9_]{8}\.log", re.I)
+_CREATED_BACKGROUND_LOGS: set[Path] = set()
+_BACKGROUND_LOG_SNAPSHOT_BYTES = 1024 * 1024
+
+
+def is_background_log_path(path) -> bool:
+    """Classify the existing generated-log format, never authorize a read.
+
+    BG_LOG_DIR can be a project root. Containment alone or a .log suffix must
+    not turn ordinary source files into console output. This conservative
+    location/name convention also covers old logs without changing them.
+    """
+    try:
+        source = Path(path).expanduser()
+        if not source.is_absolute():
+            return False
+        canonical = source.resolve()
+        return (canonical in _CREATED_BACKGROUND_LOGS
+                or _BG_LOG_NAME_RE.fullmatch(canonical.name) is not None
+                and canonical.parent == BG_LOG_DIR.expanduser().resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def background_log_name_hint(path) -> str | None:
+    """Identify the generated filename namespace, without resolving an MCP root.
+
+    MCP paths do not establish a local file identity: stdio adapters may
+    resolve against their installation or workspace, and HTTP has no local
+    base even for absolute paths. This is only a hint to verify the returned
+    copy, never read access.
+    """
+    if not isinstance(path, str):
+        return None
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    return name if _BG_LOG_NAME_RE.fullmatch(name) else None
+
+
+def background_log_read_snapshot(path) -> str | None:
+    """Bounded verification copy from Relay's own log directory, not MCP's base.
+
+    Nothing from this snapshot is returned to a caller. A missing, replaced,
+    symlinked or oversized log cannot prove where an ambiguous read came
+    from; its returned sensitive copy must be withheld instead. Original
+    files, permissions and process output are unchanged.
+    """
+    try:
+        name = background_log_name_hint(path)
+        if is_background_log_path(path):
+            source = Path(path).expanduser()
+        elif name is not None:
+            source = BG_LOG_DIR.expanduser().resolve() / name
+        else:
+            return None
+        if source.is_symlink() or not source.is_file():
+            return None
+        with source.open("rb") as stream:
+            raw = stream.read(_BACKGROUND_LOG_SNAPSHOT_BYTES + 1)
+        if len(raw) > _BACKGROUND_LOG_SNAPSHOT_BYTES:
+            return None
+        return raw.decode("utf-8", errors="replace")
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 async def lanzar(
@@ -194,13 +257,16 @@ async def lanzar(
     BG_LOG_DIR.mkdir(parents=True, exist_ok=True)
     # Nombre por comando + reloj: dos `npm run dev` seguidos no se pisan
     # el log, y el humano puede saber cuál es cuál sin abrirlos.
-    slug = re.sub(r"[^a-z0-9]+", "-", cmd.lower())[:40].strip("-") or "cmd"
+    # The filename is persisted/displayed metadata too; never derive it from
+    # an unredacted credential-bearing command. argv still uses the original.
+    slug = re.sub(r"[^a-z0-9]+", "-", redact_text(cmd).lower())[:40].strip("-") or "cmd"
     # Creación exclusiva: dos comandos iguales en el mismo segundo no
     # deben truncar el log que el primero todavía está escribiendo.
     fd, log_name = tempfile.mkstemp(
         prefix=f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}-", suffix=".log", dir=BG_LOG_DIR)
     os.close(fd)
     log = Path(log_name)
+    _CREATED_BACKGROUND_LOGS.add(log.resolve())
 
     kwargs: dict = {}
     if shell_environment.IS_WINDOWS:
@@ -261,7 +327,9 @@ async def lanzar(
     murio = proc.poll() is not None
     cola = ""
     with contextlib.suppress(Exception):
-        cola = log.read_text(encoding="utf-8", errors="replace")[-1500:]
+        # The returned log tail is display data, not a command. Redact the
+        # complete captured text before slicing so a cut cannot drop labels.
+        cola = redact_text(log.read_text(encoding="utf-8", errors="replace"))[-1500:]
 
     if murio:
         return {"pid": proc.pid, "exit": proc.returncode, "log": str(log), "shell": kind, "out": (
@@ -316,7 +384,6 @@ from .shell_syntax import (
     _PS_RE,
     _PS_VERBOS,
     _RAICES_UNIX,
-    _RUTA_WIN_EN_CMD_RE,
     _SH_RE,
     _SINGLE_QUOTE_RE,
     _SOLO_UNIX,

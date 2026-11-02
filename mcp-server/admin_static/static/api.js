@@ -59,6 +59,9 @@ export function _dbg(...args) { if (DEBUG) console.log("[admin-ui]", ...args); }
 async function _fetch_json(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs);
+  const abortExternal = () => controller.abort();
+  opts.signal?.addEventListener("abort", abortExternal, {once:true});
+  if (opts.signal?.aborted) controller.abort();
   const t0 = performance.now();
   // 2026-07-23: si el caller pasa `body` como un object, fetch()
   // manda "[object Object]" porque no serializa solo. Antes lo
@@ -115,6 +118,7 @@ async function _fetch_json(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
     return data;
   } catch (e) {
     if (e.name === "AbortError") {
+      if (opts.signal?.aborted) throw e;
       _dbg("fetch ABORT", url, "tras", Math.round(performance.now() - t0), "ms");
       throw new Error(`timeout después de ${timeoutMs / 1000}s — `
         + `el server no respondió. Refresca la página o revisa el relay.`);
@@ -123,6 +127,7 @@ async function _fetch_json(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
     throw e;
   } finally {
     clearTimeout(tid);
+    opts.signal?.removeEventListener("abort", abortExternal);
   }
 }
 
@@ -138,7 +143,10 @@ export async function apiRoot(path, opts, timeoutMs) {
 }
 
 export function escape(s) {
-  return String(s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // También se interpola en atributos entre comillas (title, value, data-*).
+  return String(s || "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 export function formatElapsed(startedAt) {

@@ -27,6 +27,7 @@ class ExpertRunState:
     question_state: dict = field(default_factory=dict)
     recent_tool_calls: deque[str] = field(default_factory=lambda: deque(maxlen=8))
     request_limit: int = 0
+    task_request_limit: int | None = None
     task_token_limit: int | None = None
     task_usage: Any = None
     rescue: dict | None = None

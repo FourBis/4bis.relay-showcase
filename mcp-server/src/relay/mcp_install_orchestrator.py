@@ -90,6 +90,9 @@ class McpInstaller:
             verdict, report = await scan.vet_with_llm(clone_dir, findings)
             await self._set_state(job, InstallerState.VETTED,
                                   vet_verdict=verdict, vet_report=report)
+            if verdict == "rejected":
+                await self._set_state(job, InstallerState.REJECTED)
+                return
 
             # 4. Detect run command y armar la propuesta. Si el
             # detector no puede inferir, proposal.needs_manual=True
@@ -118,12 +121,13 @@ class McpInstaller:
         job = self._jobs.get(job_id)
         if job is None:
             raise KeyError(f"job {job_id!r} no existe (¿expiró?)")
-        if job.state == InstallerState.HEALTHY:
-            return job
-        if job.state == InstallerState.REJECTED:
+        # También cubre jobs antiguos que quedaron awaiting_confirm pese al veto.
+        if job.vet_verdict == "rejected" or job.state == InstallerState.REJECTED:
             raise RuntimeError("vetting rechazó el MCP; instala otro o "
                                "fuerza el install a mano desde el form "
                                "del catálogo")
+        if job.state == InstallerState.HEALTHY:
+            return job
         if job.state not in (InstallerState.AWAITING_CONFIRM,
                              InstallerState.HANDSHAKE_FAILED,
                              InstallerState.INSTALL_FAILED):

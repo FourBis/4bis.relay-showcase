@@ -25,6 +25,7 @@ from pydantic_ai import Tool
 from typing import Literal
 
 from . import shell as shell_mod
+from .secret_redaction import redact_text
 
 
 def shell_tools(*, repo: str, techo_s: float, bitacora, en_vuelo) -> list[Tool]:
@@ -85,8 +86,8 @@ def shell_tools(*, repo: str, techo_s: float, bitacora, en_vuelo) -> list[Tool]:
             # dio este pid" tiene que sobrevivir a la elisión del
             # historial, sobre todo porque después hay que bajarlo.
             bitacora.anotar_comando(
-                f"{cmd}  [background]", res["exit"])
-            return res["out"]
+                f"{redact_text(cmd)}  [background]", res["exit"])
+            return redact_text(res["out"])
         secs = float(timeout_s) if timeout_s and timeout_s > 0 else techo_s
         # El recorte existe para que el corte lo haga SIEMPRE esta
         # tool y no el toolset: el de acá mata el árbol de procesos y
@@ -105,11 +106,11 @@ def shell_tools(*, repo: str, techo_s: float, bitacora, en_vuelo) -> list[Tool]:
             res = await shell_mod.run(
                 cmd, cwd=cwd or None, base=repo, timeout=secs, shell_kind=shell_kind,
                 env_base=env_base)
-        salida = res["out"]
+        salida = redact_text(res["out"])
         # El rastro va a la bitácora ANTES de devolver: la salida se
         # va a elidir en unas cuantas llamadas más, pero "corrí esto
         # y dio exit=N" tiene que sobrevivir hasta el final del run.
-        bitacora.anotar_comando(cmd, res["exit"])
+        bitacora.anotar_comando(redact_text(cmd), res["exit"])
         # Si falta una herramienta, el hint le dice al modelo que
         # pregunte en vez de improvisar una instalación.
         if res["exit"] != 0:

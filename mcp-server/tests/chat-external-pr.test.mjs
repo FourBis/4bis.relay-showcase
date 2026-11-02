@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 globalThis.escape = value => String(value || "").replace(/[&<>]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]);
 globalThis.emptyState = ({title,sub}) => `<div>${escape(title)} ${escape(sub)}</div>`;
+const reviewSource = readFileSync(new URL("../admin_static/static/chat-external-review.js",import.meta.url),"utf8").replace(/^import .*$/gm,"");
+Object.assign(globalThis,await import("data:text/javascript,"+encodeURIComponent(reviewSource)));
 const source = readFileSync(new URL("../admin_static/static/chat-external-pr.js",import.meta.url),"utf8")
   .replace(/^import .*$/gm,"");
 const {externalStateLabel,externalPanelHtml,externalEvidencePayload,openExternalRegistration} = await import("data:text/javascript,"+encodeURIComponent(source));
@@ -74,6 +76,7 @@ globalThis.api = async path => {
 globalThis.field = ({control}) => control;
 globalThis.formSection = ({body}) => body;
 globalThis.issuePickerHtml = () => '';
+globalThis.repositoryPickerHtml = () => '';
 globalThis.modalLoad = async ({loader,render}) => {
   const html = render(await loader());
   assert.match(html, /value="eligible"/);

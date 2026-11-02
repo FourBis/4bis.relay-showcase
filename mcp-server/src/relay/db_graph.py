@@ -433,6 +433,39 @@ class DatabaseGraphMixin:
         await self.run("DELETE FROM task_file_claims WHERE task_id=?",
                        (task_id,))
 
+    async def rollback_task_admission(self, task_id: str, graph_id: str, *,
+                                      started_at: str, before: dict) -> bool:
+        """Refund only this provisional attempt, before an executor exists.
+
+        A cancelled SQLite await may already have committed. Match the exact
+        admission token and unchanged result ownership, and release its claims
+        in the same transaction. Never undo a newer/terminal task or its lease.
+        """
+        def work():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                changed = conn.execute(
+                    "UPDATE tasks SET estado='pendiente',intentos=?,started_at=? "
+                    "WHERE id=? AND graph_id=? AND estado='corriendo' "
+                    "AND intentos=? AND started_at=? AND chat_id IS ? AND resultado IS ?",
+                    (before["intentos"], before.get("started_at"), task_id, graph_id,
+                     before["intentos"] + 1, started_at, before.get("chat_id"),
+                     before.get("resultado", ""))).rowcount
+                if changed:
+                    conn.execute("DELETE FROM task_file_claims WHERE task_id=? AND graph_id=?",
+                                 (task_id, graph_id))
+                    conn.execute("UPDATE task_graphs SET updated_at=? WHERE id=?",
+                                 (now_iso(), graph_id))
+                conn.commit()
+                return bool(changed)
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        return await self._in_thread(work)
+
     async def files_claimed_by_others(self, task_id: str) -> set:
         """Archivos tomados por OTRA tarea viva. Va a `Permisos.reservadas`.
 

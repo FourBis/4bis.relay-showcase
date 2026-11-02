@@ -1,5 +1,13 @@
 # FourBis Relay
 
+This branch prepares a reviewable local extension: conversation sharing,
+recovery of uncertain requests, optional external PR review, account archival,
+and personal MCP consultations scoped to a project. The
+[parity receipt](docs/qa/parity-2026-11-01.md) separates code, demo, and pending
+validation. It does not establish remote integration or deployment. The demo
+changes on this branch use synthetic data; the published URL may still show
+an earlier version.
+
 [Español](README.md) · **English** · [Interactive demo](https://fourbis.github.io/4bis.relay-showcase/) · [Setup](docs/SETUP.md)
 
 ## Your team, repositories, and AI working on the same project
@@ -22,7 +30,7 @@ The [public demo](https://fourbis.github.io/4bis.relay-showcase/) recreates part
 |---|---|
 | Implemented in public code | The [capability map](docs/CAPABILITY_MAP.md) links modules, conditions, and limits. Not every integration is configured by default. |
 | Integrated into `develop` | [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) added external PR registration and optional issue synchronization; [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrected concurrent observations. Code integration does not establish deployment. |
-| Demonstrated in the browser | All five scenarios use synthetic data, without models, GitHub, or a backend. The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) records the local checks. |
+| Demonstrated in the browser | The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) checked the five scenarios in that version. This branch adds a sixth scenario, Models and inbox, with static review only; it has no new browser validation. All scenarios use synthetic data, without models, GitHub, or a backend. |
 | Available in an instance | This depends on the installed version, permissions, and configuration. This review does not establish a connected deployment or operational availability of external PR registration. |
 
 ## Explore Relay
@@ -370,3 +378,24 @@ The documented installation targets Windows. Validation with simulated providers
 If you try a workflow, an [issue](https://github.com/FourBis/4bis.relay-showcase/issues) with the request, expected result, observed result, and version helps improve Relay. See [CONTRIBUTING.md](CONTRIBUTING.md) for changes.
 
 FourBis · Jeremías Badilla. Code under the [MIT License](LICENSE); see [third-party notices](THIRD_PARTY_NOTICES.md).
+
+The [November 1 maintenance candidate](docs/qa/maintenance-2026-11-01.md)
+records local UI, safety and continuity fixes, exclusions and static review.
+It does not establish publication or deployment; functional and visual
+validation remain pending.
+
+## Features in the parity candidate
+
+The Spanish guides cover [conversation access](docs/CONVERSATION_ACCESS.md),
+[uncertain requests](docs/REQUEST_RECOVERY.md),
+[external PR review](docs/EXTERNAL_REVIEW.md),
+[account archival](docs/TEAM_ACCESS.md),
+[personal MCP consultations](docs/GENERIC_MCP.md),
+[durable recovery](docs/DURABLE_RECOVERY.md),
+[local deployment receipts](docs/DEPLOYMENT_RECEIPTS.md), and the
+[synthetic demo](docs/DEMO.md).
+
+Existing attachments and external PR PNG evidence are separate workflows.
+This batch does not include native image generation or editing, audio/video
+generation, or the later review of that interface. No browser, application,
+provider, or test suite was run for this candidate.

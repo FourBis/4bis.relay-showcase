@@ -5,6 +5,7 @@ las entradas históricas que usan la API HTTP, el disparador y los tests.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from . import config
@@ -55,7 +56,8 @@ logger = logging.getLogger("relay.orquestador")
 
 
 async def lanzar(db, project: dict, graph_id: str, *, tope: int = 0,
-                 on_cambio=None, progreso_de=None) -> dict:
+                 on_cambio=None, progreso_de=None,
+                 verification_only: bool = False) -> dict:
     """Corre un grafo ya guardado con el reparto real de modelos."""
     defaults = project.get("defaults_json") or {}
     # `tope=0` = decidilo vos. Serial salvo que el proyecto se haga
@@ -67,13 +69,47 @@ async def lanzar(db, project: dict, graph_id: str, *, tope: int = 0,
     g = await db.get_task_graph(graph_id)
     if g is None:
         raise ValueError(f"no existe el grafo {graph_id}")
+
+    def record_verifier_policy(enabled):
+        worker = asyncio.current_task()
+        if worker is not None:
+            worker.relay_verifier_enabled = enabled
+            owner = getattr(worker, "relay_graph_owner", None)
+            if owner is not None:
+                owner.relay_verifier_enabled = enabled
+
+    if verification_only:
+        # Workspace resolution can await after route admission. Respect a
+        # verifier toggle/spec change made in that interval, while retaining
+        # the resolved workspace and its technical restrictions.
+        record_verifier_policy(False)
+        actual = await db.get_project(project.get("slug") or g.get("project_slug") or "")
+        if not actual or not actual.get("enabled"):
+            raise PermissionError("El proyecto ya no está disponible para verificar")
+        defaults = dict(defaults)
+        actual_defaults = actual.get("defaults_json") or {}
+        for key in ("graph_verifier", "verifier_model"):
+            if key in actual_defaults:
+                defaults[key] = actual_defaults[key]
+            else:
+                defaults.pop(key, None)
+        project = {**project, "defaults_json": defaults}
+    enabled = bool(defaults.get("graph_verifier", True))
+    record_verifier_policy(enabled)
     # PRENDIDO por default. Un interruptor que arranca apagado es una
     # feature que nadie corre: `skills_mode: "compact"` lleva meses en el
     # código y ningún proyecto lo tiene seteado. Quien no quiera pagar el
     # turno pone `graph_verifier: false` en su `defaults_json`.
     verificar = (verificador_del_grafo(
         project, modelo=defaults.get("verifier_model") or "")
-        if defaults.get("graph_verifier", True) else None)
+        if enabled else None)
+    if verification_only:
+        async def no_node_execution(_task):
+            raise RuntimeError("La continuación sólo permite verificar el cierre")
+
+        return await correr_grafo(
+            db, graph_id, ejecutar=no_node_execution, verificar=verificar,
+            on_cambio=on_cambio, verification_only=True)
     return await correr_grafo(
         db, graph_id, tope=tope, on_cambio=on_cambio, verificar=verificar,
         ejecutar=ejecutor_minimax(db, project, g,

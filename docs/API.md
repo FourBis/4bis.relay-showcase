@@ -257,3 +257,42 @@ con el dominio y la audiencia configurados; el correo sin JWT no basta. Los
 permisos se comprueban en el servidor.
 
 Consulta [SECURITY.md](../SECURITY.md) antes de configurar acceso remoto.
+
+## Precisiones del candidato de mantenimiento
+
+- `GET /questions` sólo incluye preguntas para las que la cuenta conserva la
+  autoridad existente de control de la tarea. Responder sigue requiriendo sus
+  comprobaciones del servidor.
+- Los endpoints de adjuntos permiten inline únicamente para formatos pasivos
+  de imagen admitidos. El resto usa descarga, `application/octet-stream`,
+  `nosniff`, CSP aislada y `private, no-store`.
+- Los previews de consola/estado aplican redacción al preparar su contenido;
+  no se modifica el archivo original ni se amplía el acceso.
+
+Alcance y límites de comprobación: [mantenimiento](qa/maintenance-2026-11-01.md).
+
+La lectura de mensajes aplica `max_turns` a los turnos más recientes de ambas
+fuentes de historial. No incorpora identidad estable de mensajes para objetos
+heredados. Al procesar o resumir un transcript, el recibo conserva el resultado conocido
+para reintentar sólo su persistencia dentro del proceso. El guardado de
+transcripts es atómico. No acredita reintentos idempotentes del ASR ni
+recuperación poskill.
+
+## Contratos del candidato de paridad
+
+Las rutas se componen en `server_app.py` y los módulos de cada función.
+Las respuestas de acceso/recuperación no deben usarse como una autorización
+permanente; los handlers vuelven a consultar la identidad y sus permisos.
+
+| Área | Rutas y documentación |
+| --- | --- |
+| Creación y mensajes inciertos | [Contrato de creación](CONVERSATION_REQUESTS.md) y [recuperación de la UI](REQUEST_RECOVERY.md). |
+| Compartir un hilo | `GET /conversations/{id}/shares`, `PUT`/`DELETE /conversations/{id}/shares/{email}`; [acceso](CONVERSATION_ACCESS.md). |
+| Revisión y notificaciones de PR externos | [Revisión externa](EXTERNAL_REVIEW.md); conserva identidad del actor, SHA y política vigente. |
+| Evidencia PNG | `GET`/`POST /conversations/{id}/external-pr/images`, `GET /conversations/{id}/external-pr/images/{draft_id}`, `POST /conversations/{id}/external-pr/images/{draft_id}/confirm`. Confirmar verifica autor, marcador y bytes del comentario ya publicado manualmente; no sube ni publica la imagen. |
+| Consultas MCP personales | `POST /mcp/relay` sólo si se habilitó al crear la app; [protocolo y límites](GENERIC_MCP.md). |
+| Salud con identidad del proceso | `/health` y `/admin/api/health` sólo agregan metadatos con opt-in y rol Admin actual; [recibos](DEPLOYMENT_RECEIPTS.md). |
+
+Los endpoints de generación multimedia de la revisión posterior no están
+registrados en esta tanda. Un campo contractual `media_only:false` no anuncia
+soporte de generación. La [evidencia local](qa/parity-2026-11-01.md) es estática.

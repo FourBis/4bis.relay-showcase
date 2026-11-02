@@ -20,20 +20,23 @@ import { chime, isMuted, toggleMute, pedirPermisoNotificaciones } from "./chime.
 // En UNA línea a propósito: chat-strip-junk.test.mjs carga este módulo
 // neutralizando los imports con un regex `^import .*$` por línea, y un
 // import multilínea le deja huérfano el resto del bloque.
-import { refreshQuestions, matchCommand, helpText, wireCommandPalette, paletteOpen, addCopyButtons } from "./chat-tools.js";
+import { refreshQuestions, invalidateQuestions, matchCommand, helpText, wireCommandPalette, paletteOpen, addCopyButtons } from "./chat-tools.js";
 import { attachGrafo, detachGrafo, pokeGrafo, wireGrafoPanel, planEnCurso } from "./chat-grafo.js";
 import { aplicarAnchosGuardados } from "./panel-resize.js";
 import { openConvDiff } from "./chat-diff.js";
 import { openChatObject } from "./chat-objects.js";
 import { mountTaskPanel } from "./chat-task.js";
 import { openExternalRegistration } from "./chat-external-pr.js";
+import { installReviewNotificationsButton } from "./chat-review-notifications.js";
 import { issuePickerHtml, mountIssuePicker, optionalIssuePayload } from "./chat-issue.js";
-import { setTaskWorkspaceContext, openConversationWindow } from "./workspace.js";
+import { setTaskWorkspaceContext, openConversationWindow, visibleWorkspaceModules } from "./workspace.js";
 import { announceEmbeddedChat, getEmbeddedConversation, isChatViewVisible } from "./chat-window.js";
+import { openConversationSharing, sharingPermissionLabel } from "./chat-sharing.js";
 
 // --- estado ----------------------------------------------------------
 // Una conversación por contexto de navegador; las ventanas separadas
 // reutilizan este controlador con su propio DOM y estado.
+let questionActor = "", composerRevision = 0;
 let activeChat = null;   // {convId, projectSlug, currentChatId, busy, readOnly}
 let convCache = [];      // última lista de /conversations (para filtrar client-side)
 // Catálogo de /admin/api/models. `chosenModel` vacío = "el del proyecto",
@@ -52,6 +55,31 @@ let chatSelectionGeneration = 0;
 let chatDraftGeneration = 0;
 let taskPanel = null;
 let draftIssuePicker = null;
+const questionComposerEdits = new WeakMap();
+let attachmentRevision = 0, pendingAttachmentUploads = 0;
+const attachmentContexts = new WeakMap();
+const conversationAttachmentContexts = new Map();
+let attachmentContext = null;
+const pendingMessageRequests = new Map();
+// One recoverable unsent draft per project in this page. No localStorage of
+// prompt text/files; keeping a strong reference also retains in-flight uploads.
+const draftsByProject = new Map();
+let lastDraftProject = "";
+let conversationScope = "mine", conversationListGeneration = 0;
+let conversationListIdentity = null;
+
+
+
+
+
+function scrollChatToEnd(box) {
+  const timeline = $("#chat-timeline") || box;
+  if (box.getBoundingClientRect && timeline.getBoundingClientRect) {
+    // Keep the current message visible within the conversation timeline.
+    timeline.scrollTop = Math.max(0, timeline.scrollTop + box.getBoundingClientRect().bottom
+      - timeline.getBoundingClientRect().top - timeline.clientHeight);
+  } else timeline.scrollTop = timeline.scrollHeight;
+}
 
 function newRequestId() {
   return globalThis.crypto?.randomUUID?.()
@@ -67,11 +95,74 @@ function selectionIsCurrent(generation, convId = null) {
     && (!convId || activeChat?.convId === convId);
 }
 
+function invalidateChatQuestions() {
+  invalidateQuestions($("#chat-panel-messages"));
+}
+
+function questionChatIsVisible() {
+  return !document.hidden && (getEmbeddedConversation()
+    ? isChatViewVisible() : visibleWorkspaceModules().has("chat"));
+}
+
+function wireQuestionViewLifecycle() {
+  let visible = questionChatIsVisible();
+  let embeddedVisible = isChatViewVisible();
+  document.addEventListener("relay-workspace-visibility", () => {
+    const next = questionChatIsVisible();
+    if (next === visible) return;
+    visible = next;
+    if (!next) invalidateChatQuestions(); else resume();
+  });
+  const resume = () => {
+    if (questionChatIsVisible() && activeChat?.convId && !activeChat.readOnly) {
+      refreshChatQuestions(activeChat.convId, chatSelectionGeneration);
+    }
+  };
+  on("#chat-parent-list", "click", invalidateChatQuestions);
+  window.addEventListener("pagehide", invalidateChatQuestions);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) invalidateChatQuestions(); else resume();
+  });
+  window.addEventListener("message", event => {
+    if (event.origin !== location.origin || event.source !== window.parent
+        || event.data?.type !== "relay-chat-visibility" || typeof event.data.visible !== "boolean") return;
+    if (event.data.visible === embeddedVisible) return;
+    embeddedVisible = event.data.visible;
+    if (!embeddedVisible) invalidateChatQuestions();
+    // chat-window updates its visibility in the same message dispatch.
+    else queueMicrotask(resume);
+  });
+}
+
+const TERMINAL_CHAT_STATUSES = new Set(["ok", "error", "cancelled"]);
+
+function isTerminalChatStatus(value) {
+  return TERMINAL_CHAT_STATUSES.has(String(value?.status || "").toLowerCase());
+}
+
+function isTerminalRunSnapshot(value) {
+  const status = String(value?.status || "").toLowerCase();
+  return !!value?.finished && (!status || TERMINAL_CHAT_STATUSES.has(status));
+}
+
 // =====================================================================
 // SIDEBAR: lista de conversaciones
 // =====================================================================
 
+export function conversationListRequest(scope, project = "") {
+  const query = "?limit=100" + (project ? `&project=${encodeURIComponent(project)}` : "");
+  return scope === "admin" ? {admin:true,path:"conversations" + query}
+    : {admin:false,path:"/conversations" + query + `&scope=${scope === "shared" ? "shared" : "mine"}`};
+}
+
+function loadConversationListIdentity() {
+  if (!conversationListIdentity) conversationListIdentity = api("me").catch(() => null);
+  return conversationListIdentity;
+}
+
 export async function loadChats() {
+  const generation = ++conversationListGeneration;
+  const scope = conversationScope;
   const list = $("#chat-conv-list");
   // Iter 10.2: loading placeholder visible. /conversations puede
   // tardar >5s si la DB está lockeada (modo nocturno escribiendo
@@ -79,6 +170,8 @@ export async function loadChats() {
   // "—" animados en lugar de texto plano: el motion lo distingue
   // del estado vacío "sin conversaciones todavía" que es estático.
   if (list) {
+    list.setAttribute("aria-busy", "true");
+    if (!convCache.length)
     list.innerHTML = `<p class="chat-conv-loading p-3 text-xs text-zinc-400">
       <span class="chat-typing"><span></span><span></span><span></span></span>
       cargando conversaciones…
@@ -94,32 +187,48 @@ export async function loadChats() {
     // El filtro es un `input` + `datalist` (52 proyectos no se buscan en
     // un select nativo). Se llena una sola vez; su propio try porque
     // /admin/api/projects spawnea cbm y puede tardar >15s — ver abajo.
+    const actor = await loadConversationListIdentity();
+    if (generation !== conversationListGeneration) return;
+    const scopeSelect = $("#chat-conversation-scope");
+    const adminOption = scopeSelect?.querySelector('[value="admin"]');
+    if (adminOption) adminOption.hidden = actor?.role !== "owner";
+    if (scope === "admin" && actor?.role !== "owner") {
+      conversationScope = "mine";
+      if (scopeSelect) scopeSelect.value = "mine";
+      return loadChats();
+    }
     const sel = $("#chat-project-filter");
     const opts = $("#chat-project-opts");
     if (opts && !opts.options.length) {
       try {
-        const { projects } = await api("projects");
-        opts.innerHTML = projects.map((p) =>
-          `<option value="${escape(p.slug)}"></option>`).join("");
+        const { projects } = await api("projects?capability=chat");
+        opts.innerHTML = projects.filter(p => p.enabled && p.can_create_read !== false).map((p) =>
+          `<option value="${escape(p.slug)}" label="${escape(p.name || p.slug)}"></option>`).join("");
       } catch (e) {
         _dbg("loadChats: filtro de proyectos no cargó", e.message);
       }
     }
-    // Escrito a medias ("box") no es un slug: filtrar por eso devolvía
+    // Escrito a medias ("sam") no es un slug: filtrar por eso devolvía
     // cero conversaciones mientras el humano seguía tipeando. Solo
     // filtra cuando coincide exacto con un proyecto, o cuando está vacío.
     const escrito = sel ? sel.value.trim() : "";
     const conocido = !escrito || !!opts?.querySelector(
       `option[value="${CSS.escape(escrito)}"]`);
     const project = conocido ? escrito : "";
-    const q = "?limit=100" + (project ? `&project=${encodeURIComponent(project)}` : "");
-    const r = await apiRoot("/conversations" + q);
+    const request = conversationListRequest(scope, project);
+    const r = await (request.admin ? api(request.path) : apiRoot(request.path));
+    if (generation !== conversationListGeneration || scope !== conversationScope) return;
     convCache = r.conversations || [];
     renderConvList();
   } catch (e) {
+    if (generation !== conversationListGeneration || scope !== conversationScope) return;
     _dbg("loadChats ERROR", e.message);
+    convCache = [];
+    pintarRail();
     if (list) list.innerHTML =
       `<p class="p-3 text-xs text-red-400">error: ${escape(e.message)}</p>`;
+  } finally {
+    if (generation === conversationListGeneration) list?.setAttribute("aria-busy", "false");
   }
 }
 
@@ -133,19 +242,24 @@ function renderConvList() {
   pintarRail();
   const list = $("#chat-conv-list");
   if (!list) return;
+  const focused = list.contains(document.activeElement) ? document.activeElement?.dataset?.id : null;
   const term = ($("#chat-search")?.value || "").trim().toLowerCase();
   const filtered = convCache.filter((c) => {
     if (!term) return true;
     return (c.project_slug || "").toLowerCase().includes(term)
       || (c.summary || "").toLowerCase().includes(term)
+      || (c.title || c.preview || "").toLowerCase().includes(term)
+      || (c.owner_display_name || c.owner_email || "").toLowerCase().includes(term)
       || externalConversationTitle(c).toLowerCase().includes(term)
       || (c.id || "").toLowerCase().includes(term);
   });
   if (!filtered.length) {
     list.innerHTML =
       `<p class="p-3 text-xs text-zinc-400">${
-        term ? "sin conversaciones que matcheen." :
-        "sin conversaciones todavía. Crea una con ➕ Nuevo."}</p>`;
+        term ? "No hay conversaciones que coincidan con la búsqueda." :
+        conversationScope === "shared" ? "Todavía no compartieron una conversación contigo." :
+        conversationScope === "admin" ? "No hay conversaciones para estos filtros de gestión." :
+        "Todavía no tienes conversaciones. Usa Nueva conversación para empezar."}</p>`;
     return;
   }
   const open = filtered.filter((c) => c.status === "open");
@@ -156,6 +270,7 @@ function renderConvList() {
   list.innerHTML = html;
   $$(".chat-conv-item").forEach((el) =>
     el.addEventListener("click", () => navigateConversation(el.dataset.id)));
+  if (focused) list.querySelector(`[data-id="${CSS.escape(focused)}"]`)?.focus();
 }
 
 function group(title, convs) {
@@ -165,29 +280,25 @@ function group(title, convs) {
       const dot = c.status === "open" ? "open" : "closed";
       const when = shortWhen(c.last_activity_at);
       const externalTitle = externalConversationTitle(c);
-      const preview = externalTitle ? `PR externo · ${escape(externalTitle.slice(0, 80))}` : c.summary
-        ? escape(c.summary.slice(0, 80))
-        // Singular con 1: la sidebar lo muestra en cada fila, asi que
-        // "1 mensajes" se ve todo el tiempo.
-        : `<span class="text-zinc-400">${c.messages_len ?? 0} ${(c.messages_len ?? 0) === 1 ? "mensaje" : "mensajes"}</span>`;
-      // Iter 10.3: chip de rama en la sidebar para que sepas de un
-      // vistazo qué ramas quedaron locales sin borrar. Solo muestro
-      // el nombre — el "merged/ahead" lo da el panel al seleccionar.
-      // Las abiertas NO muestran chip: la rama es la activa, no hay
-      // sorpresa; el panel ya la señala.
-      const branchChip = c.branch
-        ? `<span class="cci-branch" title="rama local: ${escape(c.branch)}">🌿 ${escape(c.branch)}</span>`
-        : "";
-      return `<div class="chat-conv-item${active}" data-id="${escape(c.id)}"
-          title="${escape(c.id)}">
+      const title = String(externalTitle ? `PR externo · ${externalTitle}`
+        : c.title || c.preview || c.summary || "Conversación sin mensajes");
+      const preview = `${escape(c.project_slug || "Proyecto sin confirmar")} · ${c.messages_len ?? 0} ${(c.messages_len ?? 0) === 1 ? "mensaje" : "mensajes"}`;
+      const owner = c.owner_display_name || c.owner_email || c.requested_by;
+      const accessNote = conversationScope === "shared" && c.access?.relation === "admin"
+        ? `De ${owner || "un integrante"} · Tu rol Admin sigue vigente`
+        : c.access?.relation === "shared"
+        ? `${owner ? `De ${owner} · ` : ""}${sharingPermissionLabel(c.access.share_mode)}`
+        : conversationScope === "admin" && owner ? `De ${owner} · Gestión de Admin` : "";
+      return `<button type="button" class="chat-conv-item${active}" data-id="${escape(c.id)}"
+          title="${escape(title)}" aria-label="${escape(title)} · ${escape(c.project_slug || "Proyecto sin confirmar")}${accessNote ? ` · ${escape(accessNote)}` : ""}">
           <div class="cci-top">
             <span class="cci-dot ${dot}"></span>
-            <span class="cci-proj">${escape(c.project_slug || "?")}</span>
+            <span class="cci-proj">${escape(title.slice(0,120))}</span>
             <span class="cci-when">${escape(when)}</span>
           </div>
           <div class="cci-preview">${preview}</div>
-          ${branchChip}
-        </div>`;
+          ${accessNote ? `<div class="text-xs text-zinc-400">${escape(accessNote)}</div>` : ""}
+        </button>`;
     }).join("");
 }
 
@@ -277,11 +388,14 @@ export function navigateConversation(convId) {
   if (getEmbeddedConversation()) return selectConversation(convId);
   setChatDrawer(false);
   const meta = convCache.find(conversation => conversation.id === convId);
-  return openConversationWindow({ id: convId, project_slug: meta?.project_slug });
+  return openConversationWindow({ id: convId, project_slug: meta?.project_slug,
+    title: String(meta?.title || meta?.preview || meta?.summary || meta?.project_slug || "Conversación").slice(0,120) });
 }
 
 export async function selectConversation(convId) {
+  rememberChatDraft();
   const generation = ++chatSelectionGeneration;
+  invalidateChatQuestions();
   setChatDrawer(false);
   try {
     const meta = await apiRoot(`/conversations/${encodeURIComponent(convId)}`);
@@ -299,10 +413,16 @@ export async function selectConversation(convId) {
   }
 }
 
+
+
+
+
 async function openConversation(meta, generation) {
   if (generation !== chatSelectionGeneration) return;
+  rememberChatDraft();
+  invalidateChatQuestions();
   const external = conversationTaskMode(meta) === "external_pr";
-  const readOnly = meta.status !== "open" || external;
+  const readOnly = meta.status !== "open" || external || meta.access?.can_send === false;
   draftIssuePicker?.destroy(); draftIssuePicker = null;
   activeChat = {
     convId: meta.id,
@@ -312,9 +432,15 @@ async function openConversation(meta, generation) {
     currentChatId: null,
     busy: false,
     readOnly,
-    mode: meta.read_only ? "consultation" : "change",
+    access: meta.access,
+    canControl: meta.access?.can_control !== false,
+    mode: meta.read_only || conversationTaskMode(meta) === "read_only" ? "consultation" : "change",
     publishAllowed: !!meta.publish_allowed,
+    messageViewReady: false,
   };
+  activeChat.pendingMessageRequest = pendingMessageRequests.get(meta.id) || null;
+  selectAttachmentContext();
+  $("#chat-panel-input").value = attachmentContext.composerText || "";
   setTaskWorkspaceContext({ conversationId: meta.id, projectSlug: meta.project_slug });
   taskPanel?.destroy();
   taskPanel = mountTaskPanel({
@@ -327,7 +453,6 @@ async function openConversation(meta, generation) {
   // dejar el grafo de la conversación anterior bajo el nuevo encabezado.
   if (external) detachGrafo();
   else attachGrafo(meta.id);
-
   showMainView("convo");
   renderConvList();  // refrescar highlight del sidebar
   $("#chat-draft-project").hidden = true;  // por si venías de un borrador
@@ -349,19 +474,22 @@ async function openConversation(meta, generation) {
   $("#chat-input-bar").hidden = readOnly;
   $("#chat-readonly-note").hidden = !readOnly;
   $("#chat-readonly-note").textContent = external
-    ? "Declara evidencia y actualiza GitHub desde la tarea. El código y la revisión humana pueden hacerse fuera de Relay."
-    : "Conversación cerrada: solo lectura. Abre una nueva con Nuevo para seguir trabajando.";
+    ? "Registra la evidencia y actualiza GitHub desde la tarea. El código y la revisión humana pueden hacerse fuera de Relay."
+    : meta.status !== "open" ? "Conversación cerrada: solo lectura. Abre una nueva conversación para seguir trabajando."
+    : meta.access?.relation === "admin" ? "Vista de gestión de Admin: puedes consultar el historial; este acceso no te convierte en participante."
+    : meta.access?.is_creator ? "Puedes consultar tu historial. Los cambios requieren permiso de escritura vigente en el proyecto."
+    : "Conversación compartida en Solo lectura. Puedes consultar el historial; para enviar mensajes necesitas acceso de colaboración vigente.";
 
   // Open in VS Code: siempre visible (si falla, el toast avisa).
   const vscodeBtn = $("#chat-panel-vscode");
-  vscodeBtn.hidden = external;
+  vscodeBtn.hidden = external || meta.access?.can_control === false;
   const ghLink = $("#chat-panel-gh-link");
   ghLink.hidden = true;
   try {
     const r = await api(`projects/${encodeURIComponent(meta.project_slug)}`);
     if (!selectionIsCurrent(generation, meta.id)) return;
     const proj = r?.project || r || null;
-    if (proj && proj.git_remote_url) {
+    if (proj && proj.git_remote_url && meta.access?.can_control !== false) {
       const url = gitWebUrl(proj.git_remote_url);
       if (url) { ghLink.href = url; ghLink.hidden = false; }
     }
@@ -369,11 +497,27 @@ async function openConversation(meta, generation) {
   if (!selectionIsCurrent(generation, meta.id)) return;
 
   renderSuggestions([]);   // las del hilo anterior no valen para éste
+  $("#chat-timeline").hidden = false;
   $("#chat-panel-messages").hidden = external;
   if (external) $("#chat-panel-messages").innerHTML = "";
   else await loadMessages(meta.id);
   if (!selectionIsCurrent(generation, meta.id)) return;
   setBusy(false);
+  activeChat.messageViewReady = true;
+  // The original POST can finish while this CID is being reopened. Its
+  // identity/result belongs to the conversation, not the discarded view.
+  const openingRequest = activeChat.pendingMessageRequest;
+  if (openingRequest) {
+    if (openingRequest.acceptedResult) {
+      await resumeAcceptedMessage(activeChat, openingRequest);
+      return;
+    }
+    if (openingRequest.inFlight) { setBusy(true); return; }
+    if (openingRequest.uncertain) {
+      await reconcilePendingMessage(activeChat, { allowRetry: false });
+      return;
+    }
+  }
   // Una ventana que termina de cargar no debe quitar el foco a otra.
   if (!readOnly && !getEmbeddedConversation()) $("#chat-panel-input").focus();
 
@@ -397,11 +541,13 @@ async function openConversation(meta, generation) {
 }
 
 export function conversationTaskMode(meta) {
-  let task = meta.task_json;
-  if (typeof task === "string") {
-    try { task = JSON.parse(task); } catch (_) { task = null; }
+  let taskMeta = meta.task_json;
+  if (typeof taskMeta === "string") {
+    try { taskMeta = JSON.parse(taskMeta); } catch (_) { taskMeta = null; }
   }
-  return task?.mode || (meta.read_only ? "read_only" : "write");
+  // ponytail: sin modo persistido, Notes se infiere por slug; migrar si el backend expone un modo explícito.
+  return taskMeta?.mode
+    || (meta.read_only || meta.project_slug === "notes" ? "read_only" : "write");
 }
 
 export function externalConversationTitle(meta) {
@@ -424,8 +570,7 @@ function renderTaskMode(meta) {
   if (typeof taskMeta === "string") {
     try { taskMeta = JSON.parse(taskMeta); } catch (_) { taskMeta = null; }
   }
-  const mode = taskMode === "read_only"
-    ? "Consulta" : "Cambio con PR";
+  const mode = taskMode === "read_only" ? "Consulta" : "Cambio con PR";
   el.textContent = mode === "Consulta" || (taskMeta?.publish_allowed ?? meta.publish_allowed)
     ? mode : `${mode} · publicación apagada`;
   el.hidden = false;
@@ -447,7 +592,7 @@ async function handleTaskUpdate(meta, task, previous, generation) {
   const mode = task.mode || "";
   chat.mode = mode === "read_only" ? "consultation" : "change";
   chat.publishAllowed = !!task.publish_allowed;
-  chat.readOnly = meta.status !== "open";
+  chat.readOnly = meta.status !== "open" || meta.access?.can_send === false;
   renderTaskMode({ ...meta, task_json: task });
   const snapshot = taskSnapshot(task);
   // La apertura ya carga mensajes y reconecta el run anterior.
@@ -471,7 +616,8 @@ async function handleTaskUpdate(meta, task, previous, generation) {
 
 async function reopenConversation(convId) {
   try {
-    if (await selectConversation(convId)) toast("Conversación reabierta", "ok");
+    await selectConversation(convId);
+    toast("Conversación reabierta", "ok");
   } catch (e) { toast("No se pudo continuar: " + e.message, "err"); }
 }
 
@@ -505,19 +651,32 @@ async function resumeRunningChat(convId, generation) {
 }
 
 function showMainView(which) {
+  invalidateChatQuestions();
   $("#chat-empty").hidden = which !== "empty";
   $("#chat-convo").hidden = which !== "convo";
   $("#chat-memoria").hidden = which !== "memoria";
 }
 
+export function conversationStatusLabel(status) {
+  return {open:"Abierta",closed:"Cerrada",draft:"Borrador",archived:"Archivada"}[status] || "Sin estado confirmado";
+}
+
 function renderHeader(meta, generation = chatSelectionGeneration) {
   const slug = meta.project_slug || activeChat?.projectSlug || "?";
   announceEmbeddedChat({ conversationId: meta.id, projectSlug: slug,
-    title: meta.title || slug });
-  $("#chat-panel-title").textContent = slug;
+    title: String(meta.title || meta.preview || meta.summary || slug).slice(0,120) });
+  $("#chat-panel-title").textContent = meta.title || meta.preview || meta.summary?.slice(0,100) || slug;
+  if ($("#chat-conversation-options")) $("#chat-conversation-options").hidden = false;
+  const share = $("#chat-panel-share");
+  if (share) {
+    share.hidden = meta.access?.can_share !== true;
+    share.onclick = () => openConversationSharing({conversationId:meta.id,
+      title:meta.title || meta.preview || meta.summary || slug,trigger:share,onChanged:loadChats});
+  }
 
   const stEl = $("#chat-convo-status");
-  stEl.textContent = meta.status;
+  stEl.textContent = conversationStatusLabel(meta.status);
+  stEl.setAttribute("aria-label", "Estado de la conversación: " + conversationStatusLabel(meta.status));
   stEl.className = "badge " + (meta.status === "open" ? "warn"
     : meta.status === "closed" ? "ok" : "dim");
   // Iter 10.3: rama local acumulada + botón borrarla. Solo tiene sentido
@@ -542,7 +701,7 @@ function renderHeader(meta, generation = chatSelectionGeneration) {
         : `⚠️ @${who} sin hilo DM — las respuestas no salen de acá`;
 
   // Botones Discord + Cerrar solo para conversaciones abiertas.
-  const ro = meta.status !== "open" || external;
+  const ro = meta.status !== "open" || external || meta.access?.can_control === false;
   // 📱 mientras no haya hilo DM: cubre las dos formas de no tenerlo —
   // sin vincular, o vinculado con el hilo roto (hereda el usuario).
   $("#chat-panel-follow-mobile").hidden = ro || hasThread;
@@ -553,12 +712,15 @@ function renderHeader(meta, generation = chatSelectionGeneration) {
   // Diff de la rama: mientras la conv tenga rama. En las cerradas la rama
   // ya no existe (se borra al abrir el PR) y el modal lo dice con el link.
   const diffBtn = $("#chat-panel-diff");
-  diffBtn.hidden = !meta.branch;
+  diffBtn.hidden = !meta.branch || meta.access?.can_control === false;
   diffBtn.onclick = () => openConvDiff(meta);
   $("#chat-panel-compact").hidden = ro || !meta.context;
   $("#chat-panel-extract-facts").hidden = ro || !meta.context;
   renderContextBadge(meta.context);
   renderUsageBadge(meta);
+  if (meta.access?.relation === "shared") $("#chat-panel-meta").textContent =
+    `Compartida · ${sharingPermissionLabel(meta.access.share_mode)}`;
+  else if (meta.access?.relation === "admin") $("#chat-panel-meta").textContent = "Gestión de Admin · Solo lectura";
   if (external) {
     for (const id of ["#chat-panel-grafo", "#chat-panel-chime", "#chat-panel-context", "#chat-panel-diff", "#chat-panel-usage"])
       $(id).hidden = true;
@@ -647,7 +809,7 @@ let lastCtx = null;
 function renderCompactBanner(ctx) {
   const box = $("#chat-panel-messages");
   const old = document.getElementById("chat-panel-compact-banner");
-  if (!box || !ctx?.hot || activeChat?.readOnly) { old?.remove(); return; }
+  if (!box || !ctx?.hot || activeChat?.readOnly || activeChat?.canControl === false) { old?.remove(); return; }
   if (old) return;                       // ya está: no re-pintar ni saltar
   const k = (n) => `${Math.round(n / 1000)}k`;
   const banner = document.createElement("div");
@@ -665,7 +827,7 @@ function renderCompactBanner(ctx) {
   box.appendChild(banner);
   banner.querySelector("#chat-compact-now")
     ?.addEventListener("click", () => compactActiveConversation());
-  box.scrollTop = box.scrollHeight;
+  scrollChatToEnd(box);
 }
 
 // Re-pinta el medidor 🧠 (y el botón 🗜 Compactar, que depende de él) con
@@ -679,9 +841,9 @@ async function refreshContextBadge(convId) {
     if (!meta || activeChat?.convId !== convId) return;
     renderContextBadge(meta.context);
     renderUsageBadge(meta);
-    $("#chat-panel-compact").hidden = !meta.context || !!activeChat.readOnly;
+    $("#chat-panel-compact").hidden = !meta.context || !!activeChat.readOnly || activeChat.canControl === false;
     $("#chat-panel-extract-facts").hidden =
-      !meta.context || !!activeChat.readOnly;
+      !meta.context || !!activeChat.readOnly || activeChat.canControl === false;
   } catch (_) { /* el medidor es informativo: si falla, ni se nota */ }
 }
 
@@ -689,7 +851,7 @@ async function refreshContextBadge(convId) {
 // conversación, misma rama, mismo Discord — solo baja el contexto. El
 // compactador es un LLM: tarda, así que timeout largo y aviso previo.
 async function compactActiveConversation() {
-  if (!activeChat || activeChat.readOnly || activeChat.busy) return;
+  if (!activeChat || activeChat.readOnly || activeChat.canControl === false || activeChat.busy) return;
   const convId = activeChat.convId, short = convId.slice(0, 8);
   if (!await confirmModal({
     title: `Compactar el hilo ${short}…`,
@@ -724,7 +886,7 @@ async function compactActiveConversation() {
 // recorta los turnos viejos, o sea que sacar los hechos costaba perder el
 // detalle de la conversación. Este deja el hilo exactamente como estaba.
 async function extractFactsFromConversation() {
-  if (!activeChat || activeChat.readOnly) return;
+  if (!activeChat || activeChat.readOnly || activeChat.canControl === false) return;
   const convId = activeChat.convId;
   const short = convId.slice(0, 8);
   setBusy(true);
@@ -754,8 +916,23 @@ async function extractFactsFromConversation() {
 // forma de cerrar desde la UI — el 409 de "ya hay una abierta" mandaba a
 // cerrarla sin decir cómo.
 async function closeActiveConversation() {
-  if (!activeChat || activeChat.readOnly) return;
-  const short = activeChat.convId.slice(0, 8);
+  const selected = activeChat, generation = chatSelectionGeneration;
+  if (!selected || !selected.convId || selected.readOnly || selected.canControl === false || selected.questionsClosing) return;
+  selected.questionsClosing = true;
+  invalidateChatQuestions();
+  try {
+    await closeSelectedConversation(selected, generation);
+  } finally {
+    selected.questionsClosing = false;
+    if (activeChat === selected && selectionIsCurrent(generation, selected.convId)
+        && questionChatIsVisible()) refreshChatQuestions(selected.convId, generation);
+  }
+}
+
+async function closeSelectedConversation(selected, generation) {
+  const current = () => activeChat === selected && selectionIsCurrent(generation, selected.convId);
+  if (!current()) return;
+  const short = selected.convId.slice(0, 8);
 
   // No se cierra con trabajo en vuelo (2026-08-24). Cerrar compacta la
   // memoria y abre el PR: hacerlo a mitad de camino deja el summary sin
@@ -792,11 +969,17 @@ async function closeActiveConversation() {
     cancelText: "Volver",
     danger: true,
   })) return;
-  const convId = activeChat.convId;
+  if (!current()) return;
+  if (selected.busy || planEnCurso()) {
+    toast("Hay trabajo en curso; espera a que termine antes de cerrar la conversación.", "warn");
+    return;
+  }
+  const convId = selected.convId;
   try {
     const r = await apiRoot(
       `/conversations/${encodeURIComponent(convId)}/close`,
       { method: "POST" }, 30_000);
+    if (!current()) return;
     const bits = [];
     if (r.pr_url) bits.push(`PR abierto: ${r.pr_url}`);
     else if (r.pr === "running") bits.push("verificando y abriendo PR…");
@@ -805,13 +988,14 @@ async function closeActiveConversation() {
       : "sin historial que compactar");
     toast(`Conversación ${short}… cerrada ✓ — ${bits.join(" · ")}`, "ok");
     await loadChats();                       // refrescar sidebar (pasa a Cerradas)
+    if (!current()) return;
     await selectConversation(convId);        // re-render read-only + summary
     if (r.pr === "running") pollPrStatus(convId, short);
     // La rama local la borra el relay cuando el PR queda abierto (el
     // toast de pollPrStatus lo dice). Acá no se pregunta nada: el botón
     // del header sigue estando para las ramas viejas.
   } catch (e) {
-    toast("No pude cerrar la conversación: " + e.message, "err");
+    if (current()) toast("No pude cerrar la conversación: " + e.message, "err");
   }
 }
 
@@ -832,7 +1016,7 @@ async function loadBranchBadge(meta, generation = chatSelectionGeneration) {
   chip.hidden = true; chip.textContent = ""; chip.className = "badge dim";
   chip.title = "";
   btn.hidden = true; btn.onclick = null; btn.disabled = false;
-  if (!meta.branch) return;            // conv sin rama (no era repo git)
+  if (!meta.branch || meta.access?.can_control === false) return;
   if (meta.status === "open") {
     // Rama activa: chip informativo SIN merge status ni boton borrar.
     chip.hidden = false;
@@ -887,7 +1071,7 @@ async function loadBranchBadge(meta, generation = chatSelectionGeneration) {
 // solo si el humano lo confirma explícitamente.
 async function deleteLocalBranch(meta, info) {
   const branchName = info?.branch || meta?.branch;
-  if (!meta || !branchName) return;
+  if (!meta || !branchName || meta.access?.can_control === false) return;
   const short = meta.id.slice(0, 8);
   const force = !info.merged;          // merged=False → -D
   const aheadNote = info.merged ? ""
@@ -996,7 +1180,7 @@ function renderBubbles(messages) {
     sub: "Esta conversación no tiene mensajes guardados."});
   renderCompactBanner(lastCtx);     // el innerHTML se lo acaba de comer
   addCopyButtons(box);              // "copiar" en cada bloque de código
-  box.scrollTop = box.scrollHeight;
+  scrollChatToEnd(box);
 }
 
 // Bloque colapsable con las tools de un tramo. Colapsado por defecto (ese
@@ -1222,6 +1406,7 @@ function bubbleHtml(m, messageIndex = null) {
     </div>`;
   }
   if (m.role === "assistant") {
+    const speaker = "experto";
     // Sobre el texto YA limpio: un turno que era solo basura de protocolo
     // es un turno sin texto, y merece el mismo aviso que el vacío.
     const hasText = stripJunk(m.content).length > 0;
@@ -1231,10 +1416,10 @@ function bubbleHtml(m, messageIndex = null) {
     // El proceso va ARRIBA de la respuesta y colapsado: se lee en orden
     // (pensó → contestó) sin que el razonamiento le gane a la conclusión.
     return thinkBlockHtml(m.steps) + `<div class="chat-answer">
-      <div class="chat-answer-tag">experto${toolTagHtml(m)}</div>
+      <div class="chat-answer-tag">${speaker}${toolTagHtml(m)}</div>
       ${runOutcomeHtml(m)}
       ${body}
-      ${Number.isInteger(messageIndex) ? `<div class="mt-2"><button type="button" class="btn btn-xs chat-open-object" data-message-index="${messageIndex}">Abrir en workspace</button></div>` : ""}
+      ${Number.isInteger(messageIndex) && m.message_id ? `<div class="mt-2"><button type="button" class="btn btn-xs chat-open-object" data-message-index="${messageIndex}" data-message-id="${escape(m.message_id)}">Abrir en workspace</button></div>` : ""}
       ${m.truncated ? `<div class="mt-1 text-[10px] text-amber-400">truncado (${m.total_chars} chars)</div>` : ""}
     </div>`;
   }
@@ -1343,22 +1528,28 @@ function colorizeDiff(diff) {
 // 2000 es el cap duro del endpoint; 20k chars alcanza para respuestas largas.
 async function loadMessages(convId) {
   const box = $("#chat-panel-messages");
+  const selected = activeChat, generation = chatSelectionGeneration;
+  const current = () => activeChat === selected && selectionIsCurrent(generation, convId)
+    && $("#chat-panel-messages") === box && box?.isConnected !== false;
+  if (!current()) return [];
+  invalidateChatQuestions();
   box.innerHTML = '<p class="p-3 text-xs text-zinc-400" role="status">Cargando mensajes…</p>';
   await ensureMd().catch(() => {});   // sin markdown ⇒ texto plano, no error
+  if (!current()) return [];
   try {
     const r = await apiRoot(
     `/conversations/${encodeURIComponent(convId)}/messages`
     + `?max_turns=2000&content_cap=20000`, null, 30_000);
-    if (activeChat?.convId !== convId) return []; // respuesta tardía de otro hilo
+    if (!current()) return [];
     if (r.error) throw new Error(r.error);
     renderBubbles(r.messages || []);
     restorePendingUser(r.messages || []);
     return r.messages || [];
   } catch (e) {
-    if (activeChat?.convId !== convId) return [];
+    if (!current()) return [];
     box.innerHTML = `<div class="p-3" role="alert"><p class="text-sm text-red-400">No se pudo leer la conversación: ${escape(e.message)}</p>
       <button class="btn mt-2" id="chat-messages-retry">Reintentar</button></div>`;
-    $("#chat-messages-retry").addEventListener("click", () => loadMessages(convId));
+    $("#chat-messages-retry").addEventListener("click", () => { if (current()) loadMessages(convId); });
     return [];
   }
 }
@@ -1398,17 +1589,21 @@ function wireChatObjects() {
     if (!button || !activeChat?.convId) return;
     const index = Number(button.dataset.messageIndex);
     if (!Number.isInteger(index) || index < 0) return;
+    const messageId = button.dataset.messageId;
+    if (!messageId) return;
+    const selectedChat = activeChat, selection = chatSelectionGeneration;
     const conversationId = activeChat.convId;
     try {
       const r = await apiRoot(
         `/conversations/${encodeURIComponent(conversationId)}/messages`
         + `?max_turns=2000&content_cap=100000`, null, 30_000);
-      const message = r.messages?.[index];
+      if (activeChat !== selectedChat || selection !== chatSelectionGeneration) return;
+      const message = r.messages?.find(item => item.message_id === messageId);
       if (!message) throw new Error("la respuesta ya no está disponible");
       await openChatObject({
         conversationId,
         message,
-        messageIndex: index,
+        messageIndex: r.messages.indexOf(message),
       });
     } catch (e) {
       toast("No pude abrir el objeto: " + e.message, "err");
@@ -1435,9 +1630,10 @@ function setBusy(busy) {
   const steer = $("#chat-panel-steer");
   const stop = $("#chat-panel-stop");
   if (send) send.hidden = busy;
+  if (send) send.disabled = pendingAttachmentUploads > 0;
   if (b) { b.hidden = !busy; if (busy) b.textContent = "⏳ pensando…"; }
   if (steer) steer.hidden = !busy;
-  if (stop) stop.hidden = !busy;
+  if (stop) stop.hidden = !busy || activeChat?.canControl === false;
   // El composer YA NO se deshabilita mientras corre (2026-07-25): mirar
   // al experto irse por el camino equivocado sin poder decirle nada era
   // el agujero. Lo que escribes durante el run va por /experts/steer.
@@ -1501,6 +1697,11 @@ function updateBusyStatus(s) {
   }
 }
 
+function showPollReconnect() {
+  const b = $("#chat-panel-busy");
+  if (b && !b.hidden) b.textContent = "↻ reconectando…";
+}
+
 // Repinta la tarjeta de un paso vivo cuando llega su salida.
 // Idempotente por `data-out`: el mismo step viene en cada poll mientras
 // esté dentro de los últimos 30 que manda el relay.
@@ -1550,27 +1751,12 @@ function appendLiveStep(step) {
     el.dataset.stepN = step.n;
     if (step.output) el.dataset.out = "1";
     box.appendChild(el);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToEnd(box);
   }
 }
 
-const TERMINAL_CHAT_STATUSES = new Set(["ok", "error", "cancelled"]);
-
-function isTerminalChatStatus(value) {
-  return TERMINAL_CHAT_STATUSES.has(String(value?.status || "").toLowerCase());
-}
-
-function isTerminalRunSnapshot(value) {
-  const status = String(value?.status || "").toLowerCase();
-  return !!value?.finished && (!status || TERMINAL_CHAT_STATUSES.has(status));
-}
-
-function showPollReconnect() {
-  const button = $("#chat-panel-busy");
-  if (button && !button.hidden) button.textContent = "↻ reconectando…";
-}
-
 async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
+  const pollIsCurrent = () => selectionIsCurrent(generation, convId) && activeChat.currentChatId === chatId;
   const POLL_MS = 1500;
   const RETRY_MAX_MS = 10_000;
   let retryMs = POLL_MS;
@@ -1580,18 +1766,19 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
       await new Promise((r) => setTimeout(r, POLL_MS));
       continue;
     }
-    let finished = false, err = null, waitMs = POLL_MS;
+    let finished = false, err = null, waitMs = POLL_MS, terminalPhase = null;
     try {
       const s = await apiRoot(`/experts/status/${encodeURIComponent(chatId)}`);
       // Un run en cola no terminó aunque un backend antiguo envíe
       // `finished` por defecto; conservar el polling evita un fin espurio.
       finished = isTerminalRunSnapshot(s);
+      if (finished) terminalPhase = s.status === "cancelled" ? "cancelled" : s.phase_at_end || s.phase || s.status || null;
       retryMs = POLL_MS;
       if (s.error) err = s.error;
-      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      if (!pollIsCurrent()) return;
       if (!finished) updateBusyStatus(s);
     } catch (e) {
-      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      if (!pollIsCurrent()) return;
       _dbg("pollChat: status error", e.message);
       if (e?.status === 404) {
         // El progreso en memoria desaparece al terminar o reiniciar el
@@ -1599,19 +1786,20 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
         try {
           const persisted = await apiRoot(
             `/chats/${encodeURIComponent(chatId)}/status`);
-          if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+          if (!pollIsCurrent()) return;
           const chat = persisted?.chat || {};
           finished = isTerminalChatStatus(chat);
           retryMs = POLL_MS;
           if (finished) {
             err = chat.error || null;
+            terminalPhase = chat.status === "cancelled" ? "cancelled" : chat.phase_at_end || null;
           } else if (persisted?.progress) {
             updateBusyStatus({ ...persisted.progress, status: chat.status });
           } else {
             showPollReconnect();
           }
         } catch (persistedError) {
-          if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+          if (!pollIsCurrent()) return;
           _dbg("pollChat: persisted status error", persistedError.message);
           showPollReconnect();
           waitMs = retryMs;
@@ -1624,10 +1812,10 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
       }
     }
     if (finished) {
-      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      if (!pollIsCurrent()) return;
       setBusy(false);
       await loadMessages(convId);
-      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      if (!pollIsCurrent()) return;
       refreshContextBadge(convId);  // el medidor sale del historial recién guardado
       loadChats();  // refrescar el sidebar (status / última actividad)
       loadSuggestions(chatId, 4, generation);  // reintenta sola en background
@@ -1635,17 +1823,18 @@ async function pollChat(chatId, convId, generation = chatSelectionGeneration) {
       // dejó una decisión pendiente" no son la misma noticia, y la
       // segunda es la que deja el run parado sin que nadie se entere.
       const pendientes = await refreshChatQuestions(convId, generation).catch(() => 0);
-      if (!selectionIsCurrent(generation, convId) || activeChat.currentChatId !== chatId) return;
+      if (!pollIsCurrent()) return;
       // Un pedido grande no deja respuesta: deja un grafo corriendo. Sin
       // este poke el panel recién aparecería al reabrir la conversación.
       pokeGrafo().catch(() => {});
-      if (err) {
-        toast("El experto terminó con error: " + err, "err");
-        showContinueBanner({ err, phaseAtEnd: activeChat?.lastPhase || null });
+      const cancelled = terminalPhase === "cancelled";
+      if (err || cancelled) {
+        toast(cancelled ? "Detenido por ti" : "El experto terminó con error: " + err, cancelled ? "info" : "err");
+        showContinueBanner({ err, phaseAtEnd: cancelled ? "cancelled" : terminalPhase || activeChat?.lastPhase || null });
       }
-      chime(err ? "error" : pendientes ? "question" : "done", convId,
+      chime(cancelled ? "done" : err ? "error" : pendientes ? "question" : "done", convId,
             err || "");
-      return;
+      return true;
     }
     await new Promise((r) => setTimeout(r, waitMs));
   }
@@ -1657,7 +1846,7 @@ function appendOptimisticUser(text) {
   const tmp = document.createElement("div");
   tmp.innerHTML = bubbleHtml({ role: "user", content: text });
   box.appendChild(tmp.firstElementChild || tmp);
-  box.scrollTop = box.scrollHeight;
+  scrollChatToEnd(box);
 }
 
 // Respuesta de un `!comando`: misma burbuja que usa el experto, para que
@@ -1668,7 +1857,7 @@ function appendCommandReply(label, text) {
   const tmp = document.createElement("div");
   tmp.innerHTML = bubbleHtml({ role: "assistant", content: `${label}\n\n${text}` });
   box.appendChild(tmp.firstElementChild || tmp);
-  box.scrollTop = box.scrollHeight;
+  scrollChatToEnd(box);
 }
 
 // Corrección de rumbo sobre el run en curso (2026-07-25). NO es un turno
@@ -1676,42 +1865,63 @@ function appendCommandReply(label, text) {
 // que tiene en vuelo, sobre el historial ya rescatado. La alternativa que
 // existía era cancelar, que además de perder el hilo tiraba el avance.
 async function steerCurrentRun(text) {
-  const id = activeChat?.currentChatId;
+  const selected = activeChat, generation = chatSelectionGeneration;
+  const id = selected?.currentChatId, input = $("#chat-panel-input");
   if (!id) { toast("El run recién arranca — prueba en un segundo", "warn"); return; }
-  if (!activeChat.pendingSteer || activeChat.pendingSteer.text !== text) {
-    activeChat.pendingSteer = { text, requestId: newRequestId() };
+  if (selected.steerSending) return;
+  if (!selected.pendingSteer || selected.pendingSteer.text !== text) {
+    selected.pendingSteer = { text, requestId: newRequestId() };
   }
+  const pending = selected.pendingSteer;
+  const current = () => activeChat === selected && generation === chatSelectionGeneration;
+  selected.steerSending = true;
   try {
     const r = await apiRoot(`/experts/steer/${encodeURIComponent(id)}`, {
       method: "POST", body: JSON.stringify(steerRequestPayload(
-        activeChat.pendingSteer.text, activeChat.pendingSteer.requestId)),
+        pending.text, pending.requestId)),
     });
-    activeChat.pendingSteer = null;
-    $("#chat-panel-input").value = "";
+    if (selected.pendingSteer === pending) selected.pendingSteer = null;
+    if (!current()) return;
+    if (input.value.trim() === text.trim()) input.value = "";
     // Sin burbuja optimista a propósito: el 🧭 lo pinta el poll cuando el
     // experto REALMENTE cortó y la tomó. Así ves si se aplicó o no.
     toast(r?.durable && r?.phase === "queued"
       ? "Mensaje guardado; se ejecutará al terminar el turno actual"
       : "Corrección encolada — se aplica al terminar la tool en curso", "ok");
   } catch (e) {
-    if (e.status === 409 || e.status === 404) {
-      // Terminó entre que escribiste y mandaste: es un mensaje normal.
-      activeChat.pendingSteer = null;
+    if (!current()) return;
+    let detail = null;
+    try { detail = typeof e.body === "string" ? JSON.parse(e.body) : e.body; } catch { /* original error below */ }
+    if (e.status === 409 && detail?.finished === true && input.value.trim() === text.trim()) {
+      // Sólo el contrato explícito de turno terminado permite un nuevo
+      // envío. Un conflicto de actor, permisos o pausa conserva el texto.
+      selected.pendingSteer = null;
+      const accepted = selected.pendingMessageRequest;
+      if (accepted?.acceptedResult?.id === id) forgetPendingMessage(selected, accepted);
+      selected.currentChatId = null;
       setBusy(false);
       await sendCurrentMessage();
       return;
     }
     toast("No se pudo mandar la corrección: " + e.message, "err");
+  } finally {
+    selected.steerSending = false;
   }
 }
 
 async function stopCurrentRun() {
-  const id = activeChat?.currentChatId;
-  if (!id) return;
+  const selected = activeChat, id = selected?.currentChatId;
+  if (!id || selected.canControl === false) return;
   try {
-    await apiRoot(`/experts/cancel/${encodeURIComponent(id)}`, { method: "POST" });
-    toast("Run cortado — el avance queda guardado en el hilo", "ok");
+    const result = await apiRoot(`/experts/cancel/${encodeURIComponent(id)}`, { method: "POST" });
+    if (activeChat !== selected || selected.currentChatId !== id) return;
+    toast(result?.cancelled?.length
+      ? "Cancelación confirmada para este turno. Revisa los resultados disponibles en el historial."
+      : result?.zombies_cleaned?.length ? "Se cerró un turno sin proceso activo. Revisa su registro."
+      : result?.finished?.length ? "El turno ya terminó. Revisa su estado en el historial."
+      : "Solicitud de cancelación recibida. Revisa el estado del turno en el historial.", "ok");
   } catch (e) {
+    if (activeChat !== selected) return;
     toast("No se pudo cortar: " + e.message, "err");
   }
 }
@@ -1722,10 +1932,45 @@ async function stopCurrentRun() {
 // próximo envío y la bandeja se vacía.
 let pendingAttachments = [];   // [{id, name, bytes, viewable, inline}]
 
+function selectAttachmentContext() {
+  if (!activeChat) return;
+  const existing = activeChat.convId && conversationAttachmentContexts.get(activeChat.convId);
+  if (existing?.project === activeChat.projectSlug) {
+    attachmentContext = existing.context;
+    syncAttachmentContext(attachmentContext);
+    return;
+  }
+  let projects = attachmentContexts.get(activeChat);
+  if (!projects) { projects = new Map(); attachmentContexts.set(activeChat, projects); }
+  let context = projects.get(activeChat.projectSlug);
+  if (!context) {
+    context = { attachments: [], uploads: 0 };
+    projects.set(activeChat.projectSlug, context);
+  }
+  attachmentContext = context;
+  if (activeChat.convId) conversationAttachmentContexts.set(activeChat.convId,
+    { project: activeChat.projectSlug, context });
+  syncAttachmentContext(context);
+}
+
+function syncAttachmentContext(context) {
+  if (attachmentContext !== context) return;
+  pendingAttachments = context.attachments;
+  pendingAttachmentUploads = context.uploads;
+  renderAttachTray();
+}
+
 function renderAttachTray() {
+  ++attachmentRevision;
   const tray = $("#chat-attach-tray");
   if (!tray) return;
-  tray.hidden = pendingAttachments.length === 0;
+  const send = $("#chat-panel-send");
+  if (send) {
+    send.disabled = pendingAttachmentUploads > 0;
+    send.setAttribute("aria-busy", String(pendingAttachmentUploads > 0));
+    send.title = pendingAttachmentUploads > 0 ? "Espera a que terminen de subir los adjuntos." : "Enviar mensaje";
+  }
+  tray.hidden = pendingAttachments.length === 0 && pendingAttachmentUploads === 0;
   tray.innerHTML = pendingAttachments.map((a, i) => {
     // El experto ve el texto inline y las imágenes; del resto solo el
     // nombre. Decirlo acá evita el "no puedo verlo" después del run.
@@ -1736,7 +1981,8 @@ function renderAttachTray() {
       ${escape(a.name)} <em>${escape(nota)}</em>
       <button data-i="${i}" class="chat-attach-x" aria-label="Quitar">✕</button>
     </span>`;
-  }).join("");
+  }).join("") + (pendingAttachmentUploads > 0
+    ? `<span class="chat-banner-hint" role="status">Subiendo ${pendingAttachmentUploads} adjunto(s). Espera para enviar.</span>` : "");
   $$(".chat-attach-x").forEach((b) => b.addEventListener("click", () => {
     pendingAttachments.splice(Number(b.dataset.i), 1);
     renderAttachTray();
@@ -1867,18 +2113,24 @@ function onModelChange() {
   }
 }
 
-async function uploadAttachment(file) {
+async function uploadAttachment(file, context = attachmentContext) {
+  if (!context) return;
   const fd = new FormData();
   fd.append("file", file, file.name || "adjunto");
+  ++context.uploads;
+  syncAttachmentContext(context);
   try {
     const r = await apiRoot("/attachments", { method: "POST", body: fd }, 60_000);
-    pendingAttachments.push({
+    context.attachments.push({
       id: r.id, name: file.name || r.id, bytes: r.bytes,
       viewable: !!r.viewable, inline: !!r.inline,
     });
-    renderAttachTray();
+    syncAttachmentContext(context);
   } catch (e) {
-    toast(`No pude subir ${file.name}: ${e.message}`, "err");
+    if (attachmentContext === context) toast(`No pude subir ${file.name}: ${e.message}`, "err");
+  } finally {
+    --context.uploads;
+    syncAttachmentContext(context);
   }
 }
 
@@ -1886,17 +2138,23 @@ function wireAttachments() {
   const input = $("#chat-attach-input");
   const btn = $("#chat-attach-btn");
   if (!input || !btn) return;
+  $("#chat-panel-input")?.addEventListener("input", () => {
+    if (activeChat?.draft) activeChat.composerText = $("#chat-panel-input").value;
+    else if (attachmentContext && activeChat?.convId) attachmentContext.composerText = $("#chat-panel-input").value;
+  });
   btn.addEventListener("click", () => input.click());
   input.addEventListener("change", async () => {
-    for (const f of input.files) await uploadAttachment(f);
+    const files = [...input.files], context = attachmentContext;
     input.value = "";        // permite re-elegir el mismo archivo
+    await Promise.all(files.map(file => uploadAttachment(file, context)));
   });
   // Pegar una captura del portapapeles: el caso más común (Win+Shift+S).
   $("#chat-panel-input")?.addEventListener("paste", async (e) => {
     const files = [...(e.clipboardData?.files || [])];
     if (!files.length) return;
     e.preventDefault();
-    for (const f of files) await uploadAttachment(f);
+    const context = attachmentContext;
+    await Promise.all(files.map(file => uploadAttachment(file, context)));
   });
   // Arrastrar sobre el composer.
   const bar = $("#chat-input-bar");
@@ -1907,21 +2165,140 @@ function wireAttachments() {
     bar.addEventListener("dragleave", () => bar.classList.remove("dragging"));
     bar.addEventListener("drop", async (e) => {
       e.preventDefault(); bar.classList.remove("dragging");
-      for (const f of e.dataTransfer?.files || []) await uploadAttachment(f);
+      const files = [...(e.dataTransfer?.files || [])], context = attachmentContext;
+      await Promise.all(files.map(file => uploadAttachment(file, context)));
     });
+  }
+}
+
+function messageDraftSignature(text, attachments, model = chosenModel, stages = chosenStageModels) {
+  return JSON.stringify([text.trim(), attachments.map(file => file.id), model,
+    Object.entries(stages).sort(([left], [right]) => left.localeCompare(right))]);
+}
+
+function forgetPendingMessage(chat, pending) {
+  if (chat.pendingMessageRequest === pending) chat.pendingMessageRequest = null;
+  if (pendingMessageRequests.get(chat.convId) === pending) pendingMessageRequests.delete(chat.convId);
+  chat.pendingRequestId = null;
+}
+
+async function resumeAcceptedMessage(chat, pending) {
+  const result = pending.acceptedResult, generation = chatSelectionGeneration;
+  const current = () => activeChat === chat && chat.convId === pending.conversationId
+    && chat.projectSlug === pending.projectSlug && generation === chatSelectionGeneration;
+  if (!result || !current() || chat.messageViewReady === false
+      || pendingMessageRequests.get(chat.convId) !== pending) return false;
+  // A received run is no longer an uncertain POST. Looking it up must not
+  // lock the composer for its whole lifetime: explicit steering stays valid.
+  pending.uncertain = false;
+  chat.reconcilingMessage = false;
+  if (pending.pollingChat === chat && pending.pollingGeneration === generation) return true;
+  pending.pollingChat = chat; pending.pollingGeneration = generation;
+  chat.pendingMessageRequest = pending;
+  const input = $("#chat-panel-input");
+  if (messageDraftSignature(input.value, pendingAttachments) === pending.signature) input.value = "";
+  const sentIds = new Set(pending.attachments.map(file => file.id));
+  attachmentContext.attachments = pendingAttachments.filter(file => !sentIds.has(file.id));
+  syncAttachmentContext(attachmentContext);
+  if (result.command && typeof result.text === "string") {
+    appendCommandReply(`!${result.command}`, result.text);
+    chat.pendingUserText = null;
+    forgetPendingMessage(chat, pending);
+    setBusy(false);
+    return true;
+  }
+  chat.pendingUserText = pending.text;
+  chat.currentChatId = result.id;
+  setBusy(true);
+  try {
+    const finished = await pollChat(result.id, chat.convId, generation);
+    // Navigation or a transient poll failure is not completion. Keep the
+    // accepted ID reachable until this same run has a durable terminal state.
+    if (finished && current()) forgetPendingMessage(chat, pending);
+  } finally {
+    if (pending.pollingChat === chat && pending.pollingGeneration === generation) {
+      pending.pollingChat = null; pending.pollingGeneration = null;
+    }
+  }
+  return true;
+}
+
+async function reconcilePendingMessage(chat, { allowRetry = true } = {}) {
+  const pending = chat.pendingMessageRequest, generation = chatSelectionGeneration;
+  if (!pending || chat.reconcilingMessage) return null;
+  const current = () => activeChat === chat && generation === chatSelectionGeneration;
+  chat.reconcilingMessage = true;
+  try {
+    if (pending.acceptedResult) { await resumeAcceptedMessage(chat, pending); return null; }
+    const result = await apiRoot(`/conversations/${encodeURIComponent(chat.convId)}/requests/${encodeURIComponent(pending.requestId)}`);
+    if (!current()) return null;
+    if (pending.acceptedResult) { await resumeAcceptedMessage(chat, pending); return null; }
+    if (typeof result?.found !== "boolean" || result.found && typeof result.id !== "string") {
+      throw new Error("El servidor no confirmó el estado del pedido original.");
+    }
+    const input = $("#chat-panel-input");
+    if (result.found) {
+      pending.acceptedResult = result;
+      pending.conversationId ||= chat.convId; pending.projectSlug ||= chat.projectSlug;
+      toast("El pedido original ya fue recibido. Muestro ese mismo turno; tu edición queda como borrador.", "info");
+      await resumeAcceptedMessage(chat, pending);
+      return null;
+    }
+    // Ausencia no prueba que el POST anterior terminó. Nunca liberar el ID
+    // para mandar el texto editado: sólo puede repetirse el mismo pedido.
+    pending.uncertain = true;
+    if (!allowRetry || pending.inFlight) {
+      if (!pending.inFlight) setBusy(false);
+      return null;
+    }
+    const edited = messageDraftSignature(input.value, pendingAttachments) !== pending.signature;
+    if (pending.text.startsWith("!")) {
+      toast("No se confirmó el resultado del comando. Revisa su registro antes de volver a ejecutarlo.", "warn");
+      return null;
+    }
+    if (edited && !await confirmModal({
+      title: "El envío anterior todavía no está confirmado",
+      body: "Tu edición está conservada. Para evitar dos pedidos, primero podemos reintentar únicamente el pedido original con el mismo identificador. La edición no se enviará en este paso.",
+      confirmText: "Reintentar el pedido original", cancelText: "Conservar y esperar",
+    })) return null;
+    if (pending.acceptedResult) { await resumeAcceptedMessage(chat, pending); return null; }
+    return current() && !pending.inFlight ? pending : null;
+  } catch (error) {
+    if (current()) toast("No pude consultar el envío original. Conservé tu texto y no envié otro pedido: " + error.message, "err");
+    return null;
+  } finally {
+    chat.reconcilingMessage = false;
   }
 }
 
 async function sendCurrentMessage() {
   if (!activeChat || activeChat.readOnly) return;
+  if (pendingAttachmentUploads > 0) {
+    toast("Espera a que terminen de subir los adjuntos antes de enviar.", "info");
+    return;
+  }
+  if (activeChat.sendingMessage || activeChat.reconcilingMessage || activeChat.pendingMessageRequest?.inFlight) return;
+  const acceptedRun = activeChat.pendingMessageRequest?.acceptedResult?.id;
+  if (activeChat.pendingMessageRequest?.acceptedResult
+      && !(activeChat.busy && acceptedRun && activeChat.currentChatId === acceptedRun)) {
+    await resumeAcceptedMessage(activeChat, activeChat.pendingMessageRequest);
+    return;
+  }
   const inp = $("#chat-panel-input");
   let text = inp.value.trim();
+  let retry = null;
+  if (activeChat.pendingMessageRequest?.uncertain) {
+    retry = await reconcilePendingMessage(activeChat);
+    if (!retry) return;
+    if (retry.inFlight) return;
+    text = retry.text;
+  }
 
   // Comandos `/algo` de la UI (ver chat-tools.js). Se resuelven ACÁ y no
   // en el relay: son acciones del panel (compactar, cortar, ver diff) o
   // atajos que se expanden a un prompt. Los `!comando` del relay siguen
   // yendo al servidor como siempre.
-  const hit = matchCommand(text);
+  const hit = retry ? null : matchCommand(text);
   if (hit) {
     const out = hit.cmd.run(commandCtx(), hit.args);
     inp.value = "";
@@ -1930,69 +2307,108 @@ async function sendCurrentMessage() {
     inp.value = text;
   }
   // Un adjunto sin texto es un mensaje válido ("mirá esta captura").
-  if (!text && !pendingAttachments.length) return;
+  if (!text && !pendingAttachments.length && !retry) return;
   ++chatDraftGeneration; // Enviar invalida una apertura de borrador todavía pendiente.
-  if (activeChat.busy) { await steerCurrentRun(text); return; }
-  inp.value = "";
+  if (activeChat.busy && !retry && pendingAttachments.length) {
+    toast("Los adjuntos están preparados. Espera a que termine este turno para enviarlos con tu mensaje.", "info");
+    return;
+  }
+  if (activeChat.busy && !retry) { await steerCurrentRun(text); return; }
+  const sendingChat = activeChat, generation = chatSelectionGeneration;
+  if (sendingChat.draft) sendingChat.composerText = text;
+  const projectSlug = sendingChat.projectSlug;
+  const model = chosenModel, stageModels = { ...chosenStageModels };
+  const sentContext = attachmentContext;
+  const enviados = retry ? retry.attachments : pendingAttachments.slice();
+  const signature = retry?.signature || messageDraftSignature(text, enviados, model, stageModels);
+  const preserveDraft = !!retry && messageDraftSignature(inp.value, pendingAttachments) !== signature;
+  const current = () => activeChat === sendingChat && generation === chatSelectionGeneration;
+  if (!preserveDraft) inp.value = "";
+  sendingChat.sendingMessage = true;
   renderSuggestions([]);   // pertenecían al turno anterior
   setBusy(true);
   // Borrador (➕ Nuevo): la conversación se crea acá, con el prompt ya
   // escrito. Si falla, el texto vuelve al composer — nunca se pierde.
   if (activeChat.draft) {
-    const convId = await createDraftConversation(activeChat.projectSlug);
-    if (!convId) { inp.value = text; setBusy(false); return; }
+    const convId = await createDraftConversation(projectSlug, text);
+    if (!current()) { sendingChat.sendingMessage = false; return; }
+    if (!convId) { sendingChat.sendingMessage = false; if (!inp.value) inp.value = text; setBusy(false); return; }
     activeChat.convId = convId;
-    setTaskWorkspaceContext({ conversationId: convId, projectSlug: activeChat.projectSlug });
+    activeChat.projectSlug = projectSlug;
+    conversationAttachmentContexts.set(convId, { project: projectSlug, context: sentContext });
+    setTaskWorkspaceContext({ conversationId: convId, projectSlug });
     activeChat.draft = false;
+    if (draftsByProject.get(projectSlug) === sendingChat) draftsByProject.delete(projectSlug);
     $("#chat-draft-project").hidden = true;
     $("#chat-panel-messages").innerHTML = "";
-    const meta = await apiRoot(`/conversations/${encodeURIComponent(convId)}`);
-    if (meta && !meta.error) renderHeader(meta);
+    // Header metadata is auxiliary; its failure must not strand the first send.
+    // Do not yield between transferring the draft to its CID and registering
+    // the pending first message: navigation must not orphan that brief.
+    apiRoot(`/conversations/${encodeURIComponent(convId)}`).then(meta => {
+      if (current() && meta && !meta.error) renderHeader(meta);
+    }).catch(() => {});
     loadChats();
   }
   // Los adjuntos se consumen en ESTE envío: se vacía la bandeja ya, para
   // que no se cuelen en el mensaje siguiente si el usuario manda dos
   // seguidos. Si el POST falla, vuelven junto con el texto.
-  const enviados = pendingAttachments;
-  pendingAttachments = [];
-  renderAttachTray();
+  const sentIds = new Set(enviados.map(file => file.id));
+  sentContext.attachments = sentContext.attachments.filter(file => !sentIds.has(file.id));
+  syncAttachmentContext(sentContext);
   // Queda pendiente hasta que el relay lo persista (al terminar el run).
   activeChat.pendingUserText = text;
   // Se conserva si el POST falla: el siguiente click reintenta el mismo
   // intento lógico y el backend puede deduplicarlo.
-  activeChat.pendingRequestId ||= newRequestId();
-  appendOptimisticUser(
+  const pending = retry || { requestId: newRequestId(), text, attachments: enviados, signature,
+    conversationId: sendingChat.convId, projectSlug };
+  pending.conversationId ||= sendingChat.convId; pending.projectSlug ||= projectSlug;
+  sendingChat.pendingRequestId = pending.requestId;
+  sendingChat.pendingMessageRequest = pending;
+  pendingMessageRequests.set(sendingChat.convId, pending);
+  pending.inFlight = true;
+  if (!retry) appendOptimisticUser(
     text + (enviados.length ? `\n📎 ${enviados.map((a) => a.name).join(", ")}` : ""));
+  let accepted = false;
   try {
+    pending.body ||= JSON.stringify({
+      target: projectSlug,
+      user: text || "Mira el adjunto.",
+      conversation: sendingChat.convId, source: "ui", author: "ui",
+      request_id: pending.requestId,
+      ...(sendingChat.verifiedCreationReceipt ? { expected_creation: sendingChat.verifiedCreationReceipt } : {}),
+      ...(model ? { model } : {}),
+      ...(Object.keys(stageModels).length ? { stage_models: stageModels } : {}),
+      ...(enviados.length ? { attachments: enviados.map(file => file.id) } : {}),
+    });
     const r = await apiRoot("/experts/run", {
       method: "POST",
-      body: JSON.stringify({
-        target: activeChat.projectSlug,
-        // Un adjunto sin texto es un mensaje válido acá arriba, pero
-        // `/experts/run` exige `user` no vacío y devolvía 400 "user
-        // requerido (string)": mandar una captura sin escribir nada no
-        // llegaba nunca. El texto de relleno va SOLO en el POST — en
-        // pantalla se sigue viendo el adjunto solo, que es lo que el
-        // usuario mandó.
-        user: text || "Mira el adjunto.",
-        conversation: activeChat.convId, source: "ui", author: "ui",
-        request_id: activeChat.pendingRequestId,
-        ...(chosenModel ? { model: chosenModel } : {}),
-        ...(Object.keys(chosenStageModels).length
-          ? { stage_models: { ...chosenStageModels } } : {}),
-        ...(enviados.length ? { attachments: enviados.map((a) => a.id) } : {}),
-      }),
+      // El body queda congelado para el mismo intento lógico. No mezcla
+      // una edición posterior, otro modelo ni adjuntos agregados después.
+      body: pending.body,
     }, 30_000);
+    if (!(typeof r?.id === "string" && r.id || r?.command && typeof r.text === "string")) {
+      throw new Error("El servidor no confirmó el identificador del pedido original.");
+    }
+    accepted = true;
+    sendingChat.verifiedCreationReceipt = null;
+    pending.acceptedResult = r;
+    pending.inFlight = false;
+    sendingChat.sendingMessage = false;
+    // Deliver to a reopened view of the SAME CID as well. Otherwise keep
+    // the receipt in the shared pending map for the next opening.
+    const receivingChat = activeChat?.convId === pending.conversationId
+      && activeChat?.projectSlug === pending.projectSlug ? activeChat : null;
+    if (!current()) {
+      if (receivingChat) await resumeAcceptedMessage(receivingChat, pending);
+      return;
+    }
     // `!comando`: el relay lo resolvió de una (no hay run, no hay id que
     // pollear). Lo pintamos como respuesta y listo. No se persiste en la
     // conversación a propósito: el output de un comando no tiene por qué
     // viajar en el contexto de cada turno siguiente del experto — queda
     // en command_logs, que es donde se audita.
     if (r.command && typeof r.text === "string") {
-      activeChat.pendingUserText = null;
-      activeChat.pendingRequestId = null;
-      appendCommandReply(`!${r.command}`, r.text);
-      setBusy(false);
+      await resumeAcceptedMessage(activeChat, pending);
       return;
     }
     // Etapas apagadas en el proyecto: el popover las ofrece igual porque
@@ -2016,13 +2432,45 @@ async function sendCurrentMessage() {
     // planificador deja su plan a los pocos segundos, y en un run largo
     // es justo mientras corre cuando querés mirarlo.
     pokeGrafo().catch(() => {});
-    await pollChat(r.id, activeChat.convId);
+    await resumeAcceptedMessage(activeChat, pending);
   } catch (e) {
+    // A lookup may already have confirmed/completed this run while its POST
+    // response was still in flight. A later transport failure cannot undo it.
+    accepted ||= !!pending.acceptedResult;
+    pending.inFlight = false;
+    sendingChat.sendingMessage = false;
+    if (!accepted) {
+      // Un 409 puede significar que el primer intento sí existe. Un error
+      // de transporte/servidor tampoco demuestra que no se haya guardado.
+      const rejected = !retry && [400, 401, 403, 404, 405, 413, 415, 422].includes(e.status);
+      if (rejected) forgetPendingMessage(sendingChat, pending);
+      else pending.uncertain = true;
+      const presentIds = new Set(sentContext.attachments.map(file => file.id));
+      sentContext.attachments = enviados.filter(file => !presentIds.has(file.id)).concat(sentContext.attachments);
+      syncAttachmentContext(sentContext);
+    }
+    if (!current()) {
+      const receivingChat = activeChat?.convId === pending.conversationId
+        && activeChat?.projectSlug === pending.projectSlug ? activeChat : null;
+      if (receivingChat && receivingChat.messageViewReady !== false
+          && receivingChat.pendingMessageRequest === pending && !accepted) {
+        if (!pendingMessageRequests.has(pending.conversationId)) forgetPendingMessage(receivingChat, pending);
+        setBusy(false);
+        toast("El envío original no quedó confirmado. Conservé su identidad y tu borrador; revisa el estado antes de reintentar.", "warn");
+      }
+      return;
+    }
+    if (accepted) {
+      toast("El pedido fue recibido. No pude actualizar su estado; no se enviará otra copia: " + e.message, "err");
+      return;
+    }
     toast("Error enviando mensaje: " + e.message, "err");
+    const box = $("#chat-panel-messages");
+    box?.insertAdjacentHTML("beforeend",
+      `<div class="p-3 text-sm text-red-400" role="alert">Error enviando mensaje: ${escape(e.message)}</div>`);
+    if (!preserveDraft && !inp.value) inp.value = text;
     // Devolvemos los adjuntos a la bandeja: ya están subidos, sería
     // absurdo hacer que el usuario los vuelva a elegir.
-    pendingAttachments = enviados.concat(pendingAttachments);
-    renderAttachTray();
     setBusy(false);
   }
 }
@@ -2068,7 +2516,7 @@ function showContinueBanner({ err, phaseAtEnd }) {
     (raw ? `<details class="chat-banner-raw">
        <summary>ver detalle técnico</summary>
        <pre>${escape(raw)}</pre></details>` : "");
-  box.scrollTop = box.scrollHeight;
+  scrollChatToEnd(box);
 }
 
 // Traduce el error crudo del run a algo humano + qué hacer. Sin esto la UI
@@ -2076,6 +2524,8 @@ function showContinueBanner({ err, phaseAtEnd }) {
 // {...}`) en monoespaciado, que no le dice nada a nadie.
 function explainRunError(err, phaseAtEnd) {
   const e = (err || "").toLowerCase();
+  if (phaseAtEnd === "cancelled" || e === "cancelled")
+    return { title: "Detenido por ti", hint: "Se detuvo el turno del chat y se conservó lo avanzado." };
   const cont = "Manda cualquier mensaje abajo para <strong>continuar este "
     + "hilo</strong>; el experto retoma donde cortó.";
   if (phaseAtEnd === "budget_exceeded")
@@ -2099,9 +2549,6 @@ function explainRunError(err, phaseAtEnd) {
       hint: "Revisa la API key en el <code>.env</code> del relay y reintenta." };
   if (e.includes("timeout"))
     return { title: "Timeout hablando con el provider", hint: cont };
-  if (e === "cancelled")
-    return { title: "Run cancelado",
-      hint: "El avance hasta el corte quedó guardado en el hilo. " + cont };
   return { title: "El run cortó con un error", hint: cont };
 }
 
@@ -2114,7 +2561,7 @@ async function maybeShowContinueBanner(meta, generation = chatSelectionGeneratio
     if (!list.length) return;
     const last = list[list.length - 1];
     if (last.status === "error" || last.status === "cancelled") {
-      showContinueBanner({ err: last.error || last.status, phaseAtEnd: last.phase_at_end || null });
+      showContinueBanner({ err: last.error || last.status, phaseAtEnd: last.status === "cancelled" ? "cancelled" : last.phase_at_end || null });
     }
     // Al reabrir un hilo, los chips del último run siguen valiendo: es
     // exactamente el momento en que uno se pregunta "¿y ahora qué?".
@@ -2170,19 +2617,44 @@ function renderSuggestions(list) {
 // respuesta, pero un click es menos fricción que escribir un párrafo.
 // Responder manda el `resume_prompt` como turno siguiente, así el hilo
 // retoma sin que el humano tenga que explicar de nuevo el contexto.
+function captureQuestionDraft() {
+  const input = $("#chat-panel-input");
+  return {input, value:input?.value || "", revision:composerRevision,
+    chat:activeChat, attachments:pendingAttachments.slice(), uploads:pendingAttachmentUploads,
+    attachmentRevision, draftGeneration:chatDraftGeneration,
+    model:chosenModel, stageModels:JSON.stringify(chosenStageModels)};
+}
+
+function questionDraftIsClean(snapshot) {
+  return snapshot && snapshot.chat === activeChat && !activeChat?.busy
+    && snapshot.input === $("#chat-panel-input") && snapshot.revision === composerRevision
+    && !snapshot.value && !snapshot.input?.value
+    && !snapshot.attachments.length && !pendingAttachments.length
+    && snapshot.uploads === 0 && pendingAttachmentUploads === 0
+    && snapshot.attachmentRevision === attachmentRevision
+    && snapshot.draftGeneration === chatDraftGeneration
+    && snapshot.model === chosenModel && snapshot.stageModels === JSON.stringify(chosenStageModels);
+}
+
 async function refreshChatQuestions(expectedConvId = null, expectedGeneration = null) {
-  const convId = expectedConvId || activeChat?.convId;
-  const isCurrent = () => !!activeChat?.convId && activeChat.convId === convId
-    && !activeChat.readOnly
-    && (expectedGeneration === null
-      || expectedGeneration === chatSelectionGeneration);
-  if (!isCurrent()) return 0;
+  const selected = activeChat, generation = expectedGeneration ?? chatSelectionGeneration;
+  const convId = expectedConvId || selected?.convId;
   const box = $("#chat-panel-messages");
-  const n = await refreshQuestions(box, convId, (resume) => {
+  const isCurrent = () => activeChat === selected && !!selected?.convId && selected.convId === convId
+    && !selected.readOnly && !selected.questionsClosing && !selected.draft
+    && selectionIsCurrent(generation, convId) && $("#chat-panel-messages") === box
+    && !$("#chat-convo")?.hidden && questionChatIsVisible();
+  if (!isCurrent()) return 0;
+  const n = await refreshQuestions(box, convId, (resume, answerDraft) => {
     if (!isCurrent()) return;
-    const inp = $("#chat-panel-input");
-    if (inp && resume) { inp.value = resume; sendCurrentMessage(); }
-  });
+    if (!resume) return;
+    if (!questionDraftIsClean(answerDraft)) {
+      toast("Respuesta registrada. Tu borrador y adjuntos siguen intactos; envía un mensaje cuando quieras continuar.", "info");
+      return;
+    }
+    answerDraft.input.value = resume;
+    sendCurrentMessage();
+  }, {isCurrent, expectedActor:questionActor, captureAnswerContext:captureQuestionDraft});
   if (!isCurrent()) return 0;
   if (n) renderSuggestions([]);   // primero contestá; los chips después
   return n;
@@ -2232,7 +2704,38 @@ export async function viewChat(id) {
 // prompt tipeado, y crear la rama antes de escribir dejaba conversaciones
 // vacías bloqueando el "ya hay una abierta" (409).
 
-async function openNewChatDraft() {
+function rememberChatDraft() {
+  if (!activeChat) return;
+  const input = $("#chat-panel-input"), issue = $("#chat-draft-issue");
+  if (!activeChat.draft) {
+    const saved = conversationAttachmentContexts.get(activeChat.convId);
+    if (input && saved?.project === activeChat.projectSlug && saved.context === attachmentContext) {
+      saved.context.composerText = input.value;
+    }
+    return;
+  }
+  // sendCurrentMessage temporarily clears the composer while creation is in
+  // flight; that programmatic clear must not erase its recoverable brief.
+  if (input && (!activeChat.sendingMessage || input.value)) activeChat.composerText = input.value;
+  if (issue) activeChat.issueInput = issue.value;
+}
+
+function recoverProjectDraft(slug) {
+  let draft = draftsByProject.get(slug);
+  if (!draft) {
+    const mode = activeChat?.draft ? activeChat.mode : "change";
+    draft = {convId:null,projectSlug:slug,currentChatId:null,busy:false,
+      readOnly:false,draft:true,mode,publishAllowed:mode === "change",issueInput:"",
+      composerText:!activeChat ? $("#chat-panel-input")?.value || "" : ""};
+    draftsByProject.set(slug, draft);
+  }
+  lastDraftProject = slug;
+  return draft;
+}
+
+async function openNewChatDraft(preferredProject = "", projectChoices = null) {
+  rememberChatDraft();
+  if (typeof preferredProject !== "string") preferredProject = "";
   if (getEmbeddedConversation()) {
     toast("Abre una nueva conversación desde el chat principal.", "info");
     return;
@@ -2243,38 +2746,81 @@ async function openNewChatDraft() {
     toast("Espera a que se cree la conversación.", "info");
     return;
   }
+  invalidateChatQuestions();
   const generation = chatSelectionGeneration;
   const draftGeneration = ++chatDraftGeneration;
   const current = () => generation === chatSelectionGeneration
     && draftGeneration === chatDraftGeneration;
+  const feedback = $("#chat-new-feedback");
+  const buttons = [$("#chat-new"), $("#workspace-chat-new")].filter(Boolean);
+  for (const button of buttons) {
+    if (button.dataset.draftIdleHtml === undefined) button.dataset.draftIdleHtml = button.innerHTML;
+    button.innerHTML = "Cargando proyectos…"; button.disabled = true; button.setAttribute("aria-busy", "true");
+  }
+  if (feedback) {
+    feedback.hidden = false; feedback.dataset.draftGeneration = String(draftGeneration);
+    feedback.setAttribute("role", "status");
+    feedback.innerHTML = '<p class="chat-banner-hint">Consultando proyectos para la nueva conversación…</p>';
+  }
+  const failed = message => {
+    if (!current() || !feedback) return;
+    feedback.hidden = false; feedback.setAttribute("role", "alert");
+    feedback.innerHTML = `<p class="chat-banner-hint">${escape(message)}</p><button id="chat-new-retry" class="btn btn-xs" type="button">Reintentar</button>`;
+    const retry = $("#chat-new-retry");
+    if (retry) retry.onclick = () => { if (current()) openNewChatDraft(); };
+  };
+  let loaded = false;
+  let draftProjects = [];
   try {
-    const { projects } = await api("projects");
+    const { projects } = projectChoices ? { projects: projectChoices } : await api("projects?capability=chat");
     if (!current()) return;
-    sel.innerHTML = projects.filter((p) => p.enabled)
-      .map((p) => `<option value="${escape(p.slug)}">${escape(p.slug)}</option>`).join("");
+    draftProjects = projects.filter(p => p.enabled && p.can_create_read !== false);
+    sel.innerHTML = draftProjects
+      .map((p) => `<option value="${escape(p.slug)}">${escape((p.name ? `${p.name} - ${p.slug}` : p.slug) + (p.can_create_write === false ? " - Solo consulta" : "") + (draftsByProject.has(p.slug) ? " - Borrador guardado" : ""))}</option>`).join("");
+    if (!sel.options.length) {
+      failed("No hay proyectos habilitados para iniciar una conversación. Pide a un Admin que revise tu acceso en Equipo y la configuración del proyecto.");
+      toast("No hay proyectos habilitados", "warn");
+      return;
+    }
+    loaded = true;
   } catch (e) {
     if (current()) {
+      failed(`No se pudieron cargar los proyectos: ${e.message}. Puedes reintentar sin perder el texto del chat.`);
       toast(`No se pudieron cargar los proyectos: ${e.message}. Vuelve a intentarlo.`, "err");
     }
     return;
+  } finally {
+    if (draftGeneration === chatDraftGeneration) for (const button of buttons) {
+      button.innerHTML = button.dataset.draftIdleHtml; delete button.dataset.draftIdleHtml;
+      button.disabled = false; button.setAttribute("aria-busy", "false");
+    }
+    if (feedback?.dataset.draftGeneration === String(draftGeneration) && (loaded || !current())) feedback.hidden = true;
   }
-  sel.value = $("#chat-project-filter")?.value.trim() || "";
+  sel.value = preferredProject || $("#chat-project-filter")?.value.trim()
+    || (activeChat?.draft ? activeChat.projectSlug : lastDraftProject);
   if (!sel.value) sel.value = sel.options[0]?.value || "";
   if (!sel.value) { toast("No hay proyectos habilitados", "warn"); return; }
 
   ++chatSelectionGeneration;
-  activeChat = {
-    convId: null, projectSlug: sel.value, currentChatId: null,
-    busy: false, readOnly: false, draft: true, mode: "change",
-    publishAllowed: true,
-    issueInput: "",
-  };
+  setChatDrawer(false);
+  rememberChatDraft();
+  activeChat = recoverProjectDraft(sel.value);
+  $("#chat-panel-input").value = activeChat.composerText;
+  const selectedDraft = activeChat, selectedGeneration = chatSelectionGeneration;
+  selectAttachmentContext();
+  activeChat.projectCanWrite = draftProjects.find(project => project.slug === sel.value)?.can_create_write !== false;
+  if (!activeChat.projectCanWrite) { activeChat.mode = "consultation"; activeChat.publishAllowed = false; }
   setTaskWorkspaceContext({ conversationId: "", projectSlug: activeChat.projectSlug });
   sel.onchange = () => {
-    if (!activeChat?.draft) return;
-    activeChat.projectSlug = sel.value;
-    draftIssuePicker?.setProject(sel.value);
-    setTaskWorkspaceContext({ conversationId: "", projectSlug: sel.value });
+    if (!activeChat?.draft || activeChat !== selectedDraft || selectedGeneration !== chatSelectionGeneration) return;
+    if (activeChat.busy) {
+      sel.value = activeChat.projectSlug;
+      toast("Espera a que termine de enviarse este borrador antes de cambiar el proyecto.", "info");
+      return;
+    }
+    // Activate another stable bucket using this opening's allowed projects.
+    // A later opening fetches fresh permissions; the server always rechecks.
+    return openNewChatDraft(sel.value, draftProjects);
   };
 
   showMainView("convo");
@@ -2282,9 +2828,11 @@ async function openNewChatDraft() {
   detachGrafo();          // un borrador todavía no tiene plan
   sel.hidden = false;
   $("#chat-panel-title").textContent = "nueva conversación";
-  $("#chat-convo-status").textContent = "borrador";
+  $("#chat-convo-status").textContent = "Borrador";
+  $("#chat-convo-status").setAttribute("aria-label", "Estado de la conversación: Borrador");
   $("#chat-convo-status").className = "badge dim";
-  $("#chat-panel-meta").textContent = "se crea al mandar el primer mensaje";
+  $("#chat-panel-meta").textContent = "Borrador conservado en esta página. Nuevo recupera el borrador de cada proyecto.";
+  if ($("#chat-conversation-options")) $("#chat-conversation-options").hidden = true;
   $("#chat-task-mode").hidden = true;
   renderDraftMode();
   taskPanel?.destroy();
@@ -2294,28 +2842,46 @@ async function openNewChatDraft() {
                     "#chat-panel-close-conv", "#chat-panel-vscode",
                     "#chat-panel-compact", "#chat-panel-context",
                     "#chat-panel-extract-facts",
-                    "#chat-panel-diff"]) $(id).hidden = true;
+                    "#chat-panel-diff", "#chat-panel-share"]) $(id).hidden = true;
   $("#chat-summary").hidden = true;
+  $("#chat-timeline").hidden = false;
   $("#chat-panel-messages").hidden = false;
   $("#chat-panel-messages").innerHTML =
-    `<div id="chat-draft-mode" class="chat-task-mode-picker" role="group" aria-label="Tipo de conversación">
+    `<p id="chat-draft-summary" class="chat-banner-hint" role="note">Cambio con PR permite editar archivos en una rama de trabajo. Consulta permite pedir información sin publicar cambios.</p>
+     <details id="chat-code-options" class="p-2 text-xs text-zinc-400">
+      <summary>Opciones para editar archivos o vincular una issue</summary>
+      <div id="chat-draft-mode" class="chat-task-mode-picker" role="group" aria-label="Tipo de conversación">
        <span class="label">Tipo</span>
        <button type="button" class="btn btn-xs btn-primary" data-chat-mode="change" aria-pressed="true">Cambio con PR</button>
        <button type="button" class="btn btn-xs" data-chat-mode="consultation" aria-pressed="false">Consulta</button>
        <span class="text-xs text-zinc-400">Consulta no crea worktree ni publica.</span>
      </div>
-     ${formSection({title:"Issue del trabajo",body:issuePickerHtml({id:"chat-draft-issue"})})}
-     <div class="chat-banner"><div class="chat-banner-title">💬 Nueva conversación</div>
-     <div class="chat-banner-hint">Escribe abajo el primer mensaje (Ctrl+Enter envía).
-     El tipo elegido se guarda con el hilo.</div></div>`;
+      ${formSection({title:"Issue del trabajo",body:issuePickerHtml({id:"chat-draft-issue",value:activeChat.issueInput})})}
+      </details>
+      <div class="chat-banner chat-draft-welcome"><div class="chat-banner-title">¿Qué necesitas hacer?</div>
+     <div class="chat-banner-hint">Escribe tu pedido abajo y adjunta los archivos que necesites.
+     Las confirmaciones necesarias aparecerán en esta conversación.</div></div>`;
   draftIssuePicker?.destroy();
   const draft = activeChat;
-  draftIssuePicker = mountIssuePicker($("#chat-panel-messages"), {
-    id:"chat-draft-issue",projectSlug:draft.projectSlug,
-    onChange:value => { if (activeChat === draft) draft.issueInput = value; },
+  const draftViewGeneration = chatSelectionGeneration;
+  const draftRoot = $("#chat-panel-messages");
+  renderDraftMode();
+  draftIssuePicker = null;
+  let issueMounted = false;
+  const codeOptions = $("#chat-code-options");
+  const currentDraftView = () => activeChat === draft && draftViewGeneration === chatSelectionGeneration
+    && $("#chat-panel-messages") === draftRoot && codeOptions?.isConnected === true;
+  codeOptions?.addEventListener("toggle", () => {
+    if (!codeOptions.open || issueMounted || !currentDraftView()) return;
+    issueMounted = true;
+    draftIssuePicker = mountIssuePicker(draftRoot, {
+      id:"chat-draft-issue",projectSlug:draft.projectSlug,
+      onChange:value => { if (currentDraftView()) draft.issueInput = value; },
+    });
   });
   $("#chat-draft-mode")?.querySelectorAll("[data-chat-mode]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (button.disabled || !currentDraftView()) return;
       activeChat.mode = button.dataset.chatMode;
       activeChat.publishAllowed = activeChat.mode === "change";
       renderDraftMode();
@@ -2323,16 +2889,23 @@ async function openNewChatDraft() {
   });
   $("#chat-input-bar").hidden = false;
   $("#chat-readonly-note").hidden = true;
-  setBusy(false);
+  setBusy(!!activeChat.busy);
   $("#chat-panel-input").focus();
 }
 
 function renderDraftMode() {
   const mode = $("#chat-draft-mode");
   if (!mode) return;
+  const summary = $("#chat-draft-summary");
+  if (summary) summary.textContent = activeChat?.mode === "consultation"
+    ? "Consulta permite preguntar sin editar archivos ni publicar cambios."
+    : "Cambio con PR permite editar archivos en una rama de trabajo; publicar requiere la autorización correspondiente.";
+  if (summary && activeChat?.projectCanWrite === false) summary.textContent =
+    "Este proyecto está disponible para Consulta: puedes preguntar sin editar archivos ni publicar cambios. Editar requiere permisos vigentes de escritura; pídelos a un Admin en Equipo.";
   mode.hidden = false;
   mode.querySelectorAll("[data-chat-mode]").forEach((button) => {
     const selected = button.dataset.chatMode === activeChat?.mode;
+    button.disabled = button.dataset.chatMode === "change" && activeChat?.projectCanWrite === false;
     button.setAttribute("aria-pressed", String(selected));
     button.classList.toggle("btn-primary", selected);
   });
@@ -2340,36 +2913,214 @@ function renderDraftMode() {
 
 // Crea la conversación del borrador. Devuelve el id, o null si falló
 // (con el porqué en un toast — el texto del composer lo restaura el caller).
-async function createDraftConversation(slug) {
+function draftCreationPayload(draft, initialRequest) {
+  return {project:draft.projectSlug,initial_request:initialRequest,
+    read_only:draft.mode === "consultation",
+    publish_allowed:draft.mode === "change" && !!draft.publishAllowed,
+    ...optionalIssuePayload(draft.issueInput)};
+}
+
+function creationContentSignature(value) {
+  return JSON.stringify(Object.entries(value)
+    .filter(([key]) => !["request_id", "read_only", "publish_allowed"].includes(key))
+    .sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function verifiedCreation(pending, proposed) {
+  const result = pending.receipt, receipt = result?.creation_receipt;
+  if (creationContentSignature(proposed) !== creationContentSignature(JSON.parse(pending.body))) {
+    throw new Error("La creación original pertenece a otro texto, proyecto o issue. Tu edición se conserva; revisa la conversación original antes de enviar. No se creó otra solicitud.");
+  }
+  if (!result || typeof result.id !== "string" || !result.id || result.project_slug !== proposed.project
+      || !receipt || receipt.version !== 2 || receipt.request_id !== pending.requestId
+      || !/^[a-f0-9]{64}$/.test(receipt.payload_sha256 || "") || receipt.project_slug !== proposed.project
+      || typeof receipt.read_only !== "boolean" || typeof receipt.publish_allowed !== "boolean"
+      || receipt.media_only !== false || typeof receipt.mode !== "string"
+      || !("required_issue" in receipt) || receipt.issue_bound !== true || receipt.ready !== true) {
+    throw new Error("La creación original todavía no tiene un contrato efectivo listo y verificable. Conservé el pedido y su identificador; no envié el mensaje.");
+  }
+  // Project policy may reduce publishing authority for a developer.
+  // A different conversation mode or an implicit increase is never adopted.
+  if (receipt.read_only !== proposed.read_only || receipt.publish_allowed && !proposed.publish_allowed
+      || !receipt.media_only && receipt.mode !== (proposed.read_only ? "read_only" : "write")) {
+    throw new Error("El modo efectivo de la conversación no coincide con el borrador visible. No envié el mensaje ni cambié permisos; revisa la conversación creada.");
+  }
+  return receipt;
+}
+
+async function knownCreationRejection(pending, proof) {
+  if (!proof || proof.version !== 2 || proof.state !== "rejected"
+      || typeof proof.project_slug !== "string" || proof.project_slug.toLowerCase() !== pending.project.toLowerCase()
+      || proof.request_id !== pending.requestId
+      || typeof proof.conversation_id !== "string" || !proof.conversation_id
+      || !/^[a-f0-9]{64}$/.test(proof.payload_sha256 || "")) return false;
+  return await creationPayloadHash(pending) === proof.payload_sha256;
+}
+
+async function creationPayloadHash(pending) {
+  // The UI sends only flat, fixed-key creation fields. Match the server's
+  // canonical JSON hash, not just an HTTP status or an absent lookup.
+  const body = JSON.parse(pending.body);
+  const canonical = JSON.stringify(Object.fromEntries(Object.keys(body).sort().map(key => [key,body[key]])));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2,"0")).join("");
+  return hash;
+}
+
+async function createDraftConversation(slug, initialRequest = "") {
+  const draft = activeChat, generation = chatSelectionGeneration;
+  const current = () => activeChat === draft && generation === chatSelectionGeneration;
+  let pending = draft.pendingConversationCreation;
+  let ownsFlight = false, phase = "lookup", rejectionConsent = null;
+  const recovering = !!pending;
   try {
-    const created = await apiRoot("/conversations", {
-      method: "POST", body: JSON.stringify({
-        project: slug,
-        request_id: (activeChat.pendingConversationRequestId ||= newRequestId()),
-        read_only: activeChat?.mode === "consultation",
-        publish_allowed: activeChat?.mode === "change" && !!activeChat?.publishAllowed,
-        ...optionalIssuePayload(activeChat?.issueInput),
-      }),
-    });
-    activeChat.pendingConversationRequestId = null;
+    const proposed = draftCreationPayload(draft, initialRequest);
+    if (slug !== proposed.project) throw new Error("El proyecto del borrador cambió; se conservó sin enviar.");
+    if (!pending) {
+      if (draft.pendingConversationRequestId) throw new Error("La creación anterior no conserva su payload original. Revisa esa solicitud; no se reutilizó el ID con otra intención.");
+      const requestId = newRequestId();
+      pending = {requestId,signature:JSON.stringify(proposed),
+        body:JSON.stringify({...proposed,request_id:requestId}),project:slug};
+      draft.pendingConversationCreation = pending;
+      draft.pendingConversationRequestId = requestId;
+    }
+    if (pending.inFlight) return null;
+    pending.inFlight = true;
+    ownsFlight = true;
+    if (recovering) {
+      const found = await apiRoot(`/conversations/creation-requests/${encodeURIComponent(pending.requestId)}?project=${encodeURIComponent(pending.project)}`);
+      if (typeof found?.found !== "boolean") throw new Error("No se confirmó la creación original; no se repetirá con otro ID.");
+      if (found.found) {
+        if (pending.rejection) throw new Error("La creación original tiene estados contradictorios; conserva el borrador y pide revisar esa solicitud.");
+        pending.receipt = found;
+        pending.uncertain = false;
+      } else if (await knownCreationRejection(pending, found.creation_rejection)) {
+        pending.rejection = found.creation_rejection;
+        pending.uncertain = false;
+      } else if (pending.conversationId || typeof pending.receipt?.id === "string" && pending.receipt.id) {
+        throw new Error("La creación ya tenía un recibo pero ahora no se pudo reconciliar. Conservé su ID; no se recreará automáticamente.");
+      } else pending.receipt = null;
+      if (!current()) return null;
+      if (!found.found && !pending.rejection && pending.rejectedStatus
+          && !pending.conversationId && !pending.receipt) {
+        const visible = JSON.stringify(draftCreationPayload(draft, initialRequest));
+        const confirmed = await confirmModal({title:"Verificar y reintentar el pedido",
+          body:"El envío anterior devolvió un rechazo, pero eso por sí solo no demuestra que no exista una conversación. Revisaremos el pedido original: si existe, conservaremos su identidad; si el servidor puede impedir de forma durable que ese intento cree una conversación, podremos reintentar el pedido visible con un identificador nuevo. El texto y los adjuntos siguen guardados.",
+          confirmText:"Verificar y reintentar",cancelText:"Conservar y esperar"});
+        if (!confirmed || !current() || visible !== JSON.stringify(draftCreationPayload(draft, initialRequest))) return null;
+        const hash = await creationPayloadHash(pending);
+        if (!current() || visible !== JSON.stringify(draftCreationPayload(draft, initialRequest))) return null;
+        phase = "seal";
+        const sealed = await apiRoot(`/conversations/creation-requests/${encodeURIComponent(pending.requestId)}`,
+          {method:"POST",body:JSON.stringify({version:2,project:pending.project,request_id:pending.requestId,payload_sha256:hash})});
+        if (sealed?.found === true) {
+          pending.receipt = sealed;
+          pending.uncertain = false;
+        } else if (sealed?.found === false && await knownCreationRejection(pending, sealed.creation_rejection)) {
+          pending.rejection = sealed.creation_rejection;
+          pending.uncertain = false;
+          rejectionConsent = visible;
+        } else throw new Error("No se acreditó el cierre del intento original. Conservé su identificador y el borrador; no envié otra solicitud.");
+        if (!current()) return null;
+      }
+    }
+    if (pending.rejection) {
+      const corrected = JSON.stringify(draftCreationPayload(draft, initialRequest));
+      const sameIntention = corrected === pending.signature;
+      const original = pending;
+      const confirmed = rejectionConsent === corrected || await confirmModal({title:sameIntention ? "Reintentar el mismo pedido" : "Enviar la solicitud corregida",
+        body:"El servidor confirmó que la solicitud anterior fue rechazada antes de crear una conversación y su identificador quedó bloqueado. Tu borrador y adjuntos están conservados. "
+          + (sameIntention ? "¿Quieres reintentar el mismo pedido con un identificador nuevo?" : "¿Quieres crear una nueva solicitud con la corrección visible?"),
+        confirmText:sameIntention ? "Reintentar el mismo pedido" : "Enviar solicitud corregida",cancelText:"Conservar el borrador"});
+      if (!confirmed || !current() || corrected !== JSON.stringify(draftCreationPayload(draft, initialRequest))) return null;
+      const requestId = newRequestId();
+      if (requestId === original.requestId) throw new Error("No se pudo obtener una identidad nueva; se conservó el borrador.");
+      draft.rejectedCreations = [...(draft.rejectedCreations || []), original.rejection];
+      original.inFlight = false;
+      pending = {requestId,signature:corrected,
+        body:JSON.stringify({...JSON.parse(corrected),request_id:requestId}),project:slug,inFlight:true};
+      draft.pendingConversationCreation = pending;
+      draft.pendingConversationRequestId = requestId;
+    }
+    // A changed visible intention must never replay an old write-creation,
+    // even if a read-only lookup has not observed the first POST yet.
+    if (JSON.stringify(draftCreationPayload(draft, initialRequest)) !== pending.signature && !pending.receipt) {
+      throw new Error("La solicitud de creación anterior tiene otro texto, modo o issue. Conservé ambas intenciones; no repetí la creación ni envié tu edición a esa conversación.");
+    }
+    if (pending.receipt?.creation_receipt?.version === 2
+        && pending.receipt.creation_receipt.required_issue
+        && pending.receipt.creation_receipt.issue_bound === false
+        && creationContentSignature(draftCreationPayload(draft, initialRequest)) === creationContentSignature(JSON.parse(pending.body))) {
+      const visible = JSON.stringify(draftCreationPayload(draft, initialRequest));
+      const confirmed = await confirmModal({title:"Completar el vínculo de la issue",
+        body:"La conversación original está conservada, pero su issue requerida aún no está vinculada. Podemos reconciliar ese mismo pedido y vínculo, sin crear otra conversación ni enviar el mensaje todavía.",
+        confirmText:"Reconciliar el mismo vínculo",cancelText:"Conservar y esperar"});
+      if (!confirmed || !current() || visible !== JSON.stringify(draftCreationPayload(draft, initialRequest))) return null;
+      pending.receipt = await apiRoot("/conversations", {method:"POST",body:pending.body});
+    }
+    if (!pending.receipt) {
+      if (!current()) return null;
+      pending.inFlight = true;
+      pending.uncertain = true;
+      pending.rejectedStatus = null;
+      phase = "create";
+      pending.receipt = await apiRoot("/conversations", {method:"POST",body:pending.body});
+      pending.uncertain = false;
+    }
+    // Store late receipts even outside their old view. A later explicit send
+    // can reconcile the SAME body, never rebuild it from another visible mode.
+    const receipt = verifiedCreation(pending, draftCreationPayload(draft, initialRequest));
+    if (!current()) return null;
+    draft.verifiedCreationReceipt = receipt;
     draftIssuePicker?.destroy(); draftIssuePicker = null;
-    return created.id;
+    return pending.receipt.id;
   } catch (e) {
+    let detail;
+    try { detail = typeof e?.body === "string" ? JSON.parse(e.body) : e?.body; } catch { /* Uncertain transport result. */ }
+    if (pending && phase === "create" && [400,401,403,404,405,409,413,415,422].includes(e?.status)) pending.rejectedStatus = e.status;
+    if (pending && detail?.code !== "workspace_occupied" && detail?.rejection_reason_code !== "workspace_occupied"
+        && typeof detail?.conversation_id === "string" && detail.conversation_id) pending.conversationId = detail.conversation_id;
+    if (pending && [400,403,404,409,422].includes(e?.status) && detail?.code === "creation_rejected_before_create") {
+      try {
+        if (await knownCreationRejection(pending, detail.creation_rejection)) {
+          pending.rejection = detail.creation_rejection;
+          pending.uncertain = false;
+          pending.conversationId = null;
+        }
+      } catch { /* No verified proof: retain original identity and payload. */ }
+    }
+    if (!current()) return null;
     toast(newChatErrorText(e, slug), "err", 9000);
     return null;
+  } finally {
+    if (pending && ownsFlight) pending.inFlight = false;
+    // A late creation response does not authorize sending the brief from a
+    // different view. Retain its request ID for an idempotent explicit retry,
+    // but release this draft's local lock when the original operation settles.
+    if (!current() && draft.draft && ownsFlight) {
+      draft.busy = false; draft.sendingMessage = false;
+      if (activeChat === draft) setBusy(false);
+    }
   }
 }
 
 function newChatErrorText(e, slug) {
   const msg = e?.message || String(e);
-  // Un 422 también puede indicar permisos, configuración o un fallo de fetch.
+  let detail = null;
+  try { detail = typeof e?.body === "string" ? JSON.parse(e.body) : e?.body; }
+  catch { /* A non-JSON error keeps its original message. */ }
+  if (detail?.code === "creation_rejected_before_create") return msg
+    + " Pulsa Enviar para confirmar un reintento del mismo pedido, o corrígelo antes de enviar. El borrador y sus adjuntos siguen guardados.";
+  // Un 422 también puede ser un fallo de fetch, permisos o configuración.
   if (/working tree sucio|cambios[^.\n]*sin commitear|checkout actual tiene cambios staged, tracked o untracked/i.test(msg)) {
     return `El repo ${slug} tiene cambios sin commitear, así que no puedo abrir `
       + `una rama de trabajo limpia. Haz commit o haz stash y reintenta.`;
   }
-  if (e?.status === 409) {
-    return `Ya hay una conversación abierta para ${slug}. Abrila desde el sidebar `
-      + `(grupo Abiertas) y sigue ahí, o cerrala con 🔒 Cerrar en el header.`;
+  if (e?.status === 409 && detail?.code === "workspace_occupied") {
+    return detail.conversation_id
+      ? `El workspace Git de ${slug} está ocupado por la conversación ${detail.conversation_id}. `
+        + "Ábrela desde tu lista de conversaciones para revisar su estado."
+      : `El workspace Git de ${slug} está ocupado. Espera a que se libere o pide a Admin revisar la ocupación.`;
   }
   return "error: " + msg;
 }
@@ -2579,7 +3330,7 @@ function openQuickNote() {
 }
 
 // =====================================================================
-// Memoria del proyecto (facts + FTS5) — movida de tab-conversations
+// Memoria accesible por conversación de origen (facts + FTS5).
 // =====================================================================
 
 function showMemoria() {
@@ -2590,7 +3341,7 @@ function showMemoria() {
 
 const FACT_BADGES = {
   pending: '<span class="badge warn" title="todavía NO lo ve el experto">⏳ pendiente</span>',
-  approved: '<span class="badge ok" title="se inyecta si el proyecto tiene facts_always_on">✓ aprobado</span>',
+  approved: '<span class="badge ok" title="aprobado en su conversación de origen; no publica al proyecto">✓ aprobado</span>',
   rejected: '<span class="badge dim" title="descartado; queda para auditar al compactador">✕ rechazado</span>',
 };
 
@@ -2601,11 +3352,16 @@ const ICONO_TACHO = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none"
 const ICONO_CHECK = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3 3 7-7"/></svg>`;
 const ICONO_X = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>`;
 
+let _factsLoadGeneration = 0, _memoriesLoadGeneration = 0;
 async function loadFacts() {
+  const generation = ++_factsLoadGeneration;
   const project = $("#chat-project-filter")?.value || "";
   const tbody = $("#chat-facts-table tbody");
   const summary = $("#chat-facts-summary");
   const estado = $("#chat-facts-status")?.value ?? "pending";
+  const current = () => generation === _factsLoadGeneration
+    && ($("#chat-project-filter")?.value || "") === project
+    && ($("#chat-facts-status")?.value ?? "pending") === estado;
   if (!project) {
     tbody.innerHTML = `<tr><td colspan="5" class="empty">elige un proyecto en el filtro de la izquierda</td></tr>`;
     if (summary) summary.textContent = "";
@@ -2615,6 +3371,7 @@ async function loadFacts() {
     const qs = `project=${encodeURIComponent(project)}&limit=100`
       + (estado ? `&status=${encodeURIComponent(estado)}` : "");
     const r = await api(`conversations/facts?${qs}`);
+    if (!current()) return;
     const facts = r.facts || [];
     // El contador de pendientes va SIEMPRE, aunque estés mirando otro
     // filtro: una cola de aprobación que no se ve es una cola que no se
@@ -2635,7 +3392,7 @@ async function loadFacts() {
       const st = f.status || "approved";
       const acciones = [
         st !== "approved"
-          ? `<button class="btn btn-xs fact-ok" data-id="${f.id}" title="aprobar: el experto empieza a verlo"
+          ? `<button class="btn btn-xs fact-ok" data-id="${f.id}" title="aprobar en el hilo de origen; no publica al proyecto"
               aria-label="aprobar">${ICONO_CHECK}</button>`
           : "",
         st !== "rejected"
@@ -2659,6 +3416,7 @@ async function loadFacts() {
     tbody.querySelectorAll(".fact-no").forEach((b) =>
       b.onclick = () => setFactStatus(Number(b.dataset.id), "rejected"));
   } catch (e) {
+    if (!current()) return;
     tbody.innerHTML = `<tr><td colspan="5" class="empty fail">error: ${escape(e.message)}</td></tr>`;
   }
 }
@@ -2669,7 +3427,7 @@ async function setFactStatus(id, status) {
       method: "PATCH", body: JSON.stringify({ status }),
     });
     toast(status === "approved"
-      ? `Fact #${id} aprobado — el experto ya lo ve.`
+      ? `Fact #${id} aprobado en su hilo de origen; no se publicó al proyecto.`
       : `Fact #${id} rechazado.`, "ok");
     loadFacts();
   } catch (e) {
@@ -2677,26 +3435,41 @@ async function setFactStatus(id, status) {
   }
 }
 
-// Alta manual. Nace aprobado: lo escribió una persona.
+// Alta manual con origen verificable. Aprobar no publica al proyecto.
+let _factAddPending = false;
 async function addFactManual() {
+  if (_factAddPending) return;
   const project = $("#chat-project-filter")?.value || "";
   const input = $("#chat-fact-nuevo");
+  const selected = activeChat, source = selected?.convId;
   const fact = (input?.value || "").trim();
   if (!project) { toast("Elegí un proyecto primero.", "err"); return; }
   if (!fact) { toast("Escribí el fact.", "err"); return; }
+  if (!source || selected.projectSlug !== project || selected.canControl !== true) {
+    toast("Abre una conversación de este proyecto que puedas controlar para guardar el fact en ese hilo. No se publicará al proyecto.", "err");
+    return;
+  }
+  const button = $("#chat-fact-add");
+  _factAddPending = true;
+  if (button) button.disabled = true;
   try {
     await api("conversations/facts", {
-      method: "POST", body: JSON.stringify({ project, fact }),
+      method: "POST", body: JSON.stringify({ project, fact, source_conversation:source }),
     });
-    input.value = "";
-    toast("Fact agregado (aprobado).", "ok");
+    if (activeChat !== selected || $("#chat-project-filter")?.value !== project) return;
+    if (input.value.trim() === fact) input.value = "";
+    toast("Fact agregado y aprobado en este hilo; no se publicó al proyecto.", "ok");
     // Saltar al filtro donde va a estar: si quedás en "pendientes" no lo
     // ves y parece que no se guardó.
     const sel = $("#chat-facts-status");
     if (sel && sel.value === "pending") sel.value = "approved";
     loadFacts();
   } catch (e) {
+    if (activeChat !== selected || $("#chat-project-filter")?.value !== project) return;
     toast("No pude agregar el fact: " + e.message, "err");
+  } finally {
+    _factAddPending = false;
+    if (button?.isConnected) button.disabled = false;
   }
 }
 
@@ -2716,6 +3489,7 @@ async function deleteFact(id) {
 }
 
 async function searchMemories(skipQuery) {
+  const generation = ++_memoriesLoadGeneration;
   const project = $("#chat-project-filter")?.value || "";
   const tbody = $("#chat-mem-table tbody");
   const summaryEl = $("#chat-mem-summary");
@@ -2725,11 +3499,15 @@ async function searchMemories(skipQuery) {
     return;
   }
   const q = skipQuery ? "" : ($("#chat-mem-query")?.value.trim() || "");
+  const current = () => generation === _memoriesLoadGeneration
+    && ($("#chat-project-filter")?.value || "") === project
+    && (skipQuery || ($("#chat-mem-query")?.value.trim() || "") === q);
   tbody.innerHTML = `<tr><td colspan="4" class="empty">buscando…</td></tr>`;
   try {
     const url = `conversations/memories?project=${encodeURIComponent(project)}`
       + (q ? `&q=${encodeURIComponent(q)}` : "") + "&limit=10";
     const r = await api(url);
+    if (!current()) return;
     const badge = $("#chat-mem-badge");
     if (badge) badge.innerHTML = r.fts_available
       ? `<span class="badge ok">FTS5 activo</span>`
@@ -2757,6 +3535,7 @@ async function searchMemories(skipQuery) {
     $$(".mem-del").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); deleteMemory(b.dataset.id); }));
   } catch (e) {
+    if (!current()) return;
     tbody.innerHTML = `<tr><td colspan="4" class="empty fail">error: ${escape(e.message)}</td></tr>`;
     if (summaryEl) summaryEl.textContent = "error";
   }
@@ -2781,7 +3560,11 @@ async function deleteMemory(convId) {
 // wire-up
 // =====================================================================
 
-export function initChats() {
+export function initChats(actor = null) {
+  questionActor = typeof actor?.email === "string" ? actor.email.trim().toLowerCase() : "";
+  document.addEventListener("relay-chat-list", () => setChatDrawer(true));
+  wireQuestionViewLifecycle();
+  installReviewNotificationsButton();
   ensureMd().catch(() => {});   // precarga: el primer hilo abre ya con markdown
   wireChatObjects();
   // Sidebar
@@ -2798,6 +3581,12 @@ export function initChats() {
     onRegistered: async (task) => { await loadChats(); await navigateConversation(task.id); },
   }));
   on("#chat-refresh", "click", loadChats);
+  on("#chat-conversation-scope", "change", () => {
+    const value = $("#chat-conversation-scope").value;
+    conversationScope = ["mine", "shared", "admin"].includes(value) ? value : "mine";
+    convCache = [];
+    loadChats();
+  });
   on("#chat-quick-note", "click", openQuickNote);
   on("#chat-search", "input", renderConvList);
   // `input` y no solo `change`: elegir del datalist dispara `input` en
@@ -2817,8 +3606,10 @@ export function initChats() {
     on("#chat-project-filter", ev, filtrarProyecto);
   }
   on("#chat-memoria-toggle", "click", showMemoria);
-  on("#chat-memoria-back", "click", () =>
-    showMainView(activeChat ? "convo" : "empty"));
+  on("#chat-memoria-back", "click", () => {
+    showMainView(activeChat ? "convo" : "empty");
+    if (activeChat?.convId && !activeChat.readOnly) refreshChatQuestions(activeChat.convId, chatSelectionGeneration);
+  });
 
   // Panel
   on("#chat-panel-send", "click", sendCurrentMessage);
@@ -2848,6 +3639,7 @@ export function initChats() {
   });
   on("#chat-panel-extract-facts", "click", extractFactsFromConversation);
 
+  on("#chat-panel-input", "input", () => { ++composerRevision; });
   // Ctrl+Enter envía. Si la paleta de comandos está abierta, el Enter es
   // suyo (elige la opción marcada) y no manda el mensaje.
   on("#chat-panel-input", "keydown", (e) => {

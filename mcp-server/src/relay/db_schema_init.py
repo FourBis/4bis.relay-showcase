@@ -32,6 +32,8 @@ class DatabaseSchemaMixin:
                 conn.execute(
                     "ALTER TABLE users ADD COLUMN project_slugs_json "
                     "TEXT NOT NULL DEFAULT '[]'")
+            if "archived_at" not in _user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN archived_at TEXT")
             conn.commit()
             # Migración best-effort para DBs existentes (iter 4.5, 2026-07-07):
             # la columna native_tools se agregó después. Si la tabla ya
@@ -249,7 +251,7 @@ class DatabaseSchemaMixin:
                 pass
             # Migración Iter 5.1 (ADR-028 enmienda): rama ÚNICA + PR
             # único al final del run. Idempotente.
-            for col in ("branch", "pr_url"):
+            for col in ("branch", "pr_url", "requested_by"):
                 try:
                     conn.execute(f"ALTER TABLE night_runs ADD COLUMN {col} TEXT")
                     conn.commit()

@@ -36,6 +36,9 @@ async def commit_paths(repo: str, branch: str, *, message: str,
                        paths: Optional[list[str]] = None) -> dict:
     """Commitea la rama de la conversación. `paths` vacío = `git add -A`.
 
+    La selección usa paths literales. Un rename requiere origen y destino;
+    el staging de cualquier otro path se conserva y bloquea la operación.
+
     Guard: HEAD tiene que estar EN la rama de la conversación. Commitear
     con HEAD en otra rama mete el trabajo del experto en la rama de
     otro, y eso no se deshace con un botón.
@@ -65,19 +68,38 @@ async def commit_paths(repo: str, branch: str, *, message: str,
         out["error"] = perr
         return out
     if rels:
-        rc, txt = await git_process._git(repo, "add", "--", *rels)
+        # No tocar el índice si ya contiene algo que la selección no cubre.
+        # -z conserva nombres con saltos de línea y --no-renames incluye ambos
+        # lados de un rename, para no aceptar una selección incompleta.
+        rc, txt, _ = await git_process._git_out(repo, "diff", "--cached", "--name-only", "--no-renames", "-z")
+        if rc != 0:
+            out["error"] = "no pude verificar los archivos staged antes de commitear"
+            return out
+        def selected(path):
+            return any(path == rel or path.startswith(rel.rstrip("/") + "/") for rel in rels)
+        if any(not selected(path) for path in txt.split("\0") if path):
+            out["error"] = "hay archivos staged fuera de la selección; consérvalos y revisa la selección antes de commitear"
+            return out
+    if rels:
+        rc, txt = await git_process._git(repo, "add", "--", *(f":(literal){rel}" for rel in rels))
     else:
         rc, txt = await git_process._git(repo, "add", "-A")
     if rc != 0:
         out["error"] = f"git add falló: {txt[-200:]}"
         return out
-    rc, txt, _ = await git_process._git_out(repo, "diff", "--cached", "--name-only")
-    staged = [ln for ln in txt.splitlines() if ln.strip()] if rc == 0 else []
+    rc, txt, _ = await git_process._git_out(repo, "diff", "--cached", "--name-only", "--no-renames", "-z")
+    if rc != 0:
+        out["error"] = "no pude verificar los archivos staged; no se creó un commit"
+        return out
+    staged = [name for name in txt.split("\0") if name]
     if not staged:
         out["error"] = "no hay nada staged para commitear"
         return out
-    out["files"] = len(staged)
-    rc, txt = await git_process._git(repo, "commit", "-m", msg)
+    out["files"] = sum(selected(name) for name in staged) if rels else len(staged)
+    # --only limita también la carrera con otro escritor del índice después
+    # del chequeo anterior. El staging ajeno nunca se limpia ni se resetea.
+    commit = ("commit", "--only", "-m", msg, "--", *(f":(literal){rel}" for rel in rels)) if rels else ("commit", "-m", msg)
+    rc, txt = await git_process._git(repo, *commit)
     if rc != 0:
         out["error"] = f"git commit falló: {txt[-300:]}"
         return out
@@ -278,7 +300,7 @@ async def restore_paths(repo: str, branch: str, paths: list[str]) -> dict:
                         f"no descarto cambios de una rama ajena")
         return out
     rc, txt = await git_process._git(repo, "restore", "--source=HEAD", "--staged",
-                         "--worktree", "--", *rels)
+                         "--worktree", "--", *(f":(literal){rel}" for rel in rels))
     if rc != 0:
         out["error"] = f"git restore falló: {txt[-300:]}"
         return out

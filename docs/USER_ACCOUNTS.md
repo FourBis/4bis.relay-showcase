@@ -102,3 +102,17 @@ Los tests de cuentas, actor y correo usan proveedores simulados. La demo estáti
 no inicia OAuth ni envía mensajes. Una instalación debe comprobar su propio flujo
 con usuarios autorizados antes de afirmar que las integraciones funcionan allí.
 Consulta [Equipo](TEAM_ACCESS.md) y [SECURITY.md](../SECURITY.md) para el alcance.
+
+## Cambios de cuenta y efectos externos
+
+El candidato de paridad revalida que la cuenta esté activa y no archivada.
+La admisión durable de una publicación de revisión externa también comprueba
+su conexión personal, proyecto, permisos y política dentro de una transacción.
+Cambiar la conexión antes de esa admisión impide usar la revisión anterior de
+sus credenciales. Una revocación posterior no retira una petición remota ya
+admitida; un POST incierto se reconcilia antes de volver a enviarse.
+
+Las [consultas MCP personales](GENERIC_MCP.md) necesitan identidad personal y
+opt-in por proyecto; ni una clave compartida ni el actor local genérico sustituyen
+esa identidad. La [revisión estática](qa/parity-2026-11-01.md) no ejecutó OAuth,
+envíos, publicaciones ni proveedores.

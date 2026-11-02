@@ -2,7 +2,7 @@
 
 Cubrir:
   - list_zombie_chats: filtra por edad + status=running
-  - delete_chat: hard delete + best-effort del .md
+  - delete_chat: elimina sólo huérfanos vacíos y conserva resultados/archivos
   - experts_cancel: si el chat figura running pero no hay proceso,
     marcarlo cancelled (zombie path) — antes daba 404
   - GET /admin/api/chats/zombies: endpoint
@@ -117,26 +117,26 @@ class TestListZombies(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_chat_removes_row(self) -> None:
         await self._insert_chat("c1", "2020-01-01T00:00:00Z")
-        ok = await self.db.delete_chat("c1")
+        ok = await self.db.delete_chat("c1", expected_started_at="2020-01-01T00:00:00Z")
         self.assertTrue(ok)
         z = await self.db.list_zombie_chats(older_than_s=60)
         self.assertEqual(z, [])
 
     async def test_delete_chat_returns_false_for_missing(self) -> None:
-        ok = await self.db.delete_chat("nope")
+        ok = await self.db.delete_chat("nope", expected_started_at="2020-01-01T00:00:00Z")
         self.assertFalse(ok)
 
-    async def test_delete_chat_removes_md_file(self) -> None:
+    async def test_delete_chat_preserves_report_and_row(self) -> None:
         # crear un .md real y asociarlo
         await self._insert_chat("c1", "2020-01-01T00:00:00Z")
         md = Path(self._tmp.name) / "report.md"
         md.write_text("reporte", encoding="utf-8")
         await self.db.run(
             "UPDATE chats SET md_path=? WHERE id=?", (str(md), "c1"))
-        ok = await self.db.delete_chat("c1")
-        self.assertTrue(ok)
-        self.assertFalse(md.exists(),
-            "delete debe borrar el .md asociado (best-effort)")
+        ok = await self.db.delete_chat("c1", expected_started_at="2020-01-01T00:00:00Z")
+        self.assertFalse(ok)
+        self.assertTrue(md.exists(), "un resultado asociado siempre se conserva")
+        self.assertIsNotNone(await self.db.get_chat("c1"))
 
 
 # ---------- endpoint layer: experts_cancel zombie path ----------
@@ -220,6 +220,7 @@ class TestZombiesEndpoint(unittest.IsolatedAsyncioTestCase):
         arreglo que en producción ya no existe. Lo que la grid atiende
         es el zombie que nace con el relay arriba.
         """
+        await self.db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
         for cid, started in [
             ("z1", "2020-01-01T00:00:00Z"),
             ("z2", "2020-06-15T12:00:00Z"),
@@ -288,11 +289,6 @@ class TestDeleteChatEndpoint(unittest.IsolatedAsyncioTestCase):
         _tmp_env(base)
         self.db = Database()
         await self.db.init_schema()
-        await self.db.run(
-            "INSERT INTO chats (id, project_slug, target, started_at, "
-            "status, source) VALUES (?,?,?,?,?,?)",
-            ("c1", "demo", "demo", "2020-01-01T00:00:00Z",
-             "running", "test"))
 
     async def asyncTearDown(self) -> None:
         _restore_env(self._env_backup)
@@ -302,6 +298,11 @@ class TestDeleteChatEndpoint(unittest.IsolatedAsyncioTestCase):
         from relay.server import create_app
         app = create_app()
         async with TestClient(TestServer(app)) as client:
+            await self.db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
+            # Seed after startup: boot correctly closes pre-existing runs.
+            await self.db.run(
+                "INSERT INTO chats (id, project_slug, target, started_at, status, source) VALUES (?,?,?,?,?,?)",
+                ("c1", "demo", "demo", "2020-01-01T00:00:00Z", "running", "test"))
             r = await client.delete("/admin/api/chats/c1")
             self.assertEqual(r.status, 200)
             body = await r.json()

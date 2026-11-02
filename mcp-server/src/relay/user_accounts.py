@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -168,6 +169,15 @@ async def oauth_request(method: str, url: str, *, response_type=dict, **kwargs):
         raise AccountError("No se pudo contactar al proveedor de la cuenta.") from None
 
 
+def _connection_revision(row) -> str:
+    """Internal opaque identity of the exact stored connection, not its token."""
+    saved = dict(row or {})
+    fields = ("subject", "login", "status", "token_blob", "updated_at")
+    material = json.dumps([saved.get(key) for key in fields],
+                          ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 class AccountStore:
     def __init__(self, db):
         self.db = db
@@ -290,10 +300,18 @@ class AccountStore:
                 profile = {"id": row["subject"], "login": row["login"]} if provider == "github" else {
                     "sub": row["subject"], "email": row["account_email"], "email_verified": True}
                 await self.save(provider, email, profile, merged)
-                data = merged
+                # The revision must identify the persisted row supplying this
+                # token, including a successful refresh under the account lock.
+                row = await self.row(provider, email)
+                if not row or row["status"] != "connected":
+                    raise AccountError("La conexión cambió durante su renovación; vuelve a conectar la cuenta.")
+                data = self.decrypt(row["token_blob"])
+                if data.get("provider") != provider or data.get("relay_email") != email:
+                    raise AccountError("La conexión guardada no pertenece a este usuario.")
             return {"access_token": data["access_token"], "subject": row["subject"],
                     "login": row["login"], "email": row["account_email"],
-                    "scopes": data.get("scope", "").split()}
+                    "scopes": data.get("scope", "").split(),
+                    "_connection_revision": _connection_revision(row)}
 
     async def disconnect(self, provider, email):
         await self.check_user(provider, email)
@@ -303,7 +321,7 @@ class AccountStore:
             self.generations[key] = self.generations.get(key, 0) + 1
             await self.db.run("DELETE FROM user_accounts WHERE email=? AND provider=?", (email, provider))
             self.pending = {k: v for k, v in self.pending.items()
-                            if (v["provider"], v["email"]) != (provider, email)}
+                            if (v["provider"], v.get("email")) != (provider, email)}
             if provider == "google":
                 self.mail_drafts = {k: v for k, v in self.mail_drafts.items() if v["email"] != email}
         return row

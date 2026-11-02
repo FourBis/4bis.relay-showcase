@@ -107,6 +107,8 @@ def register_admin_routes(app: web.Application) -> None:
     app.router.add_get("/admin/api/users", admin_commands.api_users_list)
     app.router.add_put("/admin/api/users", admin_commands.api_user_upsert)
     app.router.add_delete("/admin/api/users/{email}", admin_commands.api_user_delete)
+    app.router.add_post("/admin/api/users/{email}/archive", admin_commands.api_user_archive)
+    app.router.add_post("/admin/api/users/{email}/restore", admin_commands.api_user_restore)
     admin_config.register_model_routes(app)
     app.router.add_get("/admin/api/night/templates", admin_project_lifecycle.api_night_templates)
     app.router.add_put("/admin/api/night/templates", admin_project_lifecycle.api_night_template_save)

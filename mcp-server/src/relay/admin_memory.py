@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from aiohttp import web
-from . import memory
+from . import identity, memory
 from .app_state import DB_KEY
 
 logger = logging.getLogger("relay.admin")
@@ -31,16 +31,10 @@ async def api_facts_list(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": f"status debe ser uno de {list(db.FACT_STATES)}"},
             status=400)
-    facts = await db.list_facts(project_slug, limit=limit, status=status)
-    # El contador de pendientes viaja SIEMPRE, mires el filtro que mires:
-    # una cola de aprobación que no se ve es una cola que no se atiende
-    # (los 13 borradores de skills, el más viejo de hace 25 días).
-    pendientes = len(await db.list_facts(
-        project_slug, limit=500, status="pending"))
-    return web.json_response({
-        "project": project_slug, "facts": facts,
-        "pendientes": pendientes,
-    })
+    view = await db.facts_view(project_slug, limit=limit, status=status,
+                               actor=identity.requester(request))
+    return web.json_response({"project": project_slug, **view},
+                             headers={"Cache-Control": "no-store"})
 
 async def api_project_git_diff(request: web.Request) -> web.Response:
     """GET /admin/api/projects/{slug}/git-diff — diff sin procesar.
@@ -127,7 +121,7 @@ async def api_memories_search(request: web.Request) -> web.Response:
         limit = min(int(request.query.get("limit", "5")), 50)
     except (TypeError, ValueError):
         limit = 5
-    hits = await db.search_memories(project_slug, q, limit=limit)
+    hits = await db.search_memories(project_slug, q, limit=limit, actor=identity.requester(request))
     return web.json_response({
         "project": project_slug,
         "query": q,
@@ -146,7 +140,7 @@ async def api_fact_delete(request: web.Request) -> web.Response:
         fact_id = int(request.match_info["id"])
     except (TypeError, ValueError):
         return web.json_response({"error": "id inválido"}, status=400)
-    if not await db.delete_fact(fact_id):
+    if not await db.delete_fact(fact_id, actor=identity.requester(request)):
         return web.json_response({"error": "no existe"}, status=404)
     return web.json_response({"deleted": True, "id": fact_id})
 
@@ -170,7 +164,7 @@ async def api_fact_status(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": f"status debe ser uno de {list(db.FACT_STATES)}"},
             status=400)
-    if not await db.set_fact_status(fact_id, status):
+    if not await db.set_fact_status(fact_id, status, actor=identity.requester(request)):
         return web.json_response({"error": "no existe"}, status=404)
     return web.json_response({"id": fact_id, "status": status})
 
@@ -196,7 +190,14 @@ async def api_fact_create(request: web.Request) -> web.Response:
     if await db.get_project(project_slug) is None:
         return web.json_response(
             {"error": f"proyecto {project_slug!r} no existe"}, status=404)
-    await db.add_facts(project_slug, [fact], status="approved")
+    source = body.get("source_conversation")
+    if not isinstance(source, str) or not source.strip():
+        return web.json_response({"error": "source_conversation requerido: un hecho conserva el acceso de su conversación de origen"}, status=422)
+    try:
+        await db.add_facts(project_slug, [fact], source_conversation=source.strip(),
+                           status="approved", actor=identity.requester(request))
+    except PermissionError:
+        return web.json_response({"error": "Origen no disponible para esta cuenta y proyecto"}, status=404)
     return web.json_response({"created": True, "project": project_slug})
 
 async def api_conversation_extract_facts(request: web.Request) -> web.Response:
@@ -217,6 +218,10 @@ async def api_conversation_extract_facts(request: web.Request) -> web.Response:
     conv = await db.get_conversation(conv_id)
     if conv is None:
         return web.json_response({"error": "no existe"}, status=404)
+    actor = identity.requester(request)
+    conv = await db.knowledge_source(conv_id, conv["project_slug"], actor=actor, permission="control")
+    if conv is None:
+        return web.json_response({"error": "Origen no disponible"}, status=404)
     messages_json = conv.get("messages_json") or ""
     if not messages_json:
         return web.json_response(
@@ -224,7 +229,7 @@ async def api_conversation_extract_facts(request: web.Request) -> web.Response:
     # Los vigentes van al compactador para que no re-emita duplicados ni
     # se pise con lo que ya está esperando revisión (por eso sin filtro
     # de status: un `pending` duplicado sigue siendo un duplicado).
-    existing = await db.list_facts(conv["project_slug"], limit=100)
+    existing = await db.list_facts(conv["project_slug"], limit=100, actor=actor, source_conversation=conv_id)
     try:
         result = await memory.compact_conversation(
             messages_json, existing_facts=existing)
@@ -235,8 +240,11 @@ async def api_conversation_extract_facts(request: web.Request) -> web.Response:
     if result is None:
         return web.json_response(
             {"error": "no se pudo destilar nada del hilo"}, status=422)
-    n = await db.add_facts(
-        conv["project_slug"], result.facts, source_conversation=conv_id)
+    try:
+        n = await db.add_facts(conv["project_slug"], result.facts,
+            source_conversation=conv_id, actor=actor)
+    except PermissionError:
+        return web.json_response({"error": "El acceso al origen cambió durante la extracción"}, status=404)
     # El summary se descarta a propósito: esto NO es compactar. Pisar el
     # resumen del hilo desde un botón que dice "extraer hechos" sería
     # hacer algo que nadie pidió.
@@ -254,7 +262,7 @@ async def api_memory_delete(request: web.Request) -> web.Response:
     """
     db = request.app[DB_KEY]
     conv_id = request.match_info["conv_id"]
-    if not await db.delete_memory(conv_id):
+    if not await db.delete_memory(conv_id, actor=identity.requester(request)):
         return web.json_response(
             {"error": "no existe o no tiene summary"}, status=404)
     return web.json_response({"deleted": True, "conversation_id": conv_id})

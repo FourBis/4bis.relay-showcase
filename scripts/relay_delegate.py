@@ -193,8 +193,9 @@ def delegate(target=None, task=None, model=None, timeout=600, *,
           f"model={chat.get('model')} status={chat.get('status')} "
           f"chat_id={chat_id}", file=sys.stderr)
     stages = chat.get("stages") or {}
+    # Una respuesta guardada no acredita que el trabajo delegado haya terminado.
     incomplete = stages.get("verifier_verdict") in ("needs_more", "needs_human", "off_plan") \
-        or chat.get("phase_at_end") == "no_final_text"
+        or chat.get("phase_at_end") in {"no_final_text", "question", "planned", "graph"}
     return 0 if chat.get("status") == "ok" and answer and not incomplete else 1
 
 

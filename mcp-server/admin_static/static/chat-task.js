@@ -5,6 +5,9 @@ import { toast, confirmModal } from "./ui.js";
 import { registerPoller } from "./pollers.js";
 import { externalPanelHtml, openExternalEvidence } from "./chat-external-pr.js";
 import { issuePanelHtml, mountIssuePanel } from "./chat-issue.js";
+import { externalReviewRetryPayload } from "./chat-external-review.js";
+import { openExternalImages } from "./chat-external-images.js";
+import { openExternalReviewConfiguration } from "./chat-external-review-config.js";
 
 const ACTIONS = {
   continue: "Continuar",
@@ -12,6 +15,7 @@ const ACTIONS = {
   cancel: "Cancelar",
   publish: "Publicar PR",
   enable_write: "Habilitar escritura",
+  import_local_changes: "Incorporar cambios locales",
 };
 
 const requestIds = new Map();
@@ -61,26 +65,33 @@ function taskAllows(task, action) {
     ? task.allowed_actions.includes(action) : task?.can_control !== false;
 }
 
+export function knowledgeWarningHtml(task) {
+  if (task?.knowledge_warning?.code !== "legacy_knowledge_extra_omitted") return "";
+  return `<p class="warn-box" role="status">${escape("Este turno contenía contexto antiguo sin origen verificable. Se conservó en el registro y no se usará como instrucciones. Puedes aportar de nuevo las instrucciones o consultar la memoria con tu cuenta.")}</p>`;
+}
+
 export function panelHtml(task) {
   if (!task) return `<div class="chat-task-empty">Sin tarea persistente para este hilo.</div>`;
-  if (task.mode === "external_pr") return externalPanelHtml(task) + issuePanelHtml(task);
+  const knowledgeWarning = knowledgeWarningHtml(task);
+  if (task.mode === "external_pr") return knowledgeWarning + externalPanelHtml(task) + issuePanelHtml(task);
   const tracking = task.tracking || {};
   const controlsLocked = ["cancelled", "cancelling", "finished", "cleaned"]
     .includes(task.state);
   const writeTask = task.mode === "write";
   const hasActionContract = Array.isArray(task.allowed_actions);
-  const granted = (action) => taskAllows(task, action);
+  const allowedActions = hasActionContract ? new Set(task.allowed_actions) : null;
+  const granted = (action) => allowedActions ? allowedActions.has(action) : task.can_control !== false;
   const trackAllowed = granted("track") && writeTask && !!task.pr_url && !!task.publish_allowed
     && !controlsLocked && !["paused", "provisioning"].includes(task.state);
   const busy = ["running", "validating", "publishing", "provisioning", "cancelling"]
     .includes(task.state);
   const actionAllowed = (action) => granted(action)
     && (!controlsLocked || (task.state === "cancelled" && !!task.cancellation_error && action === "cancel"))
-    && (action !== "publish" || (writeTask && !!task.publish_allowed
-      && !["blocked", "paused", "provisioning"].includes(task.state)))
+    && (action !== "publish" || (writeTask && !!task.publish_allowed && !["blocked", "paused", "provisioning"].includes(task.state)))
     && (action !== "continue" || !busy)
     && (action !== "pause" || task.state !== "paused");
   const enableWrite = granted("enable_write") && !writeTask && !busy && !controlsLocked;
+  const importLocal = allowedActions?.has("import_local_changes") && !busy && !controlsLocked;
   const limits = tracking.enabled
     ? `<span class="badge warn">seguimiento activo · ${tracking.iterations || 0}/${tracking.max_iterations || 0} iteraciones</span>`
     : `<span class="badge dim">seguimiento apagado</span>`;
@@ -93,20 +104,22 @@ export function panelHtml(task) {
     ? `<span class="chat-task-detail">Validación: ${escape(({ok:"correcta",failed:"fallida",stale:"obsoleta",running:"en curso",unconfigured:"sin configurar"})[task.validation.status] || task.validation.status)} · ${escape(task.validation.head_sha || "—")}<br>${escape((task.validation.detail || "").slice(0, 280))}</span>`
     : "";
   const pr = safeHttpUrl(task.pr_url);
-  return `<div class="chat-task-head"><strong>Tarea persistente</strong>${limits}</div>
+  return knowledgeWarning + `<div class="chat-task-head"><strong>Tarea persistente</strong>${limits}</div>
     <div class="chat-task-meta"><span>${escape(stateText(task))}</span>
       <span title="${attrEscape(task.workspace_path)}">${escape(task.branch || task.workspace_path || "sin workspace")}</span>
       ${pr ? `<a href="${attrEscape(pr)}" target="_blank" rel="noopener">PR</a>` : ""}</div>
     ${validation}${task.pending_events ? `<span class="chat-task-detail">${Number(task.pending_events)} mensaje(s) en cola</span>` : ""}<div class="chat-task-actions">${actions}
       ${enableWrite ? `<button type="button" class="btn btn-xs btn-primary" data-task-action="enable_write">${taskActionLabel("enable_write")}</button>` : ""}
-      ${writeTask && (!hasActionContract || granted("track")) ? `<label class="chat-task-track"><input type="checkbox" data-task-track ${trackAllowed ? "" : "disabled"}
+      ${importLocal ? `<button type="button" class="btn btn-xs btn-primary" data-task-action="import_local_changes">${taskActionLabel("import_local_changes")}</button>` : ""}
+      ${writeTask && granted("track") ? `<label class="chat-task-track"><input type="checkbox" data-task-track ${trackAllowed ? "" : "disabled"}
         ${tracking.enabled ? "checked" : ""} aria-label="Activar seguimiento automático">
         Seguimiento automático <span class="text-xs text-zinc-500">3 iteraciones · 50K tokens · 60 min</span></label>` : ""}</div>
     ${task.error ? `<p class="chat-task-error">${escape(task.error)}</p>` : ""}${issuePanelHtml(task)}`;
 }
 
-export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate } = {}) {
-  const panel = document.getElementById("chat-task-panel");
+export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate,
+  panelElement = null, pollTabId = "chat", isCurrent = () => true } = {}) {
+  const panel = panelElement || document.getElementById("chat-task-panel");
   if (!panel) return () => {};
   let current = null;
   let loading = false;
@@ -116,17 +129,29 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
   let issueActionPending = false;
   let mutationVersion = 0;
   let issuePanel = null;
+  let rejectedScope = false;
   const render = (task) => {
+    if (disposed || !isCurrent()) return;
+    // Project panels must not display a record remapped while a read/action was
+    // in flight. Legacy Chat responses without these fields keep their contract.
+    if (panelElement && (!task || task.project_slug !== projectSlug || task.id !== convId)) {
+      rejectedScope = true;
+      issuePanel?.destroy(); issuePanel = null;
+      panel.hidden = false;
+      panel.innerHTML = '<div class="chat-task-error" role="alert">El registro ya no corresponde a este proyecto. Vuelve al listado para verificarlo.</div>';
+      return false;
+    }
+    rejectedScope = false;
     const focused = document.activeElement;
     const focusKey = focused?.matches?.("[data-task-action]")
       ? `action:${focused.dataset.taskAction}`
       : focused?.matches?.("[data-task-track]") ? "track"
         : focused?.matches?.("[data-issue-action]") ? `issue:${focused.dataset.issueAction}`
         : focused?.matches?.("[data-external-action]") ? `external:${focused.dataset.externalAction}` : "";
-    const openSections = [...panel.querySelectorAll("details[open][data-external-section]")]
-      .map(section => section.dataset.externalSection);
     const openIssueSections = [...panel.querySelectorAll("details[open][data-issue-section]")]
       .map(section => section.dataset.issueSection);
+    const openSections = [...panel.querySelectorAll("details[open][data-external-section]")]
+      .map(section => section.dataset.externalSection);
     current = task;
     panel.hidden = !task;
     panel.classList?.toggle("chat-external-panel", task?.mode === "external_pr");
@@ -136,7 +161,7 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
       issueActionPending = busy;
       if (busy) ++mutationVersion;
     },onSaved:async next => {
-      if (disposed) return;
+      if (disposed || !isCurrent()) return;
       ++mutationVersion;
       if (next?.mode) render(next);
       else { loading = false; await refresh(); }
@@ -147,15 +172,13 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
     panel.querySelector("[data-task-track]")?.addEventListener("change", (event) =>
       runTracking(event.target.checked));
     panel.querySelectorAll("[data-external-action]").forEach((button) => {
-      button.disabled = externalActionPending;
+      button.disabled = externalActionPending || button.disabled;
       button.addEventListener("click", () => runExternalAction(button.dataset.externalAction));
     });
     panel.querySelectorAll("[data-external-section]").forEach(section => {
       section.open = openSections.includes(section.dataset.externalSection);
     });
-    panel.querySelectorAll("[data-issue-section]").forEach(section => {
-      section.open = openIssueSections.includes(section.dataset.issueSection);
-    });
+    panel.querySelectorAll("[data-issue-section]").forEach(section => { section.open = openIssueSections.includes(section.dataset.issueSection); });
     if (focusKey) {
       const target = focusKey === "track"
         ? panel.querySelector("[data-task-track]")
@@ -165,50 +188,67 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
       if (target && !target.disabled) target.focus();
       else panel.querySelector("button:not(:disabled)")?.focus();
     }
+    return true;
   };
   const refresh = async () => {
+    if (!isCurrent()) { disposed = true; unregister?.(); issuePanel?.destroy(); return; }
     if (!convId || loading || disposed || externalActionPending || issueActionPending) return;
     loading = true;
     const version = mutationVersion;
     try {
       const task = await apiRoot(`/conversations/${encodeURIComponent(convId)}/task`);
-      if (disposed || version !== mutationVersion) return;
+      if (disposed || !isCurrent() || version !== mutationVersion) return;
       const usable = task?.mode || task?.creation_failed ? task : null;
       const previous = current;
-      render(usable);
-      await onTaskUpdate?.(usable, previous);
+      if (render(usable) !== false) await onTaskUpdate?.(usable, previous);
     } catch (e) {
-      if (disposed || version !== mutationVersion) return;
+      if (disposed || !isCurrent() || version !== mutationVersion) return;
       panel.hidden = false;
       panel.innerHTML = `<div class="chat-task-error">No se pudo leer la tarea: ${escape(e.message)}</div>`;
     } finally { loading = false; }
   };
   const runExternalAction = async (action) => {
-    if (current?.mode !== "external_pr" || externalActionPending
-        || !current.allowed_actions?.includes(action === "evidence" ? "external_evidence" : "external_refresh")) return;
+    if (disposed || !isCurrent() || rejectedScope || current?.mode !== "external_pr" || externalActionPending) return;
+    const permission = {evidence:"external_evidence",images:"external_evidence_image",review_configure:"external_review_configure",refresh:"external_refresh",review_retry:"external_review_retry"}[action];
+    if (!permission || !current.allowed_actions?.includes(permission)) return;
     if (action === "evidence") {
       return openExternalEvidence({convId, task:current, onSaved:(next) => {
-        if (!disposed) { ++mutationVersion; render(next); }
+        if (!disposed && isCurrent()) { ++mutationVersion; render(next); }
       }});
     }
-    if (action !== "refresh") return;
+    if (action === "images") {
+      return openExternalImages({convId,task:current,onSaved:async () => {
+        if (!disposed && isCurrent()) { ++mutationVersion; loading = false; await refresh(); }
+      }});
+    }
+    if (action === "review_configure") {
+      return openExternalReviewConfiguration({task:current,onSaved:async () => {
+        if (!disposed && isCurrent()) { ++mutationVersion; loading = false; await refresh(); }
+      }});
+    }
+    if (!["refresh","review_retry"].includes(action)) return;
     externalActionPending = true; ++mutationVersion; render(current);
     try {
       const next = await apiRoot(`/conversations/${encodeURIComponent(convId)}/external-pr`, {
-        method:"POST", body:{action:"refresh"},
+        method:"POST", body:action === "review_retry" ? externalReviewRetryPayload(current) : {action:"refresh"},
       });
-      if (!disposed) { render(next); toast("Estado de GitHub actualizado", "ok"); }
+      if (!disposed && isCurrent() && render(next) !== false) toast(action === "review_retry" ? "Estado de la revisión actualizado" : "Estado de GitHub actualizado", "ok");
     } catch (error) {
       externalActionPending = false;
-      if (!disposed) { toast(`No se pudo verificar GitHub: ${error.message}`, "err"); await refresh(); }
+      if (!disposed && isCurrent()) { toast(`No se pudo verificar GitHub: ${error.message}`, "err"); await refresh(); }
     } finally {
       externalActionPending = false;
-      if (!disposed) render(current);
+      if (!disposed && !rejectedScope) render(current);
     }
   };
   const runAction = async (action) => {
-    if (!current || !taskAllows(current, action) || !ACTIONS[action]) return;
+    if (disposed || !isCurrent() || rejectedScope || !current || !taskAllows(current, action) || !ACTIONS[action]) return;
     let extra = {};
+    if (action === "import_local_changes" && !await confirmModal({
+      title: "Incorporar los cambios locales revisados",
+      body: "Se copiarán los cambios tracked del checkout a una rama nueva desde develop. Los originales se conservarán. Revisa primero el diff local; los archivos nuevos, conflictos y cambios en develop seguirán bloqueando la operación.",
+      confirmText: "Conservar e incorporar",
+    })) return;
     if (action === "continue" && requiresUncertainAcknowledgement(current)) {
       const events = current.uncertain_events;
       const approved = await confirmModal({
@@ -235,13 +275,13 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
       });
       requestIds.delete(`${convId}:${action}`);
       if (disposed) return;
-      render(next?.id ? next : current);
+      if (render(next?.id ? next : current) === false) return;
       toast(`${taskActionLabel(action)}: actualizado`, "ok");
       if (action === "continue") onContinue?.();
     } catch (e) { toast(`No se pudo ${taskActionLabel(action).toLowerCase()}: ${e.message}`, "err"); }
   };
   const runTracking = async (enabled) => {
-    if (!current || !taskAllows(current, "track")) return;
+    if (disposed || !isCurrent() || rejectedScope || !current || !taskAllows(current, "track")) return;
     try {
       const next = await apiRoot(`/conversations/${encodeURIComponent(convId)}/task`, {
         method: "POST", body: taskActionPayload(convId, "track", {
@@ -250,7 +290,7 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
       });
       requestIds.delete(`${convId}:track:${String(enabled)}`);
       if (disposed) return;
-      render(next?.id ? next : { ...current, tracking: { ...(current.tracking || {}), enabled } });
+      if (render(next?.id ? next : { ...current, tracking: { ...(current.tracking || {}), enabled } }) === false) return;
       toast(enabled ? "Seguimiento activado con límites" : "Seguimiento apagado", "ok");
     } catch (e) {
       render(current);
@@ -258,7 +298,7 @@ export function mountTaskPanel({ convId, projectSlug, onContinue, onTaskUpdate }
     }
   };
   refresh();
-  unregister = registerPoller(refresh, 10_000, { tabId: "chat" });
+  unregister = registerPoller(refresh, 10_000, { tabId: pollTabId });
   return { refresh, destroy: () => {
     disposed = true; unregister?.(); issuePanel?.destroy(); panel.hidden = true; panel.innerHTML = "";
     panel.classList?.remove("chat-external-panel");

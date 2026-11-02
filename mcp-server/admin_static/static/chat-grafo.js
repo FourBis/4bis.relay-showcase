@@ -20,7 +20,7 @@
 // sus estilos pide un `build-css.ps1`.
 
 import { $, apiRoot, escape } from "./api.js";
-import { toast, confirmModal } from "./ui.js";
+import { toast, confirmModal, emptyState } from "./ui.js";
 import { verTiradorGrafo } from "./panel-resize.js";
 import { isChatViewVisible } from "./chat-window.js";
 
@@ -59,7 +59,7 @@ let estado = null;   // { convId, graphId, timer, sel, vista, zoom } | null
 // Ciclo de vida
 // =====================================================================
 
-/** Engancha el panel a una conversación. Si no tiene grafo, lo apaga. */
+/** Mantiene el acceso al plan también mientras carga o todavía no hay tareas. */
 export async function attachGrafo(convId) {
   detachGrafo();
   if (!convId) return;
@@ -67,6 +67,9 @@ export async function attachGrafo(convId) {
   // preferencia sobre ESTE plan, no una configuración del usuario.
   estado = { convId, graphId: null, timer: null, sel: null,
              vista: "grafo", zoom: 0, g: null };
+  const btn = $("#chat-panel-grafo");
+  if (btn) btn.hidden = false;
+  pintarEstadoPlan("Cargando plan", "Consultando las tareas de esta conversación…");
   verVista("grafo");
   await refrescar();
 }
@@ -135,12 +138,14 @@ async function refrescar() {
     // navegador decidiera cuál gana.
     r = await apiRoot(
       `/conversations/${encodeURIComponent(propio.convId)}/plan`);
-  } catch (_) {
+  } catch (error) {
     // Sin red no se vacía lo que YA se mostró de este hilo: un timeout
     // no significa que el plan desapareció. Pero si todavía no
     // mostramos nada de este hilo, tampoco se puede dejar en pantalla
     // lo del hilo anterior — eso es peor que un panel vacío, porque se
     // lee como el plan de la conversación que estás mirando.
+    if (estado !== propio) return;
+    if (!propio.g) pintarEstadoPlan("No se pudo cargar el plan", `${error.message || error}. Reintentando automáticamente…`);
     programar(propio);
     return;
   }
@@ -150,17 +155,14 @@ async function refrescar() {
   // Si por algún motivo no trae grafo, dejamos lo que ya estaba en
   // pantalla en vez de romper el panel con un panel vacío.
   if (!r?.grafo) {
+    if (!propio.g) pintarEstadoPlan("Todavía no hay tareas", "El plan aparecerá cuando la conversación tenga una ejecución.");
     programar(propio);
     return;
   }
   if (!r.grafo.tasks?.length && !r.grafo.corriendo) {
-    // Un grafo sintético vacío no es un plan "hecho" ni debe tapar el chat.
+    // Un grafo vacío no es un plan "hecho". El acceso sigue disponible.
     propio.g = r.grafo;
-    for (const id of ["#chat-grafo", "#chat-panel-grafo"]) {
-      const el = $(id);
-      if (el) el.hidden = true;
-    }
-    verTiradorGrafo(false);
+    pintarEstadoPlan("Todavía no hay tareas", "El plan aparecerá cuando la conversación tenga una ejecución.");
     programar(propio);
     return;
   }
@@ -177,6 +179,25 @@ async function refrescar() {
   // en la UI se refleja mal".
   if (r.grafo.progreso?.estado === "activo" || r.grafo.corriendo === true) {
     programar(propio);
+  }
+}
+
+function pintarEstadoPlan(title, sub) {
+  const est = $("#chat-grafo-estado");
+  if (est) { est.textContent = title; est.className = "badge dim"; }
+  for (const id of ["#chat-grafo-lienzo", "#chat-grafo-resumen"]) {
+    const el = $(id);
+    if (el) el.innerHTML = emptyState({ title, sub });
+  }
+  for (const id of ["#chat-grafo-detalle", "#chat-grafo-veredicto", "#chat-grafo-parar", "#chat-grafo-seguir"]) {
+    const el = $(id);
+    if (el) el.hidden = true;
+  }
+  const conteo = $("#chat-grafo-conteo");
+  if (conteo) conteo.textContent = "";
+  for (const id of ["#chat-grafo-barra-ok", "#chat-grafo-barra-mal"]) {
+    const el = $(id);
+    if (el) el.style.width = "0%";
   }
 }
 
@@ -518,7 +539,9 @@ function pintar(g) {
   // desde la base los dos se ven igual. En un grafo sintético esos
   // botones no existen: no hay fila en la DB a la que pegarle.
   const vivo = g.corriendo === true;
-  const terminado = p.estado === "hecho" && evis !== "verificacion_pendiente";
+  const nodosTerminados = p.total > 0 && p.hechos === p.total;
+  const terminado = (p.estado === "hecho" || nodosTerminados)
+    && evis !== "verificacion_pendiente" && g.verification_pending !== true;
   const parar = $("#chat-grafo-parar");
   if (parar) parar.hidden = sintetico || !vivo;
   const seguir = $("#chat-grafo-seguir");

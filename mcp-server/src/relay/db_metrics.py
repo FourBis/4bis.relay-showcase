@@ -13,19 +13,26 @@ from .reporting import previous_window, sqlite_utc_timestamp, utc_window
 class DatabaseMetricsMixin:
 
     async def report_usage(self, days: int = 30,
-                           project_slug: Optional[str] = None) -> dict:
+                           project_slug: Optional[str] = None, *,
+                           from_date: str = "", to_date: str = "",
+                           tz: str = "UTC") -> dict:
         """Agregados de `chats` para el tab Informe de la Admin UI.
 
         2026-07-20: /chats capea en 200 filas — para un informe
         histórico el GROUP BY va en SQL, no en el browser. Read-only.
         """
-        since = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * 86400))
-        where = "WHERE started_at>=?"
-        params: tuple = (since,)
+        if from_date and to_date:
+            since, until, span_days = utc_window(from_date, to_date, tz)
+        else:
+            since = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(time.time() - days * 86400))
+            until, span_days = "", days
+        where, run_params = self._build_run_where(since, until, "", "")
+        params = tuple(run_params)
         if project_slug:
             where += " AND project_slug=? COLLATE NOCASE"
-            params = (since, project_slug)
+            params += (project_slug,)
         agg = ("COUNT(*) AS runs, "
                "COALESCE(SUM(tokens_in),0) AS tokens_in, "
                # 2026-08-31: la parte cacheada de `tokens_in`, no un
@@ -36,9 +43,12 @@ class DatabaseMetricsMixin:
                "COALESCE(SUM(tool_calls),0) AS tool_calls, "
                "CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms, "
                "SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END) AS not_ok")
+        local_day = ("substr(started_at,1,10)" if tz == "UTC" else
+                     "substr(relay_local_timestamp(started_at,?),1,10)")
+        daily_params = (() if tz == "UTC" else (tz,)) + params
         daily = await self.run(
-            f"SELECT substr(started_at,1,10) AS day, {agg} "
-            f"FROM chats {where} GROUP BY day ORDER BY day", params)
+            f"SELECT {local_day} AS day, {agg} "
+            f"FROM chats {where} GROUP BY day ORDER BY day", daily_params)
         by_project = await self.run(
             f"SELECT COALESCE(project_slug,'—') AS project, {agg}, "
             "MAX(started_at) AS last_run "
@@ -49,7 +59,9 @@ class DatabaseMetricsMixin:
             f"COALESCE(source,'—') AS source, {agg} "
             f"FROM chats {where} GROUP BY author, source "
             "ORDER BY tokens_in DESC", params)
-        return {"days": days, "since": since, "daily": daily,
+        return {"days": span_days, "since": since, "until": until,
+                "from_date": from_date, "to_date": to_date, "tz": tz,
+                "daily": daily,
                 "by_project": by_project, "by_author": by_author}
 
     # Sprint 1 (Item 3): Dashboard de métricas
@@ -57,7 +69,7 @@ class DatabaseMetricsMixin:
     async def metrics_summary(  # noqa: C901
         self, days: int = 7, *, project: str = "", status: str = "",
         provider: str = "", role: str = "",
-        from_date: str = "", to_date: str = "",
+        from_date: str = "", to_date: str = "", tz: str = "UTC",
     ) -> dict:
         """KPIs agregados para el dashboard. Una query por sección.
 
@@ -83,7 +95,7 @@ class DatabaseMetricsMixin:
         que parecen totales.
         """
         since, until, span_days = self._resolve_metrics_window(
-            from_date, to_date, days)
+            from_date, to_date, days, tz)
         where, run_params = self._build_run_where(
             since, until, project, status)
 
@@ -109,8 +121,11 @@ class DatabaseMetricsMixin:
         # arranca donde terminaba el actual y tiene la misma amplitud
         # (`span_days`); sin `until` el WHERE es abierto abajo y sin
         # `since` no entramos acá.
-        prev_since, prev_until = self._shift_window_back(
-            since, until, span_days)
+        if from_date and to_date:
+            prev_since, prev_until = previous_window(
+                from_date, span_days, tz)
+        else:
+            prev_since, prev_until = self._shift_window_back(since, "", span_days)
         prev_where, prev_params = self._build_run_where(
             prev_since, prev_until, project, status)
         prev = await self.run(
@@ -241,10 +256,13 @@ class DatabaseMetricsMixin:
             "ORDER BY runs DESC LIMIT 10", tuple(run_params))
 
         # Distribución horaria
+        hour_expr = ("started_at" if tz == "UTC" else
+                     "relay_local_timestamp(started_at,?)")
         hourly = await self.run(
-            "SELECT CAST(strftime('%H',started_at) AS INTEGER) AS hour, "
+            f"SELECT CAST(strftime('%H',{hour_expr}) AS INTEGER) AS hour, "
             "COUNT(*) AS runs "
-            f"FROM chats {where} GROUP BY hour ORDER BY hour", tuple(run_params))
+            f"FROM chats {where} GROUP BY hour ORDER BY hour",
+            (() if tz == "UTC" else (tz,)) + tuple(run_params))
 
         # Top errores
         errors_breakdown = await self.run(
@@ -262,6 +280,7 @@ class DatabaseMetricsMixin:
             "until": until,
             "from_date": from_date,
             "to_date": to_date,
+            "timezone": tz,
             # Solo las claves con valor: la UI pregunta "¿hay filtros?"
             # con un truthiness y no tiene que descartar strings vacíos.
             "filters_applied": {k: v for k, v in (
@@ -282,7 +301,7 @@ class DatabaseMetricsMixin:
 
     async def metrics_trends(
         self, days: int = 7, *, project: str = "", status: str = "",
-        from_date: str = "", to_date: str = "",
+        from_date: str = "", to_date: str = "", tz: str = "UTC",
     ) -> list[dict]:
         """Slice diario para gráfica de tendencia.
 
@@ -300,11 +319,13 @@ class DatabaseMetricsMixin:
         que en `metrics_summary`.
         """
         since, until, _span = self._resolve_metrics_window(
-            from_date, to_date, days)
+            from_date, to_date, days, tz)
         where, params = self._build_run_where(
             since, until, project, status)
+        local_ts = ("started_at" if tz == "UTC" else
+                    "relay_local_timestamp(started_at,?)")
         return await self.run(
-            "SELECT substr(started_at,1,10) AS date, "
+            f"SELECT substr({local_ts},1,10) AS date, "
             "COUNT(*) AS runs, "
             "COALESCE(SUM(tokens_in),0) AS tokens_in, "
             "SUM(CASE WHEN status='error' AND COALESCE(phase_at_end,'')!='budget_split' THEN 1 ELSE 0 END) AS errors, "
@@ -314,13 +335,13 @@ class DatabaseMetricsMixin:
             "SUM(COALESCE(phase_at_end,'')='budget_split') AS split "
             f"FROM chats {where} "
             "GROUP BY date ORDER BY date",
-            tuple(params))
+            (() if tz == "UTC" else (tz,)) + tuple(params))
 
     # ---- helpers internos de métricas (Sprint 1: rango de fechas) ----
 
     @staticmethod
     def _resolve_metrics_window(
-        from_date: str, to_date: str, days: int,
+        from_date: str, to_date: str, days: int, tz: str = "UTC",
     ) -> tuple[str, str, int]:
         """Resuelve la ventana de tiempo en formato SQL.
 
@@ -329,22 +350,12 @@ class DatabaseMetricsMixin:
         `days`). `span_days` es la amplitud que va al JSON para que la UI
         sepa cuántos días cubre.
 
-        El caller (admin._parse_metrics_window) ya validó que
-        `from_date`/`to_date` parsean y que el rango no supera 366 días;
-        acá solo se traduce a ISO-8601 con `T00:00:00Z` para que el
-        `WHERE started_at>=?` los pueda comparar contra el
-        `started_at` UTC que guarda SQLite.
+        El caller ya validó las fechas, la zona IANA y el tope de 366
+        días. Los días locales se convierten a bordes UTC semiabiertos
+        para compararlos con `started_at`, que SQLite guarda en UTC.
         """
         if from_date and to_date:
-            # 23:59:59 del día final para que un run que arrancó a las
-            # 23:55 entre en "to=2026-02-01". Sin esto, to=inicio del
-            # día y la query excluiría el mismo día del borde derecho.
-            since = f"{from_date}T00:00:00Z"
-            until = f"{to_date}T23:59:59Z"
-            f = datetime.strptime(from_date, "%Y-%m-%d").date()
-            t = datetime.strptime(to_date, "%Y-%m-%d").date()
-            span = (t - f).days + 1
-            return since, until, span
+            return utc_window(from_date, to_date, tz)
         # Fallback legacy: `days` contando desde ahora. Arriba, el admin
         # ya clampeó a 1..90; acá solo computamos el timestamp.
         since = time.strftime(
@@ -393,11 +404,17 @@ class DatabaseMetricsMixin:
         ahora los dos lados (período actual y anterior) salen del mismo
         helper y agregan filtros en el mismo orden.
         """
-        where = "WHERE started_at>=?"
-        params: list = [since]
         if until:
-            where += " AND started_at<?"
-            params.append(until)
+            where = ("WHERE ((substr(started_at,11,1)='T' "
+                     "AND started_at>=? AND started_at<?) OR "
+                     "(substr(started_at,11,1)=' ' "
+                     "AND started_at>=? AND started_at<?))")
+            params: list = [since, until, sqlite_utc_timestamp(since),
+                            sqlite_utc_timestamp(until)]
+        else:
+            where = ("WHERE ((substr(started_at,11,1)='T' AND started_at>=?) "
+                     "OR (substr(started_at,11,1)=' ' AND started_at>=?))")
+            params = [since, sqlite_utc_timestamp(since)]
         if project:
             where += " AND project_slug=?"
             params.append(project)

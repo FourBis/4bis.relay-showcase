@@ -227,7 +227,7 @@ async def vet_with_llm(
     # 1. Resumen read-only del clon (en proceso, deterministico).
     #    Si la lectura falla por IO, devolvemos unknown honesto.
     try:
-        summary = summarize(clone_dir, max_depth=3)
+        summary = await asyncio.to_thread(summarize, clone_dir, max_depth=3)
     except Exception as e:  # noqa: BLE001
         logger.warning("vet_with_llm: summarize fallo: %r", e)
         return ("unknown",
@@ -259,22 +259,17 @@ async def vet_with_llm(
 
     spec = os.environ.get("FOURBIS_VET_MODEL", "") or relay_config.model_spec()
     timeout_s = float(os.environ.get("FOURBIS_VET_TIMEOUT", "60"))
-    # run_consult trae cascada interna (system_config > env > default).
-    # Le metemos el override.
     try:
-        os.environ["FOURBIS_EXPERT_TIMEOUT_S"] = str(int(timeout_s))
-    except ValueError:
-        pass
-
-    try:
-        result = await run_consult(
+        # El presupuesto de vetting pertenece a esta llamada, no al entorno
+        # compartido de los expertos que estén corriendo al mismo tiempo.
+        result = await asyncio.wait_for(run_consult(
             user=user,
             system_prompt=_VETTING_PROMPT.format(
                 scan_findings="\n".join(f"- {f}" for f in scan_findings)
                 or "(sin hallazgos)"),
             model_override=spec if spec != relay_config.model_spec() else "",
             db=None,
-        )
+        ), timeout=timeout_s)
     except ModelUnavailable as e:
         return ("unknown",
                 f"Vetting LLM no disponible ({e}).{notes_static} "

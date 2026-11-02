@@ -31,6 +31,37 @@ from .task_workspace import resolved_project
 logger = logging.getLogger("relay.experts")
 
 
+async def require_model_admission(db, conversation_id, *, write_required=False):
+    """Recheck current actor and live conversation policy after preparation."""
+    if db is None or not conversation_id:
+        return
+    from . import conversation_access, user_accounts
+    from .task_service import STOPPED
+    import json
+
+    bound = user_accounts.current_actor.get()
+    if not bound or bound[0].db is not db or not bound[1]:
+        raise PermissionError("La ejecución requiere la cuenta que la solicitó")
+    actor = bound[1]
+
+    def check(conn):
+        access = conversation_access.require_tx(conn, conversation_id, actor, "send")
+        row = conn.execute("SELECT status,task_json FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+        try:
+            state = json.loads(row["task_json"] or "{}") if row else {}
+        except (TypeError, ValueError):
+            raise PermissionError("La política de la conversación no es válida") from None
+        if (not row or row["status"] != "open" or not isinstance(state, dict)
+                or state.get("state") in STOPPED or state.get("mode") == "external_pr"):
+            raise PermissionError("La conversación está cerrada o la tarea está detenida")
+        if (write_required or state.get("mode") == "write") and not access["can_collaborate"]:
+            raise PermissionError("Ya no tienes permiso para ejecutar cambios en este proyecto")
+
+    await conversation_access.transaction(db, check)
+    if conversation_id in getattr(db, "_task_cancellations", {}):
+        raise PermissionError("La cancelación de la tarea está en curso")
+
+
 async def run_expert(
     project: dict, user: str, *, skills_block: str = "",
     system_extra: str = "", model_override: str = "",
@@ -45,6 +76,7 @@ async def run_expert(
     bitacora_json: str = "",
     deadline_pedido: float = 0.0,
     image_artifacts: Optional[dict] = None,
+    before_executor: Any = None,
 ) -> dict:
     """Ejecuta un turno con herramientas, historial y recuperación de cortes.
 
@@ -52,6 +84,12 @@ async def run_expert(
     ``on_leg_boundary`` supervisa cada tanda; el deadline limita la corrida.
     Devuelve contenido, uso, historial y evidencia para persistir el resultado.
     """
+    recovery = expert_result.recovery_seed(rescue, messages_json=message_history_json,
+        bitacora_json=bitacora_json, image_artifacts=image_artifacts)
+    if rescue is not None:
+        rescue.clear()
+        rescue.update(recovery)
+    executor_attempted = False
     if db is not None and conversation_id and not project.get("_task_id"):
         project = await resolved_project(db, project, conversation_id)
     state = expert_run_state.ExpertRunState(user=user, images=images, steer=steer, rescue=rescue)
@@ -122,11 +160,14 @@ async def run_expert(
         pony = ponytail or ""
         sysp = project.get("system_prompt") or ""
         instructions = "\n\n".join(p for p in (pony, sysp) if p)
-    if db is not None and not _is_notes and defaults.get("facts_always_on"):
+    if db is not None and conversation_id and not _is_notes and defaults.get("facts_always_on"):
         try:
             from . import memory as memory_mod
+            from . import user_accounts
+            _actor = user_accounts.current_actor.get()
+            _who = _actor[1] if _actor and _actor[0].db is db else None
             _facts = await db.list_facts(
-                project["slug"], limit=200, status="approved")
+                project["slug"], limit=200, status="approved", actor=_who, source_conversation=conversation_id)
             _fb = memory_mod.build_facts_block(_facts)
             if _fb:
                 instructions = f"{instructions}\n\n{_fb}"
@@ -237,7 +278,8 @@ async def run_expert(
             expert_toolsets.CappedToolset(wrapped=FunctionToolset(
                 all_tools, max_retries=3,
                 timeout=state._mcp_tool_to + expert_toolsets._TOOL_OVERRUN_GRACE_S),
-                image_artifacts=image_artifacts, vision=expert_models.has_vision(state.spec))
+                image_artifacts=None if defaults.get("mcp_private") else image_artifacts,
+                vision=expert_models.has_vision(state.spec))
         ] if all_tools else []
         # ponytail: tres reintentos; recalibrar si cambia el proveedor.
         return Agent(
@@ -281,12 +323,19 @@ async def run_expert(
     state.budget_exceeded = False
     state.provider_error: BaseException | None = None
     provider_retries = 0
-    state.request_limit = min(config.expert_request_limit(), int(defaults.get("task_request_limit") or config.expert_request_limit()))
-    if defaults.get("task_token_limit"):
+    state.task_request_limit = (
+        max(1, int(defaults["task_request_limit"]))
+        if defaults.get("task_request_limit") else None)
+    state.request_limit = config.expert_request_limit()
+    if defaults.get("task_token_limit") or state.task_request_limit is not None:
         from pydantic_ai.usage import RunUsage
-        state.task_token_limit = int(defaults["task_token_limit"])
+        state.task_token_limit = (
+            int(defaults["task_token_limit"])
+            if defaults.get("task_token_limit") else None)
         state.task_usage = RunUsage()
     state.recent_tool_calls: deque[str] = deque(maxlen=8)
+    state.progress_signatures: set[str] = set()
+    state.tool_call_args: dict[str, tuple[str, dict]] = {}
     state.tool_meter: dict[str, dict[str, int]] = {}
     state.meter_turn = 0
     state.steer_text = ""
@@ -309,12 +358,68 @@ async def run_expert(
     state.tokens_in_prev = 0   # usage acumulado de tandas anteriores
     state.tokens_out_prev = 0
     state.cache_prev = 0       # 2026-08-31: cache reads de tandas anteriores
+
+    def checkpoint():
+        nonlocal recovery
+        value = expert_result.snapshot_run(state, image_artifacts=image_artifacts,
+            bitacora=bitacora, legs=legs, cap_rounds=cap_rounds,
+            provider_retries=provider_retries, steers=steers,
+            steer_texts=steer_texts, _q_state=_q_state)
+        value = expert_result.merge_recovery_snapshot(recovery, value)
+        value["_executor_attempted"] = executor_attempted
+        recovery = expert_result.recovery_seed(value)
+        if state.rescue is not None:
+            state.rescue.clear()
+            state.rescue.update(value)
+        return value
+
+    def carry_usage():
+        # Transfer a non-shared leg once, then clear its live reference before
+        # any await. Shared task_usage already holds all legs and is not added.
+        if state.task_usage is None and state.usage is not None:
+            state.tokens_in_prev += state.usage.input_tokens or 0
+            state.tokens_out_prev += state.usage.output_tokens or 0
+            state.cache_prev += state.usage.cache_read_tokens or 0
+        state.usage = None
+
+    executor_admitted = False
     while True:
+        if before_executor is not None and not executor_admitted:
+            admission = await before_executor(deadline=deadline)
+            if not admission.get("execute"):
+                return {"feedback_skipped": True, "feedback_skip_reason": admission.get("reason", ""),
+                        "phase_at_end": "cancelled"}
+            executor_admitted = True
+            deadline = min(deadline, admission["deadline"])
+            state.task_token_limit = min(state.task_token_limit or float("inf"), admission["token_limit"])
+        checkpoint()
+        if state.task_usage is not None:
+            used_requests = state.task_usage.requests
+            remaining_requests = (
+                state.task_request_limit - used_requests
+                if state.task_request_limit is not None else None)
+            if remaining_requests is not None and remaining_requests <= 0:
+                state.last_phase = "budget_exceeded"
+                state.output_text += (
+                    "\n\n⚠️ Alcancé el límite total de "
+                    f"{state.task_request_limit} solicitudes configurado "
+                    "para esta tarea. Guardé lo avanzado; responde "
+                    "**continúa** para iniciar otro pedido.")
+                break
+            state.request_limit = used_requests + min(
+                config.expert_request_limit(),
+                remaining_requests if remaining_requests is not None
+                else config.expert_request_limit())
         remaining = deadline - time.monotonic()
         if (cap_rounds or legs > 1 or steers) and remaining < ROUND_MIN_S:
             logger.warning(
                 "run_expert: abortando, %.1fs restantes < %.0fs piso",
                 remaining, ROUND_MIN_S)
+            state.last_phase = "hard_timeout"
+            state.output_text += (
+                "\n\n⚠️ No continué: quedaba menos de medio minuto del "
+                "límite global para iniciar otra tanda. Lo avanzado está "
+                "guardado; el run no se marcó como terminado.")
             break
         extra: list[Any] = []
         if use_catalog and cap_rounds < max_rounds - 1:
@@ -322,20 +427,27 @@ async def run_expert(
             if uc is not None:
                 extra.append(uc)
         agent = _build_agent(extra)
+        if before_executor is None:
+            # Feedback uses its own final transactional gate; do not put an
+            # extra await after that reservation and before its executor.
+            await require_model_admission(db, conversation_id,
+                write_required=project.get("_task_mode") == "write")
+        if before_executor is not None and deadline <= time.monotonic():
+            state.last_phase = "hard_timeout"
+            break
         try:
+            executor_attempted = True
             await asyncio.wait_for(
                 expert_iteration.run_iteration(agent, state, _emit_progress),
                 timeout=max(1.0, deadline - time.monotonic()))
+            checkpoint()
         except expert_selection._CapabilityRequested as e:
             logger.info("use_capability(%r): re-run con el toolset adjunto",
                         e.name)
             cap_rounds += 1
             selection.add(e.name)
-            if state.usage:
-                state.tokens_in_prev += state.usage.input_tokens or 0
-                state.tokens_out_prev += state.usage.output_tokens or 0
-                state.cache_prev += state.usage.cache_read_tokens or 0
-                state.usage = None
+            carry_usage()
+            checkpoint()
             toolsets, attached_mcps, visible_mcps = await expert_selection._catalog_toolsets(
                 db, project, selection, mcp_pool, state._mcp_tool_to, state._inflight, _hide,
                 image_artifacts, expert_models.has_vision(state.spec))
@@ -345,9 +457,11 @@ async def run_expert(
             state.user = ("Continúa desde las herramientas ya ejecutadas. Revisa las "
                     "capacidades disponibles ahora; no repitas efectos ya realizados.")
             state.images = None  # ya están en message_history
+            checkpoint()
             await _emit_progress(phase="thinking", tool=None)
             continue
         except asyncio.CancelledError:
+            checkpoint()
             if state.last_phase == "idle_timeout":
                 _t = asyncio.current_task()
                 if _t is not None:
@@ -367,6 +481,9 @@ async def run_expert(
                 timeout, state.last_tool_name, state.tool_calls_count,
                 bool(state.messages_json))
             break
+        except BaseException:
+            checkpoint()
+            raise
         if _q_state.get("asked"):
             break
         if state.last_phase == "steered" and state.steer_text:
@@ -380,10 +497,7 @@ async def run_expert(
                 logger.warning(
                     "steer: historial rescatado inválido (%r) — corto acá", e)
                 break
-            if state.usage:
-                state.tokens_in_prev += state.usage.input_tokens or 0
-                state.tokens_out_prev += state.usage.output_tokens or 0
-                state.cache_prev += state.usage.cache_read_tokens or 0
+            carry_usage()
             state.user = state.steer_text
             steer_texts.append(state.steer_text)
             state.steer_text = ""
@@ -397,10 +511,7 @@ async def run_expert(
                     and provider_retries < expert_context._PROVIDER_RETRIES
                     and (deadline - time.monotonic()) >= ROUND_MIN_S):
                 provider_retries += 1
-                if state.usage:
-                    state.tokens_in_prev += state.usage.input_tokens or 0
-                    state.tokens_out_prev += state.usage.output_tokens or 0
-                    state.cache_prev += state.usage.cache_read_tokens or 0
+                carry_usage()
                 if state.tool_calls_count and state.messages_json:
                     try:
                         state.message_history = (
@@ -421,7 +532,9 @@ async def run_expert(
                     "reintento %d/%d sobre el historial rescatado",
                     _sig, state.tool_calls_count, provider_retries,
                     expert_context._PROVIDER_RETRIES)
+                checkpoint()
                 await _emit_progress(phase="heartbeat", tool=None)
+                checkpoint()
                 await asyncio.sleep(expert_context._PROVIDER_BACKOFF_S)
                 continue
             state.last_phase = "provider_error"
@@ -438,18 +551,14 @@ async def run_expert(
             break
         if state.budget_exceeded:
             loop_hit = expert_steps._tool_loop_detected(state.recent_tool_calls)
+            stalled = expert_steps._tool_stalled(state.recent_tool_calls)
             has_time = (deadline - time.monotonic()) >= ROUND_MIN_S
             off_plan_feedback = ""
             if (on_leg_boundary is not None and state.messages_json
                     and not loop_hit and has_time):
+                partial = checkpoint()
                 try:
-                    off_plan_feedback = await on_leg_boundary({
-                        "content": state.output_text,
-                        "phase_at_end": state.last_phase,
-                        "messages_json": state.messages_json,
-                        "tool_calls": state.tool_calls_count,
-                        "leg": legs,
-                    }) or ""
+                    off_plan_feedback = await on_leg_boundary({**partial, "leg": legs}) or ""
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         "run_expert: on_leg_boundary rompió (%r) — sigo sin "
@@ -483,8 +592,22 @@ async def run_expert(
                     "\"lote 2\"), que es como sí funcionaron los nodos "
                     "hermanos.")
                 break
+            task_budget_hit = (
+                (state.task_request_limit is not None
+                 and state.task_usage is not None
+                 and state.task_usage.requests >= state.task_request_limit)
+                or (state.task_token_limit is not None
+                    and state.task_usage is not None
+                    and state.task_usage.total_tokens >= state.task_token_limit))
+            if task_budget_hit:
+                state.output_text += (
+                    "\n\n⚠️ Alcancé el límite total explícito de "
+                    "solicitudes o tokens de esta tarea. Guardé lo avanzado; "
+                    "el run no se marcó como terminado.")
             techo = max_legs_hard if on_leg_boundary is not None else max_legs
-            if legs < techo and state.messages_json and not loop_hit and has_time:
+            can_continue = legs < techo
+            if (can_continue and not task_budget_hit and state.messages_json and not stalled
+                    and has_time):
                 try:
                     state.message_history = ModelMessagesTypeAdapter.validate_json(
                         state.messages_json)
@@ -493,10 +616,7 @@ async def run_expert(
                         "auto-continue: historial rescatado inválido (%r) — "
                         "corto acá", e)
                     break
-                if state.usage:
-                    state.tokens_in_prev += state.usage.input_tokens or 0
-                    state.tokens_out_prev += state.usage.output_tokens or 0
-                    state.cache_prev += state.usage.cache_read_tokens or 0
+                carry_usage()
                 legs += 1
                 state.progress_events.append(
                     {"phase": "auto_continue", "leg": legs})
@@ -505,21 +625,34 @@ async def run_expert(
                     "continúa con la tarea desde donde quedaste; si ya "
                     "está completa, responde con el resumen final")
                 logger.info(
-                    "run_expert: budget auto-continue → tanda %d/%d "
-                    "(tools acumuladas=%d, supervisada=%s)", legs, techo,
+                    "run_expert: budget auto-continue → tanda %d/%s "
+                    "(tools acumuladas=%d, supervisada=%s)", legs,
+                    techo,
                     state.tool_calls_count, on_leg_boundary is not None)
+                checkpoint()
                 await _emit_progress(phase="heartbeat", tool=None)
                 continue
             if legs > 1:
                 state.output_text += (
-                    f" (Ya se auto-extendió {legs} tandas: "
-                    f"{legs * state.request_limit} pasos totales.)")
+                    f" (Esta corrida se autoextendió {legs} tandas.)")
             if loop_hit:
+                state.last_phase = "budget_split"
                 state.output_text += (
-                    " Corté porque venía repitiendo exactamente la misma "
-                    "tool con los mismos args (loop, no progreso).")
+                    " Al cerrar esta tanda encontré ocho fallas seguidas "
+                    "con la misma evidencia, aunque variaran los comandos. "
+                    "El nodo se "
+                    "puede reanudar o subdividir.")
+            elif stalled:
+                state.output_text += (
+                    " Al cerrar esta tanda encontré ocho resultados "
+                    "repetidos sin evidencia nueva; lecturas y consultas "
+                    "sin cambios no cuentan como progreso.")
+            elif not can_continue:
+                state.output_text += (
+                    f" Corté al alcanzar el límite de {techo} "
+                    "tandas de esta corrida.")
         break
     return expert_result.finish_run(
         state, image_artifacts=image_artifacts, bitacora=bitacora, legs=legs,
         cap_rounds=cap_rounds, provider_retries=provider_retries, steers=steers,
-        steer_texts=steer_texts, _q_state=_q_state)
+        steer_texts=steer_texts, _q_state=_q_state, recovery=recovery)

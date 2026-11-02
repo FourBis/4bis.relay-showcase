@@ -5,6 +5,8 @@ import { emptyRow, skeletonRows, toast } from "./ui.js";
 let snapshot = { users: [], roles: [], role_labels: {}, me: null };
 let editingEmail = "";
 let actorIdentity = null;
+let showArchived = false, loadGeneration = 0;
+const archiveBusy = new Set();
 
 export function canManageTeamUser(actor, user, users) {
   if (!canEditTeamUser(actor, user)) return false;
@@ -12,8 +14,29 @@ export function canManageTeamUser(actor, user, users) {
 }
 
 export function canEditTeamUser(actor, user) {
-  if (!actor || !user) return false;
+  if (!actor || !user || user.archived_at) return false;
   return actor.role === "owner" || (actor.role === "subadmin" && user.role === "member");
+}
+
+export function canArchiveTeamUser(actor, user, users) {
+  return actor?.role === "owner" && !!user && !user.archived_at
+    && !(user.email && user.email === actor.email) && !isLastActiveAdmin(user, users);
+}
+
+export function projectMatches(project, query) {
+  return `${project.name || ""} ${project.slug}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
+}
+
+export function assignmentChoices(projects, user) {
+  const choices = [...projects];
+  for (const slug of user?.project_slugs || []) {
+    if (!choices.some(project => project.slug === slug)) choices.push({slug, name:slug, unavailable:true});
+  }
+  return choices;
+}
+
+export function sameProjectSelection(left = [], right = []) {
+  return left.length === right.length && left.every(slug => right.includes(slug));
 }
 
 export function projectAccessLabel(role, projectSlugs = []) {
@@ -42,7 +65,7 @@ function projectNames(user) {
 }
 
 function isEnabled(user) {
-  return user.enabled !== false && user.enabled !== 0;
+  return !user.archived_at && user.enabled !== false && user.enabled !== 0;
 }
 
 function isLastActiveAdmin(user, users) {
@@ -55,6 +78,7 @@ function resetForm() {
   $("#team-form").innerHTML = formMarkup();
   $("#team-save").textContent = "Guardar integrante";
   $("#team-cancel").hidden = true;
+  updateProjectEditor();
 }
 
 function formMarkup(user = null) {
@@ -67,17 +91,38 @@ function formMarkup(user = null) {
   const email = user
     ? `<input id="team-email" class="input" type="email" value="${escape(user.email)}" readonly>`
     : '<input id="team-email" class="input" type="email" autocomplete="off" placeholder="correo confirmado">';
+  const roleHasProjectWrites = ["member", "subadmin"].includes(user?.role || defaultRole);
   const projects = snapshot.can_assign_projects
-    ? `<fieldset class="field min-w-0"><legend class="field-label">Proyectos con escritura</legend><p class="field-hint">Puede editar y ejecutar compilaciones y pruebas en los proyectos marcados. No incluye publicar ni integrar PR. Admin siempre tiene acceso a todos; Finanzas no tiene escritura.</p><div class="mt-2 grid gap-2 sm:grid-cols-2">${(snapshot.projects || []).map((project) => {
-      const roleHasProjectWrites = !["owner", "finance"].includes(user?.role);
+    ? `<fieldset class="field min-w-0"><legend class="field-label">Proyectos donde puede trabajar</legend><p class="field-hint">Elige dónde puede editar, compilar y probar. Las conversaciones se comparten por separado desde el botón Compartir del chat. Esta asignación no permite publicar ni integrar cambios.</p>
+      <label class="field-label" for="team-project-search">Buscar proyecto</label><input id="team-project-search" type="search" class="input" placeholder="Nombre o identificador"${roleHasProjectWrites ? "" : " disabled"}>
+      <p id="team-project-summary" class="field-hint" role="status" aria-live="polite"></p>
+      <div style="max-height:16rem;overflow:auto" class="mt-2 grid gap-2 sm:grid-cols-2">${assignmentChoices(snapshot.projects || [], user).map((project) => {
       const checked = roleHasProjectWrites && (user?.project_slugs || []).includes(project.slug) ? " checked" : "";
       const disabled = roleHasProjectWrites ? "" : " disabled";
-      return `<label class="flex min-w-0 items-start gap-2 text-sm text-zinc-300"><input class="mt-1" type="checkbox" name="team-project" value="${escape(project.slug)}"${checked}${disabled}><span>${escape(project.name || project.slug)} <code class="text-xs text-zinc-500">${escape(project.slug)}</code></span></label>`;
-    }).join("") || '<span class="muted text-sm">No hay proyectos disponibles.</span>'}</div></fieldset>`
+      return `<label data-project-option="${escape(project.slug)}" data-project-name="${escape(project.name || project.slug)}" class="flex min-w-0 items-start gap-2 text-sm text-zinc-300"><input class="mt-1" type="checkbox" name="team-project" value="${escape(project.slug)}"${checked}${disabled}><span>${escape(project.name || project.slug)} <code class="text-xs text-zinc-500">${escape(project.slug)}</code>${project.unavailable ? ' <span class="muted text-xs">No disponible; se conserva hasta que lo quites.</span>' : ""}</span></label>`;
+    }).join("") || '<span class="muted text-sm">No hay proyectos disponibles.</span>'}</div><p id="team-project-empty" class="field-hint" hidden>No hay proyectos que coincidan.</p></fieldset>`
     : "";
   return `<div class="field"><label class="field-label" for="team-name">Nombre</label><input id="team-name" class="input" value="${escape(user?.display_name || "")}" autocomplete="name" placeholder="Nombre visible"></div>
     <div class="field"><label class="field-label" for="team-email">Correo</label>${email}</div>
     <div class="field"><label class="field-label" for="team-role">Rol</label><select id="team-role" class="select"${roleDisabled}>${roles}</select><p id="team-role-scope" class="field-hint">${escape(projectScopeDescription(user?.role || defaultRole))}</p></div>${projects}`;
+}
+
+function updateProjectEditor() {
+  const form = $("#team-form"), summary = $("#team-project-summary");
+  if (!form || !summary) return;
+  const role = $("#team-role")?.value;
+  const query = $("#team-project-search")?.value || "";
+  const names = [], options = [...form.querySelectorAll("[data-project-option]")];
+  for (const option of options) {
+    option.hidden = !projectMatches({slug:option.dataset.projectOption, name:option.dataset.projectName}, query);
+    if (option.querySelector('input[name="team-project"]')?.checked) names.push(option.dataset.projectName);
+  }
+  summary.textContent = role === "owner" ? "Admin tiene acceso a todos los proyectos."
+    : role === "finance" ? "Finanzas no tiene escritura en proyectos."
+    : names.length ? `${names.length} seleccionado(s): ${names.join(", ")}`
+    : "Sin proyectos seleccionados: solo podrá consultar.";
+  const empty = $("#team-project-empty");
+  if (empty) empty.hidden = !options.length || options.some(option => !option.hidden);
 }
 
 export function initTeam(actor) {
@@ -85,16 +130,29 @@ export function initTeam(actor) {
   resetForm();
   onClick("#team-save", saveTeamUser);
   onClick("#team-cancel", resetForm);
+  onClick("#team-archive-toggle", () => {
+    if (actorIdentity?.role !== "owner") return;
+    showArchived = !showArchived;
+    resetForm(); return loadTeam();
+  });
   $("#team-table tbody").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-action]");
       if (!button) return;
     const user = snapshot.users.find((entry) => entry.email === button.dataset.email);
-    if (!user || !canEditTeamUser(snapshot.me, user)) return;
+    if (!user) return;
+    if (button.dataset.action === "restore" && snapshot.can_archive_users && user.archived_at) {
+      archiveTeamUser(user, false); return;
+    }
+    if (button.dataset.action === "archive" && canArchiveTeamUser(snapshot.me, user, snapshot.users)) {
+      archiveTeamUser(user, true); return;
+    }
+    if (!canEditTeamUser(snapshot.me, user)) return;
     if (button.dataset.action === "edit") {
       editingEmail = user.email;
       $("#team-form").innerHTML = formMarkup(user);
       $("#team-save").textContent = "Guardar cambios";
       $("#team-cancel").hidden = false;
+      updateProjectEditor();
       $("#team-name").focus();
     } else {
       updateTeamUser(user, !user.enabled);
@@ -108,23 +166,45 @@ export function initTeam(actor) {
         if (["owner", "finance"].includes(event.target.value)) input.checked = false;
         input.disabled = ["owner", "finance"].includes(event.target.value);
       });
+      const search = $("#team-project-search");
+      if (search) search.disabled = ["owner", "finance"].includes(event.target.value);
     }
+    updateProjectEditor();
+  });
+  $("#team-form").addEventListener("input", event => {
+    if (event.target.id === "team-project-search") updateProjectEditor();
   });
 }
 
+function updateTeamView(canArchive = actorIdentity?.role === "owner") {
+  $("#team-editor").hidden = showArchived;
+  $("#team-list-title").textContent = showArchived ? "Integrantes archivados" : "Integrantes";
+  const toggle = $("#team-archive-toggle");
+  toggle.hidden = !canArchive;
+  toggle.textContent = showArchived ? "Volver al equipo" : "Ver archivados";
+  toggle.setAttribute("aria-pressed", String(showArchived));
+  $("#team-archive-help").hidden = !canArchive;
+}
+
 export async function loadTeam() {
+  const generation = ++loadGeneration, archived = showArchived;
   const tbody = $("#team-table tbody");
+  updateTeamView();
   tbody.innerHTML = skeletonRows(4, 3);
   try {
-    snapshot = await api("users");
+    const value = await api(archived ? "users?archived=1" : "users");
+    if (generation !== loadGeneration || archived !== showArchived) return;
+    snapshot = value;
     snapshot.users ||= [];
     snapshot.roles ||= [];
     snapshot.role_labels ||= {};
     snapshot.projects ||= [];
     snapshot.me = actorIdentity;
+    updateTeamView(snapshot.can_archive_users === true);
     renderUsers();
     if (!editingEmail) resetForm();
   } catch (error) {
+    if (generation !== loadGeneration) return;
     tbody.innerHTML = emptyRow(4, { title: "No se pudo cargar el equipo", sub: error.message });
   }
 }
@@ -133,26 +213,33 @@ function renderUsers() {
   const tbody = $("#team-table tbody");
   if (!snapshot.users.length) {
     tbody.innerHTML = emptyRow(4, {
-      title: "Todavía no hay integrantes configurados",
-      sub: "Agrega una identidad usando el correo que confirma Access.",
+      title: showArchived ? "No hay integrantes archivados" : "Todavía no hay integrantes configurados",
+      sub: showArchived ? "Al archivar una cuenta aparecerá aquí y podrás restaurarla sin habilitar su acceso." : "Agrega una identidad usando el correo que confirma Access.",
     });
     return;
   }
   tbody.innerHTML = snapshot.users.map((user) => {
     const label = snapshot.role_labels[user.role] || user.role;
     const enabled = isEnabled(user);
-    const actions = canEditTeamUser(snapshot.me, user)
+    const disabled = archiveBusy.has(user.email) ? " disabled" : "";
+    let actions = canEditTeamUser(snapshot.me, user)
       ? `<div class="cell-actions"><button class="btn btn-xs" data-action="edit" data-email="${escape(user.email)}">Editar</button>${canManageTeamUser(snapshot.me, user, snapshot.users) ? `<button class="btn btn-xs${enabled ? " danger" : ""}" data-action="toggle" data-email="${escape(user.email)}">${enabled ? "Deshabilitar" : "Activar"}</button>` : ""}</div>`
       : '<span class="muted text-xs">—</span>';
+    if (user.archived_at && snapshot.can_archive_users) {
+      actions = `<button class="btn btn-xs" data-action="restore" data-email="${escape(user.email)}"${disabled}>Restaurar sin acceso</button>`;
+    } else if (canArchiveTeamUser(snapshot.me, user, snapshot.users)) {
+      actions += `<button class="btn btn-xs" data-action="archive" data-email="${escape(user.email)}"${disabled}>Archivar</button>`;
+    }
     const slugs = user.project_slugs || [];
     const assignedProjects = projectNames(user);
     const projectAccess = projectAccessLabel(user.role, slugs);
     const projectDetail = user.role === "owner" ? "" : user.role === "finance" || !slugs.length
       ? "" : `<ul class="mt-1 list-inside list-disc text-xs text-zinc-400">${assignedProjects.map((name) => `<li>${escape(name)}</li>`).join("")}</ul>`;
-    const scope = user.role === "member" && !slugs.length
+    const scope = user.archived_at ? "Asignaciones conservadas. Esta cuenta no tiene acceso."
+      : user.role === "member" && !slugs.length
       ? "Sin proyectos asignados; solo puede consultar. No administra el equipo ni publica o integra cambios."
       : projectScopeDescription(user.role);
-    return `<tr><td><div class="font-medium text-zinc-200">${escape(user.display_name || "—")}</div><code class="block max-w-full truncate text-xs text-zinc-400" title="${escape(user.email)}">${escape(user.email)}</code><div class="mt-1"><span class="badge ${user.role === "owner" ? "ok" : "dim"}">${escape(label)}</span></div></td><td><strong class="text-sm">${projectAccess}</strong>${projectDetail}<p class="mt-1 text-xs text-zinc-400">${escape(scope)}</p></td><td><span class="badge ${enabled ? "ok" : "dim"}">${enabled ? "Activo" : "Deshabilitado"}</span></td><td class="text-right">${actions}</td></tr>`;
+    return `<tr><td><div class="font-medium text-zinc-200">${escape(user.display_name || "—")}</div><code class="block max-w-full truncate text-xs text-zinc-400" title="${escape(user.email)}">${escape(user.email)}</code><div class="mt-1"><span class="badge ${user.role === "owner" ? "ok" : "dim"}">${escape(label)}</span></div></td><td><strong class="text-sm">${projectAccess}</strong>${projectDetail}<p class="mt-1 text-xs text-zinc-400">${escape(scope)}</p></td><td><span class="badge ${enabled ? "ok" : "dim"}">${user.archived_at ? "Archivado · sin acceso" : enabled ? "Activo" : "Deshabilitado"}</span></td><td class="text-right">${actions}</td></tr>`;
   }).join("");
 }
 
@@ -177,13 +264,31 @@ async function saveTeamUser() {
       : Array.from(document.querySelectorAll('#team-form input[name="team-project"]:checked'), (input) => input.value);
     await api("users", { method: "PUT", body: teamUserPayload({
       email, display_name, role, enabled: !current || isEnabled(current),
-      projectSlugs, canAssignProjects: snapshot.can_assign_projects === true,
+      projectSlugs, canAssignProjects: snapshot.can_assign_projects === true
+        && (!current || current.role !== role || !sameProjectSelection(projectSlugs, current.project_slugs)),
     }) });
     toast(current ? "Integrante actualizado" : "Integrante agregado", "ok");
     message.textContent = "";
     resetForm();
     await loadTeam();
   } catch (error) { message.textContent = `Error: ${error.message}`; }
+}
+
+async function archiveTeamUser(user, archived) {
+  if (archiveBusy.has(user.email)) return;
+  archiveBusy.add(user.email); renderUsers();
+    let changed = false;
+  try {
+    const result = await api(`users/${encodeURIComponent(user.email)}/${archived ? "archive" : "restore"}`, {method:"POST", body:{}});
+      changed = true;
+    if (editingEmail === user.email) resetForm();
+    toast(archived ? "Integrante archivado. Conserva sus datos y no tiene acceso."
+      : result.enabled ? "La cuenta ya estaba restaurada. Conserva su acceso actual."
+      : "Integrante restaurado, todavía sin acceso. Actívalo cuando corresponda.", "ok");
+    await loadTeam();
+    $("#team-archive-toggle").focus();
+  } catch (error) { $("#team-message").textContent = `Error: ${error.message}`; }
+    finally { archiveBusy.delete(user.email); if (!changed) renderUsers(); }
 }
 
 async function updateTeamUser(user, enabled) {

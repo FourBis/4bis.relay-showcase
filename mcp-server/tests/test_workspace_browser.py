@@ -12,7 +12,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 from unittest.mock import AsyncMock
 
-from relay import admin, server
+from relay import admin, identity, server
 
 
 @pytest.mark.skipif(
@@ -40,7 +40,8 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             "slug": "workspace-test", "name": "Workspace test",
             "repo_path": str(tmp_path),
         })
-        conv = await db.create_conversation(project_slug="workspace-test")
+        conv = await db.create_conversation(
+            project_slug="workspace-test", requested_by=identity.OWNER)
         secret = "SENSITIVE_RESPONSE_MUST_NOT_REACH_STORAGE"
         answer = (
             "Resultado verificable.\n\n"
@@ -216,7 +217,9 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             saved_rect = await chat_window.bounding_box()
             await page.wait_for_timeout(250)
             storage_before = await page.evaluate(
-                "() => localStorage.getItem('4bis.workspace.v1')")
+                "async () => { const actor = await (await fetch('/admin/api/me')).json(); "
+                "return localStorage.getItem('4bis.workspace.v2:' + "
+                "encodeURIComponent(actor.email.trim().toLowerCase())); }")
             assert storage_before
             await page.reload()
             await page.wait_for_load_state("networkidle")
@@ -284,7 +287,9 @@ async def test_workspace_modules_windows_objects_and_responsive(tmp_path, monkey
             assert "Conversación" in (source or "")
             await page.wait_for_timeout(250)
             storage = await page.evaluate(
-                "() => localStorage.getItem('4bis.workspace.v1')")
+                "async () => { const actor = await (await fetch('/admin/api/me')).json(); "
+                "return localStorage.getItem('4bis.workspace.v2:' + "
+                "encodeURIComponent(actor.email.trim().toLowerCase())); }")
             assert storage and secret not in storage
             saved = json.loads(storage)
             objects = [w for w in saved["windows"] if not w.get("module")]

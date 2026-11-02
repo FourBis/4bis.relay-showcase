@@ -6,11 +6,15 @@ import contextlib
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from . import config
 from . import grafo as G
-from .orchestrator_verification import _ahora, _seguro, _verificar_al_cerrar
+from .orchestrator_verification import (
+    _ahora, _seguro, _verificar_al_cerrar, metadata_close_pending,
+    verification_close_state, verification_pending,
+)
 
 logger = logging.getLogger("relay.orquestador")
 
@@ -46,6 +50,7 @@ async def correr_grafo(
     tope: int = TOPE_PARALELO,
     on_cambio: Optional[Callable[[dict], Awaitable[None]]] = None,
     verificar: Optional[Callable[..., Awaitable[dict]]] = None,
+    verification_only: bool = False,
 ) -> dict:
     """Ejecuta el grafo hasta que no quede nada lanzable.
 
@@ -59,6 +64,76 @@ async def correr_grafo(
     Devuelve el progreso final. No lanza por un nodo que falla: un fallo
     es un estado del grafo, no una excepción del orquestador.
     """
+    if verification_only:
+        from . import conversation_access, user_accounts
+        from .task_service import STOPPED, control_lock
+
+        def close_progress(graph, *, blocked=False):
+            progress = G.progreso(_nodos(graph))
+            if graph.get("estado") == "cancelado":
+                progress["estado"] = "cancelado"
+            elif close_state := verification_close_state(graph):
+                progress["estado"] = close_state
+            elif blocked:
+                progress["estado"] = graph.get("estado") or progress["estado"]
+            if blocked:
+                progress["verification_blocked"] = True
+            return progress
+
+        # This server-owned continuation closes the existing task snapshot.
+        # It must never heal, reserve, execute or create another node, even
+        # if that snapshot changed after the HTTP eligibility check.
+        g = await db.get_task_graph(graph_id)
+        if g is None:
+            raise ValueError(f"no existe el grafo {graph_id}")
+        cid = g.get("conversation_id")
+        metadata_closed = None
+        # Match node admission's existing conversation control, but release
+        # it before a model call so Pause/Cancel can still stop verification.
+        async with control_lock(db, cid) if cid else contextlib.nullcontext():
+            g = await db.get_task_graph(graph_id)
+            if g is None:
+                raise ValueError(f"no existe el grafo {graph_id}")
+            if g.get("conversation_id") != cid:
+                return close_progress(g, blocked=True)
+            state = await db.get_conversation_task(cid) if cid else {}
+            bound = user_accounts.current_actor.get()
+            if bound is not None:
+                if (bound[0].db is not db or not bound[1]
+                        or cid and not (await conversation_access.get_access(db, cid, bound[1]))["can_control"]):
+                    return close_progress(g, blocked=True)
+            if (g.get("estado") != "activo" or state.get("state") in STOPPED
+                    or graph_id in getattr(db, "_graph_cancellations", {})
+                    or cid in getattr(db, "_task_cancellations", {})):
+                return close_progress(g, blocked=True)
+            if metadata_close_pending(g, verifier_enabled=verificar is not None):
+                # A disabled verifier has no model stage to recover. Complete
+                # only existing metadata, never overwrite a newer cancellation.
+                await db.run(
+                    "UPDATE task_graphs SET estado='hecho',updated_at=? "
+                    "WHERE id=? AND estado='activo'",
+                    (_ahora(), graph_id))
+                closed = await db.get_task_graph(graph_id)
+                if closed is None:
+                    raise ValueError(f"no existe el grafo {graph_id}")
+                metadata_closed = closed
+            elif not verification_pending(g, verifier_enabled=verificar is not None):
+                return close_progress(g, blocked=True)
+        if metadata_closed is not None:
+            if on_cambio:
+                await _seguro(on_cambio, metadata_closed)
+            return close_progress(metadata_closed)
+        await _verificar_al_cerrar(
+            db, graph_id, g, G.progreso(_nodos(g)), verificar,
+            allow_continue=False, close_only=True)
+        g = await db.get_task_graph(graph_id)
+        if g is None:
+            raise ValueError(f"no existe el grafo {graph_id}")
+        prog = close_progress(g)
+        if on_cambio:
+            await _seguro(on_cambio, g)
+        return prog
+
     # F4: un `corriendo` que quedó de una corrida anterior no está
     # corriendo — el proceso que lo tenía ya no existe. Va ANTES del
     # barrido de reservas a propósito: el barrido no toca las de una
@@ -157,27 +232,36 @@ async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
                 # figura `pendiente`, y el barrido de reservas muertas
                 # —que borra las de toda tarea que no esté `corriendo`— se
                 # llevaría puesta una reserva recién tomada.
-                await db.update_task(cand.id, estado=G.CORRIENDO,
-                                     started_at=_ahora(),
-                                     intentos=cand.intentos + 1)
-                pisados = await db.claim_task_files(
-                    cand.id, graph_id, list(cand.archivos))
-                if pisados:
-                    # Defensa en profundidad: `elegibles` ya lo tendría que
-                    # haber filtrado. Si igual llegamos acá, NO se lanza —
-                    # perder una vuelta es más barato que dos bots editando
-                    # el mismo archivo.
-                    logger.warning(
-                        "tarea %s no arranca: %s ya está tomado por otra",
-                        cand.id, ", ".join(pisados))
-                    await db.release_task_files(cand.id)
-                    # Vuelve como estaba: un lanzamiento que no ocurrió no
-                    # gasta un intento, o un grafo trabado por reservas
-                    # agotaría los reintentos sin haber ejecutado nada.
-                    await db.update_task(cand.id, estado=G.PENDIENTE,
-                                         intentos=cand.intentos)
-                    continue
-                en_curso[cand.id] = asyncio.create_task(ejecutar(dict(fila)))
+                # A unique timestamp identifies this provisional admission.
+                # DB awaits settle their worker before propagating cancellation;
+                # cleanup below can therefore refund a committed admission even
+                # when cancellation arrived before we registered its executor.
+                started = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+                admitted = False
+                try:
+                    changed = await db.run(
+                        "UPDATE tasks SET estado='corriendo',started_at=?,intentos=intentos+1 "
+                        "WHERE id=? AND graph_id=? AND estado='pendiente' "
+                        "AND intentos=? AND intentos<max_intentos RETURNING id",
+                        (started, cand.id, graph_id, cand.intentos))
+                    if not changed:
+                        continue
+                    await db.run("UPDATE task_graphs SET updated_at=? WHERE id=?",
+                                 (_ahora(), graph_id))
+                    pisados = await db.claim_task_files(
+                        cand.id, graph_id, list(cand.archivos))
+                    if pisados:
+                        logger.warning(
+                            "tarea %s no arranca: %s ya está tomado por otra",
+                            cand.id, ", ".join(pisados))
+                        await _rollback_admission(db, graph_id, fila, started)
+                        continue
+                    en_curso[cand.id] = asyncio.create_task(ejecutar(dict(fila)))
+                    admitted = True
+                except BaseException:
+                    if not admitted:
+                        await _rollback_admission(db, graph_id, fila, started)
+                    raise
                 logger.info("grafo %s: lanzo %s (%s)", graph_id, cand.id,
                             cand.titulo[:60])
                 corriendo.append(cand)
@@ -207,9 +291,23 @@ async def _vueltas(db, graph_id: str, en_curso: dict, *, ejecutar,
             await db.renovar_claims(list(en_curso))
         for task in hechas:
             tid = next(k for k, v in en_curso.items() if v is task)
+            await _cerrar_tarea_protegida(db, graph_id, tid, task, coordinar)
             del en_curso[tid]
-            await _cerrar_tarea(db, graph_id, tid, task, coordinar)
     return vueltas
+
+
+async def _rollback_admission(db, graph_id, before, started):
+    """Finish the conditional pre-executor refund before releasing controls."""
+    cleanup = asyncio.create_task(db.rollback_task_admission(
+        before["id"], graph_id, started_at=started, before=before))
+    try:
+        return await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        while not cleanup.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(cleanup)
+        cleanup.result()
+        raise
 
 
 async def _cerrar_las_que_quedaron(db, graph_id: str, en_curso: dict,
@@ -226,23 +324,22 @@ async def _cerrar_las_que_quedaron(db, graph_id: str, en_curso: dict,
 
     Se cierran por la misma puerta que cualquier otro fallo
     (`_cerrar_tarea`), que ya sabe qué hacer con una tarea cancelada:
-    suelta los archivos y le aplica la regla. Un nodo idempotente vuelve
-    a `pendiente` y se retoma solo; uno que no lo es para y pregunta,
-    que es lo que corresponde cuando nadie sabe cuánto alcanzó a hacer
-    antes del corte.
+    suelta los archivos y conserva el resultado conocido. Un cierre
+    interrumpido para y pregunta antes de repetirlo: no concede intentos.
     """
     if not en_curso:
         return
     quedaron = list(en_curso.items())
     en_curso.clear()
     for _, task in quedaron:
+        task._relay_node_shutdown = True
         task.cancel()
     # Que terminen de cancelarse antes de leerles el resultado.
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.wait([t for _, t in quedaron])
     for tid, task in quedaron:
         try:
-            await _cerrar_tarea(db, graph_id, tid, task, coordinar)
+            await _cerrar_tarea_protegida(db, graph_id, tid, task, None, shutting_down=True)
         except Exception:  # noqa: BLE001 — limpiar no puede volver a fallar
             logger.exception("no pude cerrar la tarea %s al salir", tid)
 
@@ -260,11 +357,12 @@ async def sanar(db, graph_id: str) -> int:
       dicen estarlo—, así que traban a cualquier grafo que venga
       después.
 
-    Se les aplica la MISMA regla que a una tarea cortada
-    (`_cerrar_las_que_quedaron`), que es la misma que a un fallo: la
-    idempotente vuelve a `pendiente` y se rehace sola; la que no lo es
-    para y pregunta, porque nadie sabe cuánto alcanzó a hacer antes del
-    corte y repetirla podría duplicarlo.
+    Sin resultado durable se consulta la regla común de reintentos. Sólo
+    una tarea idempotente con intentos disponibles vuelve a `pendiente`.
+    Las demás esperan una decisión explícita; sanar nunca aumenta el
+    límite. También repara pendientes agotadas que una versión anterior
+    pudo dejar lanzables. Un resultado durable completo tiene prioridad:
+    se recupera sin otro intento aunque ya se haya agotado el límite.
 
     Devuelve cuántas sanó. Idempotente: correrla dos veces no cambia
     nada la segunda.
@@ -275,19 +373,75 @@ async def sanar(db, graph_id: str) -> int:
     motivo = "se cortó el proceso mientras esta tarea corría"
     n = 0
     for fila in g["tasks"]:
-        if fila["estado"] != G.CORRIENDO:
+        nodo = G.Nodo.desde_fila(fila, fila["deps"])
+        agotada = nodo.intentos >= nodo.max_intentos
+        if fila["estado"] != G.CORRIENDO and not (
+                fila["estado"] == G.PENDIENTE and agotada):
             continue
         await db.release_task_files(fila["id"])
-        nodo = G.Nodo.desde_fila(fila, fila["deps"])
-        if nodo.idempotente:
+        durable = await _durable_node_outcome(db, graph_id, fila, g)
+        if durable is not None:
+            await db.update_task(fila["id"], estado=G.HECHO if durable["ok"] else G.ESPERANDO,
+                resultado=durable["resultado"][:4000], modelo=durable["modelo"],
+                error="" if durable["ok"] else motivo + "; resultado conservado, revisión pendiente",
+                ended_at=_ahora())
+            if not durable["ok"]:
+                await _preguntar_por_la_tarea(db, graph_id, fila, motivo,
+                    chat_id=fila.get("chat_id") or "", interrupted=True)
+            n += 1
+            continue
+        if G.decidir_tras_fallo(nodo) == "reintentar":
             await db.update_task(fila["id"], estado=G.PENDIENTE,
                                  error=f"{motivo}; se rehace")
         else:
-            await db.update_task(fila["id"], estado=G.ESPERANDO, error=motivo)
-            await _preguntar_por_la_tarea(db, graph_id, fila, motivo,
-                                          chat_id=fila.get("chat_id") or "")
+            error = (f"límite de intentos agotado ({nodo.intentos}/{nodo.max_intentos}); "
+                     "requiere una decisión explícita antes de volver a ejecutar"
+                     if agotada else motivo)
+            # An interrupted attempt with no durable result is uncertain,
+            # not evidence of functional failure. Wait for the existing human
+            # response path, which can explicitly grant one further attempt.
+            await db.update_task(fila["id"], estado=G.ESPERANDO, error=error)
+            await _preguntar_por_la_tarea(db, graph_id, fila, error,
+                chat_id=fila.get("chat_id") or "", interrupted=agotada)
         n += 1
     return n
+
+
+async def _durable_node_outcome(db, graph_id, row, graph):
+    """Recover only this node's committed output, never infer completion by text."""
+    if not row.get("chat_id") or not hasattr(db, "run"):
+        return None
+    rows = await db.run("SELECT c.status,c.source,c.project_slug,c.conversation_id,o.payload FROM chats c "
+        "JOIN chat_outputs o ON o.chat_id=c.id WHERE c.id=?", (row["chat_id"],))
+    if not rows:
+        return None
+    rejected = dict(ok=False,
+        resultado=row.get("resultado") if isinstance(row.get("resultado"), str) else "",
+        modelo=row.get("modelo") if isinstance(row.get("modelo"), str) else "")
+    if rows[0].get("source") != "grafo":
+        return rejected
+    if (graph.get("project_slug") and rows[0].get("project_slug") != graph["project_slug"]
+            or graph.get("conversation_id") and rows[0].get("conversation_id") != graph["conversation_id"]):
+        return rejected
+    try:
+        artifact = json.loads(rows[0]["payload"])
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("content", ""), str) \
+                or not isinstance(artifact.get("model", ""), str):
+            return rejected
+        result_metadata = artifact.get("result_metadata") or {}
+        if not isinstance(result_metadata, dict):
+            return rejected
+        metadata = result_metadata.get("graph_node") or {}
+        if not isinstance(metadata, dict):
+            return rejected
+        if artifact.get("chat_id") != row["chat_id"] or metadata and (
+                metadata.get("graph_id") != graph_id or metadata.get("task_id") != row["id"]):
+            return rejected
+        complete = (rows[0]["status"] == "ok" and metadata.get("complete") is True
+                    and metadata.get("graph_id") == graph_id and metadata.get("task_id") == row["id"])
+        return dict(ok=complete, resultado=artifact.get("content") or "", modelo=artifact.get("model") or "")
+    except (ValueError, TypeError, AttributeError):
+        return rejected
 
 
 async def aplicar_respuesta(db, graph_id: str, task_id: str,
@@ -401,15 +555,79 @@ def _detalle_con_respuesta(detalle: str, respuesta: str) -> str:
     return nuevo[:8000]
 
 
-async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar) -> None:
+async def _cerrar_tarea_protegida(db, graph_id, tid, task, coordinar, *, shutting_down=False):
+    """One closing future per node; cancellation never repeats a coordinator."""
+    if shutting_down:
+        task._relay_node_shutdown = True
+    closure = getattr(task, "_relay_node_closing", None)
+    if (closure is not None and closure.done() and (closure.cancelled() or closure.exception() is not None)
+            and not getattr(task, "_relay_node_close_retried", False)):
+        # A bounded persistence-only recovery; never call the coordinator again.
+        task._relay_node_close_retried = True
+        task._relay_node_shutdown = True
+        shutting_down, coordinar, closure = True, None, None
+    if closure is None:
+        closure = asyncio.create_task(_cerrar_tarea(db, graph_id, tid, task, coordinar,
+                                                   shutting_down=shutting_down))
+        task._relay_node_closing = closure
+    cancelled = False
+    while not closure.done():
+        try:
+            await asyncio.shield(closure)
+        except asyncio.CancelledError:
+            cancelled = True
+            task._relay_node_shutdown = True
+        except Exception:
+            break
+    try:
+        closure.result()
+    except Exception as exc:
+        if cancelled:
+            raise asyncio.CancelledError from exc
+        raise
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar, *, shutting_down=False) -> None:
     """Pasa una tarea terminada a su estado final y aplica las reglas."""
     try:
         res = task.result()
-    except asyncio.CancelledError:
-        res = {"ok": False, "error": "cancelada"}
+    except asyncio.CancelledError as exc:
+        saved = getattr(task, "_relay_node_result", {})
+        saved = saved if isinstance(saved, dict) else {}
+        checkpoint = getattr(task, "_relay_node_checkpoint", {})
+        durable = isinstance(checkpoint, dict) and checkpoint.get("durable") is True
+        res = {**saved, "ok": saved.get("ok") is True and durable, "_interrupted": True}
+        if not res["ok"]:
+            res["error"] = saved.get("error") or "cancelada; revisa el resultado conservado antes de continuar"
+            if exc.__cause__ is not None and not durable:
+                res["error"] += f"; cierre sin confirmar ({type(exc.__cause__).__name__})"
     except Exception as e:  # noqa: BLE001 — un nodo roto no voltea el grafo
         logger.exception("tarea %s reventó", tid)
-        res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        saved = getattr(task, "_relay_node_result", {})
+        saved = saved if isinstance(saved, dict) else {}
+        checkpoint = getattr(task, "_relay_node_checkpoint", {})
+        durable = isinstance(checkpoint, dict) and checkpoint.get("durable") is True
+        res = {**saved, "ok": saved.get("ok") is True and durable,
+               "error": f"{type(e).__name__}: {e}", "_interrupted": True}
+
+    checkpoint = getattr(task, "_relay_node_checkpoint", {})
+    if (isinstance(checkpoint, dict) and checkpoint.get("artifact") and not checkpoint.get("durable")
+            and not getattr(task, "_relay_node_persist_retried", False)):
+        from . import finalization
+        task._relay_node_persist_retried = True
+        try:
+            await finalization.resume_checkpoint(db, checkpoint["artifact"]["chat_id"], checkpoint)
+        except Exception as exc:
+            finalization.retain_node_checkpoint(db, checkpoint["artifact"]["chat_id"], checkpoint)
+            res.update(ok=False, _interrupted=True,
+                error=f"No se confirmó el resultado del nodo ({type(exc).__name__}); requiere revisión")
+            logger.exception("cierre durable del nodo %s pendiente", tid)
+        else:
+            saved = getattr(task, "_relay_node_result", {})
+            if isinstance(saved, dict) and saved.get("ok") is True:
+                res.update(saved, ok=True)
 
     # Soltar los archivos SIEMPRE, salga bien o mal. Una tarea que falla
     # y se queda con el archivo tomado traba a todas las que lo
@@ -434,6 +652,9 @@ async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar) -> None:
                              error="", **comun)
         return
 
+    if res.get("resultado"):
+        comun["resultado"] = res["resultado"][:4000]
+
     # Falló. Acá entra el modelo grande, y SOLO acá.
     # `or {"tasks": []}`: si el grafo se borró mientras corría —que es
     # una de las formas de llegar acá desde la limpieza— igual hay que
@@ -442,15 +663,33 @@ async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar) -> None:
     fila = next((t for t in g["tasks"] if t["id"] == tid), None)
     nodo = G.Nodo.desde_fila(fila, fila["deps"]) if fila else None
     decision = None
-    if coordinar is not None:
+    interrupted = shutting_down or getattr(task, "_relay_node_shutdown", False) is True or res.get("_interrupted") is True
+    if interrupted:
+        # Observing shutdown/cancel is never authority to buy another model or
+        # replay an incomplete result, even when the task was idempotent.
+        decision = "preguntar" if nodo is not None else "fallar"
+    elif nodo is not None and nodo.intentos >= nodo.max_intentos:
+        decision = "fallar"
+    elif coordinar is not None and nodo is not None:
         decision = await _seguro(coordinar, fila, res)
+    if getattr(task, "_relay_node_shutdown", False) is True:
+        interrupted = True
+        decision = "preguntar" if nodo is not None else "fallar"
     if decision not in ("reintentar", "fallar", "preguntar"):
+        decision = G.decidir_tras_fallo(nodo) if nodo else "fallar"
+    if decision == "reintentar" and (nodo is None or G.decidir_tras_fallo(nodo) != "reintentar"):
+        # The coordinator recommends; durable attempt/idempotence limits decide.
         decision = G.decidir_tras_fallo(nodo) if nodo else "fallar"
 
     error = (res.get("error") or "sin detalle")[:2000]
     if decision == "reintentar":
         # Vuelve a `pendiente`: la próxima vuelta del loop lo re-elige.
         await db.update_task(tid, estado=G.PENDIENTE, error=error, **comun)
+        if getattr(task, "_relay_node_shutdown", False) is True:
+            await db.update_task(tid, estado=G.ESPERANDO, error=error, **comun)
+            await _preguntar_por_la_tarea(db, graph_id, fila, error,
+                chat_id=comun.get("chat_id") or (fila or {}).get("chat_id") or "", interrupted=True)
+            return
         logger.info("tarea %s falló y se reintenta (idempotente)", tid)
         return
     if decision == "preguntar":
@@ -463,7 +702,7 @@ async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar) -> None:
         # asociado al arrancar ese intento.
         await _preguntar_por_la_tarea(db, graph_id, fila, error,
                                       chat_id=comun.get("chat_id") or
-                                      (fila or {}).get("chat_id") or "")
+                                      (fila or {}).get("chat_id") or "", interrupted=interrupted)
         logger.info("tarea %s falló y para a preguntar (no idempotente)", tid)
         return
 
@@ -476,7 +715,7 @@ async def _cerrar_tarea(db, graph_id: str, tid: str, task, coordinar) -> None:
 
 
 async def _preguntar_por_la_tarea(db, graph_id: str, fila: dict,
-                                  error: str, *, chat_id: str = "") -> None:
+                                  error: str, *, chat_id: str = "", interrupted=False) -> None:
     """Deja la decisión anotada para el humano, con las opciones del caso.
 
     Reusa `expert_questions` —la misma tabla que `ask_human`— así la
@@ -492,17 +731,18 @@ async def _preguntar_por_la_tarea(db, graph_id: str, fila: dict,
     titulo = (fila.get("titulo") or fila["id"])[:200]
     q = {
         "title": f"Se frenó «{titulo}» y no puedo seguirla sola",
-        "detail": (f"{error}\n\nNo está declarada como idempotente, así que "
-                   "repetirla podría duplicar lo que ya haya hecho. "
-                   "¿Cómo seguimos?"),
+        "detail": (f"{error}\n\n" + (
+            "La ejecución se interrumpió. Revisa el resultado conservado antes de decidir si continuar. "
+            if interrupted else "No está declarada como idempotente, así que repetirla podría duplicar lo que ya haya hecho. ")
+            + "¿Cómo seguimos?"),
         # Las keys son el CONTRATO con `aplicar_respuesta`, no un detalle
         # de presentación: si acá dijeran `o0`/`o1`/`o2`, la única forma
         # de saber qué eligió el humano sería comparar la etiqueta —
         # texto en castellano, que cambia el día que alguien lo mejore.
         "options": [
-            {"key": "reintentar", "label": "Reintentala igual"},
-            {"key": "fallar", "label": "Dala por fallada y seguí con el resto"},
-            {"key": "parar", "label": "Pará el plan"},
+            {"key": "reintentar", "label": "Reinténtala igual"},
+            {"key": "fallar", "label": "Dala por fallada y sigue con el resto"},
+            {"key": "parar", "label": "Para el plan"},
         ],
         # A qué tarea corresponde. Sin esto, contestar deja la respuesta
         # anotada y el grafo parado igual: nadie sabría a quién aplicarla.

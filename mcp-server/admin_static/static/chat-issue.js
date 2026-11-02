@@ -1,25 +1,27 @@
 // Vínculo común de issue para trabajo de Relay y PR externos.
 import { apiRoot, escape } from "./api.js";
 import { field, formSection, modalLoad, closeModal, isModalOpen, toast, confirmModal } from "./ui.js";
+import { repositoryPickerHtml, mountRepositoryPicker } from "./chat-repository-picker.js";
 
 const MODAL = "issue-link-modal";
 let modalSession = 0;
 const attr = value => escape(String(value ?? "")).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
 export function parseIssueInput(value) {
+  const maximum = 2147483647; // The canonical backend issue reference limit.
   const text = String(value ?? "").trim();
   if (!text) return null;
   if (/^#?\d+$/.test(text)) {
     const number = Number(text.replace(/^#/, ""));
-    if (Number.isSafeInteger(number) && number > 0 && number <= 2147483647) return number;
+    if (Number.isSafeInteger(number) && number > 0 && number <= maximum) return number;
   }
   try {
     const url = new URL(text);
     if (url.protocol === "https:" && url.hostname === "github.com" && !url.port
         && !url.username && !url.password && !url.search && !url.hash
-        && /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/[1-9]\d*\/?$/.test(url.pathname)) {
+        && /^\/[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+\/issues\/[1-9]\d*\/?$/.test(url.pathname)) {
       const number = Number(url.pathname.replace(/\/$/, "").split("/").pop());
-      if (Number.isSafeInteger(number) && number <= 2147483647) return `https://github.com${url.pathname.replace(/\/$/, "")}`;
+      if (Number.isSafeInteger(number) && number > 0 && number <= maximum) return `https://github.com${url.pathname.replace(/\/$/, "")}`;
     }
   } catch (_) { /* El mensaje de abajo también cubre URL inválida. */ }
   throw new Error("Ingresa un número de issue positivo o su URL canónica de GitHub. El servidor verificará el repositorio y el acceso.");
@@ -38,51 +40,14 @@ export function issueLinkPayload(value, resolutionComplete = false) {
 
 export function issuePickerHtml({ id, value = "", required = false } = {}) {
   return field({ label:required ? "Issue de GitHub" : "Issue de GitHub (opcional)", id, required,
-    control:`<input id="${attr(id)}" name="issue" class="input" list="${attr(id)}-options" value="${attr(value)}" ${required ? "required" : ""} autocomplete="off" placeholder="Número o https://github.com/org/repo/issues/123">
-      <datalist id="${attr(id)}-options"></datalist>
-      <p class="field-hint" data-issue-picker-status role="status">Cargando issues del proyecto…</p>
-      <button type="button" class="btn btn-xs" data-issue-picker-retry>Actualizar lista</button>`,
-    hint:"Elige de la lista o pega un número o URL del mismo repositorio. Se verifica en GitHub al guardar; el título de la tarea sigue siendo una descripción libre." });
+    control:`<input id="${attr(id)}" name="issue" class="input" value="${attr(value)}" ${required ? "required" : ""} autocomplete="off" placeholder="Número o https://github.com/org/repo/issues/123">`
+      + repositoryPickerHtml({id,kind:"issues"}),
+    hint:"Elige una issue abierta o ingresa un número/URL del mismo repositorio, incluso si está cerrada. Se verifica en GitHub al guardar; el título de la tarea sigue siendo una descripción libre." });
 }
 
 export function mountIssuePicker(root, { id, projectSlug = "", onChange } = {}) {
-  const input = root?.querySelector(`#${id}`);
-  const list = root?.querySelector(`#${id}-options`);
-  const status = input?.parentElement?.querySelector("[data-issue-picker-status]");
-  const retry = input?.parentElement?.querySelector("[data-issue-picker-retry]");
-  if (!input || !list) return { setProject() {}, destroy() {} };
-  let project = projectSlug, version = 0, disposed = false;
-  const changed = () => onChange?.(input.value);
-  const refresh = async () => {
-    const current = ++version;
-    list.innerHTML = "";
-    if (!project) { if (status) status.textContent = "Elige un proyecto para consultar sus issues."; return; }
-    if (status) status.textContent = "Cargando issues del proyecto…";
-    if (retry) retry.disabled = true;
-    try {
-      const result = await apiRoot(`/projects/${encodeURIComponent(project)}/issues`);
-      if (disposed || current !== version) return;
-      const issues = Array.isArray(result.issues) ? result.issues : [];
-      list.innerHTML = issues.map(issue => `<option value="${attr(issue.url || issue.number)}">${escape(`#${issue.number} · ${issue.title || "Sin título"} · ${issue.state || ""}`)}</option>`).join("");
-      if (status) status.textContent = issues.length
-        ? `${issues.length} issue(s) disponibles. También puedes pegar un número o URL.`
-        : "No hay issues en esta lista. Puedes ingresar una URL o número para verificarlo al guardar.";
-    } catch (error) {
-      if (!disposed && current === version && status) status.textContent = `No se pudo cargar la lista: ${error.message}. Puedes reintentar o ingresar una URL o número; el dato escrito se conserva.`;
-    } finally { if (!disposed && current === version && retry) retry.disabled = false; }
-  };
-  input.addEventListener("input", changed);
-  retry?.addEventListener("click", refresh);
-  refresh();
-  return {
-    setProject(next) {
-      if (next === project) return;
-      project = next; input.value = ""; changed(); refresh();
-    },
-    destroy() { disposed = true; ++version; input.removeEventListener("input", changed); retry?.removeEventListener("click", refresh); },
-  };
+  return mountRepositoryPicker(root,{id,kind:"issues",projectSlug,onChange});
 }
-
 export function issueLinkHtml(issue) {
   if (!issue) return "Sin issue vinculada";
   const label = `${issue.repo || "GitHub"} #${issue.number || ""}${issue.title ? ` · ${issue.title}` : ""}`;
@@ -149,9 +114,10 @@ export async function openIssueLink({ convId, projectSlug, task, onSaved } = {})
     })}</form>`,
     after:() => {
       const form = document.getElementById("issue-link-form");
-      picker = mountIssuePicker(form, {id:"issue-link-input",projectSlug});
       const input = form.querySelector('[name="issue"]');
       const resolution = form.querySelector('[name="resolution_complete"]');
+      picker = mountIssuePicker(form, {id:"issue-link-input",projectSlug,
+        onChange:() => { resolution.checked = false; }});
       // Una declaración anterior no se transfiere a otra referencia por accidente.
       input.addEventListener("input", () => { resolution.checked = false; });
       input.focus();
@@ -160,16 +126,23 @@ export async function openIssueLink({ convId, projectSlug, task, onSaved } = {})
         const button = form.querySelector('[type="submit"]');
         if (button.disabled) return;
         const output = document.getElementById(`${MODAL}-msg`);
+        let fields;
         try {
           const payload = issueLinkPayload(input.value, resolution.checked);
-          button.disabled = true; input.disabled = true; resolution.disabled = true;
+          fields = [...form.elements].map(control => [control,control.disabled]);
+          picker.setBusy?.(true); fields.forEach(([control]) => { control.disabled = true; });
           if (output) output.textContent = "Verificando issue en GitHub…";
           const next = await apiRoot(`/conversations/${encodeURIComponent(convId)}/issue`, {method:"POST",body:payload});
           if (session !== modalSession || !isModalOpen(MODAL)) return;
           picker.destroy(); closeModal(MODAL); toast("Vínculo de issue guardado", "ok"); await onSaved?.(next);
         } catch (error) {
           if (session === modalSession && isModalOpen(MODAL) && output) output.textContent = `No se pudo guardar: ${error.message}. Conservamos los datos para reintentar.`;
-        } finally { button.disabled = false; input.disabled = false; resolution.disabled = false; }
+        } finally {
+          if (fields && session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+            fields.forEach(([control,disabled]) => { control.disabled = disabled; });
+            picker.setBusy?.(false);
+          }
+        }
       };
     },
   });

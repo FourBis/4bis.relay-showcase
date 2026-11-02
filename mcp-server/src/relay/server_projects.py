@@ -11,9 +11,10 @@ from .server_common import (
     COMMANDS_KEY, DB_KEY, PROGRESS_KEY, RUNNING_KEY, SESSIONS_KEY, SessionRegistry,
     _require_auth,
 )
-from . import progress
+from . import progress, private_mcp_access
 from .commands import CommandContext, CommandRegistry, UnknownCommand
 from .db import Database
+from .secret_redaction import redact_data, redact_text
 # ---------- projects (config CRUD, ADR-013) ----------
 
 
@@ -215,8 +216,8 @@ async def chats_list(request: web.Request) -> web.Response:
     status = request.query.get("status") or None
     limit = min(int(request.query.get("limit", "20")), 200)
     return web.json_response(
-        {"chats": await db.list_chats(
-            project_slug=project, limit=limit, status=status)})
+        {"chats": redact_data(await private_mcp_access.visible_rows(request, await db.list_chats(
+            project_slug=project, limit=limit, status=status)))})
 
 
 @_require_auth
@@ -234,7 +235,9 @@ async def chats_get(request: web.Request) -> web.Response:
             chat["stages"] = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             chat["stages"] = None  # fila vieja o corrupta: no rompe el GET
-    return web.json_response(chat)
+    if not await private_mcp_access.visible_rows(request, [chat]):
+        raise web.HTTPNotFound(text="Consulta no disponible.")
+    return web.json_response(redact_data(chat), headers={"Cache-Control": "no-store"})
 
 
 @_require_auth
@@ -248,7 +251,10 @@ async def chats_get_md(request: web.Request) -> web.Response:
             Path(chat["md_path"]).read_text, encoding="utf-8")
     except OSError:
         return web.json_response({"error": ".md no legible"}, status=404)
-    return web.Response(text=text, content_type="text/markdown", charset="utf-8")
+    if not await private_mcp_access.visible_rows(request, [chat]):
+        raise web.HTTPNotFound(text="Consulta no disponible.")
+    return web.Response(text=redact_text(text), content_type="text/markdown", charset="utf-8",
+                        headers={"Cache-Control": "no-store"})
 
 
 @_require_auth
@@ -280,12 +286,14 @@ async def chats_get_status(request: web.Request) -> web.Response:
         snap = progress[matches[0]].snapshot()
     elif len(matches) > 1:
         snap = [progress[c].snapshot() for c in matches]
-    return web.json_response({
+    if not await private_mcp_access.visible_rows(request, [chat]):
+        raise web.HTTPNotFound(text="Consulta no disponible.")
+    return web.json_response(redact_data({
         "chat": chat,
         "progress": snap,
         "has_progress": bool(snap),
         "is_running": bool(chat.get("status") == "running"),
-    })
+    }), headers={"Cache-Control": "no-store"})
 
 
 @_require_auth

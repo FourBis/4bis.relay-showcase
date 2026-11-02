@@ -25,11 +25,14 @@ Failed requests preserve the form. Retrying the same evidence declaration keeps 
 | Human review | Must be independent of the author and responsible person and apply to the current head. A bot does not replace it. |
 | Apto en Relay | The latest observation meets the configured risk policy. It does not block or authorize GitHub merges. |
 
-A new head makes previous evidence historical. A dismissed review, withdrawn policy or remote error can also remove eligibility. Observations have a five-minute technical validity window; registration is not continuous monitoring.
+A new head makes previous evidence historical. A dismissed review, withdrawn policy or remote error can also remove eligibility. Observations have a five-minute technical validity window. Registration alone does not enable automatic monitoring.
 
 Admin explicitly configures `projects.defaults_json.external_pr_policy` by risk through project editing in the [API](API.md). Without a valid policy, the task cannot become eligible. Registration grants no publication, merge or deployment permission.
 
-External registrations do not expose an executor, publication, automatic follow-up or a local workspace diff. Change the code with your chosen tool and review it in GitHub. Merged and closed PRs can be refreshed without turning their registrations into execution tasks.
+External registration does not execute code changes or prepare a local workspace
+diff. Change the code with your chosen tool and review it in GitHub. Merged and
+closed PRs can be refreshed without becoming execution tasks. The separate local
+parity candidate below adds advisory review and optional publication.
 
 ## Shared issue and limits
 
@@ -38,3 +41,39 @@ The optional issue is verified against its identity and repository and can be sh
 The public demo uses fictional people, repository, PRs and commits. Its controls only update a local scenario: no GitHub access, test execution or connected installation is implied. Local installations use the accounts and permissions you configure.
 
 Tests use synthetic data and simulated GitHub responses. They do not establish branch protection, required checks, permissions or real account changes.
+
+## Local parity candidate: advisory review and PNG evidence
+
+**Status on November 1, 2026:** these additions are prepared on a separate local
+branch. This documentation does not claim remote publication, integration,
+deployment or activation. This round used static review only: no application,
+DB, models, providers, unit tests or suites ran. The October evidence above
+belongs to that earlier version.
+
+The candidate preserves same-repository base/head verification, fork rejection
+and fresh remote identity checks. It adds a project work register, paginated
+PR/issue selectors and advisory reports bound to head, base, objective, linked
+issue, evidence and verified instructions from the base commit.
+
+Review is disabled initially. An active Admin must select an enabled model and
+explicitly enable the project's review policy. The reviewer has no tools and
+does not run code or tests. Its findings remain separate from independent human
+review. Interrupted or invalid attempts require explicit retry with their
+provenance preserved.
+
+GitHub comment publication is a separate option, also off initially. It requires
+an explicit account mode and verified identity. An uncertain response is
+reconciled without automatically repeating the POST. Notifications use a local
+Relay inbox for explicitly configured authorized accounts; they send nothing
+to external messaging applications.
+
+PNG evidence uses an owned temporary copy that the person downloads and uploads
+manually through GitHub's interface. Relay verifies the permalink, author,
+destination, marker and byte digest before cleaning its own copy. It does not
+generate or upload the image, send it to the model, or count it as a test or
+human approval.
+
+See [External review, states and permissions](EXTERNAL_REVIEW.md) (Spanish) for
+the implementation contract and limits. [Issues and Projects](ISSUE_SYNC.en.md)
+retains its separate policy and concurrent-observation protections. Evidence
+or advisory review does not authorize closing an issue.

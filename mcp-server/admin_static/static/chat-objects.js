@@ -46,12 +46,13 @@ export async function renderMarkdown(value) {
   return root;
 }
 
-export function objectReference(conversationId, messageIndex, kind = "response", itemIndex = 0) {
+export function objectReference(conversationId, messageIndex, kind = "response", itemIndex = 0, messageId) {
   return {
     conversationId: String(conversationId || ""),
     messageIndex: Number(messageIndex),
     kind: String(kind),
     itemIndex: Number(itemIndex),
+    ...(messageId ? { messageId: String(messageId) } : {}),
   };
 }
 
@@ -60,6 +61,7 @@ export function validObjectReference(reference) {
     && typeof reference.conversationId === "string"
     && reference.conversationId.length > 0
     && Number.isInteger(reference.messageIndex) && reference.messageIndex >= 0
+    && (reference.messageId === undefined || /^[a-f0-9]{64}$/.test(reference.messageId))
     && ["response", "table", "svg"].includes(reference.kind)
     && Number.isInteger(reference.itemIndex) && reference.itemIndex >= 0;
 }
@@ -184,7 +186,7 @@ function returnToConversation(conversationId) {
 }
 
 export async function openChatObject({ conversationId, message, messageIndex }) {
-  const ref = objectReference(conversationId, messageIndex);
+  const ref = objectReference(conversationId, messageIndex, "response", 0, message?.message_id);
   const descriptor = await chatObjectDescriptor(message, ref);
   return openObject(descriptor);
 }
@@ -210,7 +212,7 @@ async function chatObjectDescriptor(message, reference) {
     }
   }
   return {
-    id: `chat-object:${reference.conversationId}:${reference.messageIndex}:${reference.kind}:${reference.itemIndex}`,
+    id: `chat-object:${reference.conversationId}:${reference.messageId || reference.messageIndex}:${reference.kind}:${reference.itemIndex}`,
     title: reference.kind === "table" ? "Tabla de respuesta"
       : reference.kind === "svg" ? "Gráfico de respuesta" : "Respuesta del experto",
     source: sourceLabel(reference),
@@ -226,7 +228,12 @@ export async function restoreChatObject(reference) {
   const response = await apiRoot(
     `/conversations/${encodeURIComponent(reference.conversationId)}/messages`
     + "?max_turns=2000&content_cap=100000", null, 30_000);
-  const message = response?.messages?.[reference.messageIndex];
+  if (!reference.messageId && !reference.signature) {
+    throw new Error('Vuelve a abrir el objeto desde su respuesta en la conversación.');
+  }
+  const message = reference.messageId
+    ? response?.messages?.find(item => item.message_id === reference.messageId)
+    : response?.messages?.[reference.messageIndex];
   if (!message || message.role !== "assistant") {
     throw new Error("La respuesta de la conversación ya no está disponible");
   }

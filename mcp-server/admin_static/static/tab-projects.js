@@ -10,7 +10,8 @@ import { dataTable } from "./ui-table.js";
 import { refreshStatus } from "./tab-status.js";
 import { renderColumnas } from "./board-view.js";
 import { loadOrphans } from "./tab-orphans.js";
-import { taskWorkspaceQuery } from "./workspace.js";
+import { taskWorkspaceQuery, captureTaskWorkspaceContext } from "./workspace.js";
+import { openProjectPRs } from "./project-external-pr.js";
 
 // ---- iconos de fila ----
 //
@@ -59,6 +60,20 @@ function actionGroup(buttons) {
 let _guildId = "";
 let _loadError = "";
 let _tabla = null;
+let _ownerProjects = false;
+
+export function projectPRButton(p) {
+  return `<button type="button" class="btn btn-xs project-pr-btn" data-slug="${escape(p.slug)}"
+    title="Registrar y revisar PR del repositorio de ${escape(p.slug)}"
+    aria-label="PR del proyecto ${escape(p.slug)}">PR</button>`;
+}
+
+export function projectColumns(owner = false) {
+  return owner ? COLUMNAS : [
+    COLUMNAS[0],
+    {key:"slug",label:"PR del proyecto",sortable:false,render:projectPRButton},
+  ];
+}
 
 function _celdaCanal(p) {
   const dcId = p.discord_channel_id || "";
@@ -131,6 +146,7 @@ const COLUMNAS = [
            aria-label="abrir el repo remoto de ${escape(p.slug)}">${_svg(ICONS.remoto)}</a>`,
       ] : []),
       iconBtn(ICONS.tablero, `seguimiento GitHub de ${p.slug}`, "github-btn", p.slug),
+      projectPRButton(p),
       iconBtn(ICONS.gear, `administrar ${p.slug}`, "admin-btn", p.slug),
       iconBtn(ICONS.correr, `correr experto sobre ${p.slug}`, "expert-btn", p.slug),
     ]) },
@@ -139,7 +155,7 @@ const COLUMNAS = [
 export async function loadProjects() {
   if (!_tabla) {
     _tabla = dataTable($("#projects-table"), {
-      columns: COLUMNAS,
+      columns: projectColumns(_ownerProjects),
       rows: [],
       pageSize: 25,
       sort: { key: 0, dir: "asc" },
@@ -153,6 +169,8 @@ export async function loadProjects() {
         ? { title: "No se pudieron cargar los proyectos",
             sub: _loadError,
             action: `<button class="btn" data-projects-retry>Reintentar</button>` }
+        : !_ownerProjects ? {title:"No hay proyectos habilitados para tu cuenta",
+            sub:"Se muestran los proyectos con acceso de escritura y un repositorio GitHub vinculado. Consulta al administrador si falta uno."}
         : { title: "Todavía no hay proyectos",
             sub: "Un proyecto es un experto sobre un repo: system_prompt + "
                + "mcp_servers. Creá el primero y va a poder invocarse vía "
@@ -164,7 +182,7 @@ export async function loadProjects() {
   _loadError = "";
   _tabla.setLoading(true);
   try {
-    const { projects, discord_guild_id: guildId } = await api("projects");
+    const { projects, discord_guild_id: guildId } = await api(_ownerProjects ? "projects" : "projects?capability=external_pr");
     _guildId = guildId || "";
     _tabla.setRows(projects || []);
   } catch (e) {
@@ -187,6 +205,7 @@ const _ACCIONES = {
   "admin-btn": (slug) => openAdminModal(slug),
   "expert-btn": (slug) => openExpertModal(slug),
   "github-btn": (slug) => openGithubModal(slug),
+  "project-pr-btn": (slug) => openProjectPRs(slug),
   "vscode-btn": async (slug) => {
     const r = await openProjectInVSCode(slug);
     if (!r.ok) toast("No se pudo abrir VS Code: " + r.error, "err");
@@ -196,15 +215,17 @@ const _ACCIONES = {
 function _wireTabla() {
   const el = $("#projects-table");
   el.addEventListener("click", (e) => {
-    if (e.target.closest("[data-projects-new]")) { $("#project-new").click(); return; }
+    if (_ownerProjects && e.target.closest("[data-projects-new]")) { $("#project-new").click(); return; }
     if (e.target.closest("[data-projects-retry]")) { loadProjects(); return; }
     const btn = e.target.closest("button[data-slug]");
     if (!btn) return;
+    if (!_ownerProjects && !btn.classList.contains("project-pr-btn")) return;
     for (const [cls, fn] of Object.entries(_ACCIONES)) {
       if (btn.classList.contains(cls)) { fn(btn.dataset.slug); return; }
     }
   });
   el.addEventListener("change", (e) => {
+    if (!_ownerProjects) return;
     const c = e.target;
     if (c.classList.contains("include-toggle")) togglePatch(e, "include_in_index");
     else if (c.classList.contains("night-toggle")) toggleNight(e);
@@ -259,6 +280,7 @@ async function togglePatch(e, field) {
 // ---- system prompt viewer ----
 
 function openPromptModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   const modal = $("#prompt-modal");
   modal.dataset.assembled = "";
   modalLoad({
@@ -447,6 +469,8 @@ function wireGitRemote(slug) {
   if (!btn) return;
   const input = document.getElementById("git-remote-input");
   const msg = document.getElementById("git-remote-msg");
+  const ctx = _adminCtx;
+  const current = () => btn.isConnected && document.getElementById("git-remote-save") === btn;
   const save = async () => {
     const url = (input.value || "").trim();
     if (!url) { msg.textContent = "Escribí una URL."; msg.className = "text-xs mt-2 fail"; return; }
@@ -457,13 +481,17 @@ function wireGitRemote(slug) {
         method: "PUT",
         body: JSON.stringify({ url }),
       });
+      if (!current()) return;
       msg.textContent = `✓ Remoto configurado: ${r.repo}`;
       msg.className = "text-xs mt-2 ok";
       // Reflejar en el ctx vivo y en la tabla de fondo (link 🐙).
-      if (_adminCtx?.data?.project) _adminCtx.data.project.git_remote_url = r.url;
+      if (ctx === _adminCtx && ctx?.slug === slug && ctx.data?.project) {
+        ctx.data.project.git_remote_url = r.url;
+      }
       loadProjects();
       toast("Remoto de GitHub actualizado ✓", "ok");
     } catch (err) {
+      if (!current()) return;
       msg.textContent = "Error: " + err.message;
       msg.className = "text-xs mt-2 fail";
     } finally {
@@ -711,7 +739,7 @@ function openCbmModal(slug) {
     title: `cbm · ${slug}`,
     loader: () => api(`projects/${encodeURIComponent(slug)}/cbm`),
     render: renderCbmDetail,
-    after: () => wireCbmReindex(slug),
+    after: () => wireCbmReindex(slug, $("#cbm-modal")),
   });
 }
 
@@ -743,23 +771,30 @@ function renderCbmDetail(r) {
   ${r.note ? `<p class="muted mt-2">${escape(r.note)}</p>` : ""}`;
 }
 
-function wireCbmReindex(slug) {
-  const btn = $("#cbm-reindex");
-  onClick("#cbm-reindex", async () => {
+function wireCbmReindex(slug, root = document) {
+  const btn = root.querySelector("#cbm-reindex-inline") || root.querySelector("#cbm-reindex");
+  const msg = root.querySelector("#cbm-msg-inline") || root.querySelector("#cbm-modal-msg");
+  if (!btn || !msg) return;
+  const query = taskWorkspaceQuery(slug);
+  const view = root.querySelector("#cbm-modal-body")?.firstElementChild || root.firstElementChild;
+  const current = () => btn.isConnected && root.contains(btn) && view?.isConnected;
+  btn.disabled = false;
+  btn.onclick = async () => {
     btn.disabled = true;
-    const msg = $("#cbm-modal-msg");
     msg.textContent = "arrancando reindex…";
     try {
-      const r = await api(`projects/${encodeURIComponent(slug)}/reindex${taskWorkspaceQuery(slug)}`,
+      const r = await api(`projects/${encodeURIComponent(slug)}/reindex${query}`,
         { method: "POST" });
+      if (!current()) return;
       toast(`Reindex ${r.job_id} arrancado. Espera unos minutos…`, "ok");
       msg.textContent = `job_id=${r.job_id} — verifica el tab Estado para el progreso`;
     } catch (err) {
+      if (!current()) return;
       msg.textContent = "";
       toast("Error: " + err.message, "err");
       btn.disabled = false;
     }
-  });
+  };
 }
 
 // ---- seguimiento GitHub (fase 2 del plan) ----
@@ -1102,15 +1137,96 @@ const FLAG_AVISOS = {
 };
 
 let _flagsSlug = null;
+let _flagsView = null;
+const _flagProjects = new Map(); // drafts/pending outlive a General tab DOM
+
+function flagsCurrent(view) {
+  return !!view && _flagsView === view && _flagsSlug === view.slug && view.box.isConnected
+    && $("#edit-flags") === view.box
+    && (!view.sidepanel || isSidePanelCurrent(view.generation))
+    && (!view.modal || view.modal.classList.contains("open"));
+}
 // Catálogo de modelos PRENDIDOS, para los flags de tipo `model`. Se pide
 // una vez por carga de la pantalla: es la misma lista para los cuatro
 // selects.
 let _modelosPrendidos = [];
 
+function flagRawValue(control) {
+  return control.type === "checkbox" ? control.checked : control.value;
+}
+
+function flagStoredValue(flag) {
+  return flag.tipo === "bool" ? !!flag.valor
+    : Array.isArray(flag.valor) ? flag.valor.join(", ") : flag.valor ?? "";
+}
+
+function flagProjectFields(slug, existing = null) {
+  if (!_flagProjects.has(slug)) _flagProjects.set(slug, existing || new Map());
+  return _flagProjects.get(slug);
+}
+
+function flagDisplayView(view) {
+  const shown = _flagsView;
+  return flagsCurrent(shown) && shown.slug === view.slug && shown.fields === view.fields ? shown : null;
+}
+
+function flagSetValue(control, flag) {
+  if (control.type === "checkbox") control.checked = !!flag.valor;
+  else if (control.classList.contains("flag-list")) control.value = (flag.valor || []).join(", ");
+  else if (flag.tipo === "model") control.innerHTML = opcionesModelo(flag, _modelosPrendidos).join("");
+  else control.value = flag.valor ?? "";
+}
+
+function flagField(view, nombre, control) {
+  view.fields = flagProjectFields(view.slug, view.fields);
+  let field = view.fields.get(nombre);
+  if (!field) {
+    field = {revision:0,writeGeneration:0,draft:flagRawValue(control),dirty:false,pending:null,error:"",feedback:"",control};
+    view.fields.set(nombre, field);
+  }
+  return field;
+}
+
+function flagReadDraft(field, control) {
+  const draft = flagRawValue(control);
+  if (draft !== field.draft) {
+    field.draft = draft;
+    field.revision++;
+    field.dirty = true;
+  }
+}
+
+function flagFeedback(view, nombre) {
+  if (!flagsCurrent(view)) return;
+  const field = view.fields?.get(nombre);
+  const row = field?.control.closest("[data-flag-row]");
+  if (!row || !view.box.contains(row)) return;
+  const status = row.querySelector("[data-flag-feedback]");
+  status.textContent = field.error || (field.pending ? "Guardando…"
+    : field.dirty ? "Hay cambios sin guardar." : field.feedback);
+  status.classList.toggle("fail", !!field.error);
+  if (field.persisted) {
+    const origin = row.querySelector("[data-flag-origin]");
+    origin.textContent = field.persisted.explicito ? "fijo" : "default";
+    origin.title = field.persisted.explicito ? "puesto a mano en este proyecto" : "sigue el default del relay";
+    const reset = row.querySelector(".flag-reset");
+    reset.hidden = !field.persisted.explicito;
+    reset.disabled = !!field.pending;
+  }
+}
+
 export async function loadFlags(slug) {
-  _flagsSlug = slug;
   const box = $("#edit-flags");
   if (!box) return;
+  const reuse = flagsCurrent(_flagsView) && _flagsView.slug === slug && _flagsView.box === box;
+  _flagsSlug = slug;
+  const view = _flagsView = reuse ? _flagsView : {slug,box,generation:sidepanelGen(),
+    sidepanel:box.closest("#admin-sidepanel"),modal:box.closest(".modal"),
+    fields:flagProjectFields(slug),readGeneration:0,rendered:false};
+  const generation = ++view.readGeneration;
+  const before = new Map([...view.fields].map(([name, field]) => [name, {
+    revision:field.revision,writeGeneration:field.writeGeneration,
+  }]));
   try {
     // Los dos en paralelo: los flags no dependen del catálogo, pero
     // renderFlags necesita los dos para pintar los selects de modelo.
@@ -1118,9 +1234,39 @@ export async function loadFlags(slug) {
       api(`projects/${encodeURIComponent(slug)}/flags`),
       api("models").catch(() => ({ models: [] })),   // sin catálogo, el
     ]);                                             // select queda con
+    if (!flagsCurrent(view) || generation !== view.readGeneration) return;
     _modelosPrendidos = cat.models || [];           // heredado y ya
-    renderFlags(box, r.flags || {});
+    for (const [name, field] of view.fields) {
+      const snapshot = before.get(name), flag = r.flags?.[name];
+      if (!flag || field.pending || !snapshot || snapshot.revision !== field.revision
+          || snapshot.writeGeneration !== field.writeGeneration) continue;
+      field.persisted = flag;
+      if (!field.dirty) field.draft = flagStoredValue(flag);
+      if (view.rendered) {
+        // Metadata may refresh; another field's node and draft stay intact.
+        if (!field.dirty) flagSetValue(field.control, flag);
+        flagFeedback(view, name);
+      }
+    }
+    if (!view.rendered) {
+      const merged = {...r.flags};
+      for (const name of Object.keys(merged)) {
+        const persisted = view.fields.get(name)?.persisted;
+        if (persisted) merged[name] = persisted;
+      }
+      renderFlags(box, merged, view);
+    }
   } catch (e) {
+    if (!flagsCurrent(view) || generation !== view.readGeneration) return;
+    if (view.fields.size) {
+      if (!view.rendered && e.status !== 403 && e.status !== 404) {
+        const cached = Object.fromEntries([...view.fields].filter(([, field]) => field.persisted)
+          .map(([name, field]) => [name, field.persisted]));
+        if (Object.keys(cached).length) renderFlags(box, cached, view);
+      }
+      if (!view.rendered) box.textContent = "No se pudieron cargar los flags de este proyecto: " + e.message;
+      toast("Error cargando flags; se conservaron los cambios del formulario: " + e.message, "err"); return;
+    }
     box.innerHTML = `<span class="muted text-xs">error cargando flags: ${
       escape(e.message)}</span>`;
   }
@@ -1154,17 +1300,13 @@ export function opcionesModelo(f, prendidos) {
   return ops;
 }
 
-function renderFlags(box, flags) {
+function renderFlags(box, flags, view = _flagsView) {
   box.innerHTML = FLAG_GRUPOS.map(([titulo, nombres]) => {
     const filas = nombres.filter((n) => flags[n]).map((n) => {
       const f = flags[n];
-      const marca = f.explicito
-        ? '<span class="badge dim" title="puesto a mano en este proyecto">fijo</span>'
-        : '<span class="badge dim" title="sigue el default del relay">default</span>';
-      const reset = f.explicito
-        ? `<button class="btn btn-xs flag-reset" data-flag="${escape(n)}"
-             title="volver al default del relay">↺</button>`
-        : "";
+      const marca = `<span class="badge dim" data-flag-origin>${f.explicito ? "fijo" : "default"}</span>`;
+      const reset = `<button class="btn btn-xs flag-reset" data-flag="${escape(n)}"
+             title="volver al default del relay" ${f.explicito ? "" : "hidden"}>↺</button>`;
       let control;
       if (f.tipo === "bool") {
         control = `<input type="checkbox" class="flag-bool" data-flag="${
@@ -1182,13 +1324,14 @@ function renderFlags(box, flags) {
           data-flag="${escape(n)}" value="${escape((f.valor || []).join(", "))}"
           placeholder="separadas por coma">`;
       }
-      return `<div class="flex items-start gap-2 py-1">
+      return `<div class="flex items-start gap-2 py-1" data-flag-row="${escape(n)}">
         <div class="pt-0.5">${control}</div>
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2">
             <code class="text-xs">${escape(n)}</code>${marca}${reset}
           </div>
           <p class="muted text-xs">${escape(f.descripcion || "")}</p>
+          <p class="muted text-xs" data-flag-feedback role="status"></p>
         </div>
       </div>`;
     }).join("");
@@ -1199,51 +1342,115 @@ function renderFlags(box, flags) {
     </div>`;
   }).join("");
 
-  $$(".flag-bool").forEach((el) =>
+  view.rendered = true;
+  box.querySelectorAll("input[data-flag], select[data-flag]").forEach(control => {
+    const name = control.dataset.flag, field = flagField(view, name, control);
+    field.control = control;
+    field.persisted ||= flags[name];
+    if (field.dirty || field.pending) {
+      if (control.type === "checkbox") control.checked = !!field.draft;
+      else control.value = field.draft;
+    } else {
+      flagSetValue(control, field.persisted);
+      field.draft = flagRawValue(control);
+    }
+    control.addEventListener("input", () => {
+      if (!flagsCurrent(view)) return;
+      flagReadDraft(field, control);
+      field.error = "";
+      flagFeedback(view, name);
+    });
+    flagFeedback(view, name);
+  });
+  box.querySelectorAll(".flag-bool").forEach((el) =>
     el.addEventListener("change", () =>
-      saveFlag(el.dataset.flag, el.checked, el)));
-  $$(".flag-enum").forEach((el) =>
-    el.addEventListener("change", () => saveFlag(el.dataset.flag, el.value, el)));
+      saveFlag(el.dataset.flag, el.checked, el, view)));
+  box.querySelectorAll(".flag-enum").forEach((el) =>
+    el.addEventListener("change", () => saveFlag(el.dataset.flag, el.value, el, view)));
   // "" en un flag de modelo significa "volver al global", que es
   // exactamente lo que el backend hace con null.
-  $$(".flag-model").forEach((el) =>
+  box.querySelectorAll(".flag-model").forEach((el) =>
     el.addEventListener("change", () =>
-      saveFlag(el.dataset.flag, el.value || null, el)));
+      saveFlag(el.dataset.flag, el.value || null, el, view)));
   // Las listas van por `change` (blur/Enter) y no por `input`: un PATCH
   // por tecla es ruido en el log y una carrera con el propio tipeo.
-  $$(".flag-list").forEach((el) =>
+  box.querySelectorAll(".flag-list").forEach((el) =>
     el.addEventListener("change", () => saveFlag(
       el.dataset.flag,
-      el.value.split(",").map((x) => x.trim()).filter(Boolean), el)));
-  $$(".flag-reset").forEach((el) =>
-    el.addEventListener("click", () => saveFlag(el.dataset.flag, null, el)));
+      el.value.split(",").map((x) => x.trim()).filter(Boolean), el, view)));
+  box.querySelectorAll(".flag-reset").forEach((el) =>
+    el.addEventListener("click", () => saveFlag(el.dataset.flag, null, el, view)));
 }
 
-async function saveFlag(nombre, valor, el) {
+async function saveFlag(nombre, valor, el, view = _flagsView) {
+  if (!flagsCurrent(view) || !view.box.contains(el)) return;
+  const control = el.matches("input, select") ? el : el.closest("[data-flag-row]")?.querySelector("input, select");
+  if (!control) return;
+  const field = flagField(view, nombre, control);
+  if (field.pending) return;
+  flagReadDraft(field, control);
+  const revision = field.revision;
   const aviso = FLAG_AVISOS[nombre];
   if (aviso && valor === aviso.cuando) {
     if (!await confirmModal({
       title: aviso.titulo, body: aviso.texto,
-      confirmText: "Sí, apagalo", danger: true,
+      confirmText: "Confirmar", danger: true,
     })) {
-      // Revertir el checkbox: el usuario dijo que no, la UI tiene que
-      // mostrar lo que quedó guardado y no lo que llegó a clickear.
-      if (el && el.type === "checkbox") el.checked = !valor;
+      if (flagsCurrent(view) && field.revision === revision && control.type === "checkbox") {
+        control.checked = !valor;
+        field.draft = flagRawValue(control);
+        field.dirty = false;
+        flagFeedback(view, nombre);
+      }
       return;
     }
   }
+  if (!flagsCurrent(view) || field.revision !== revision || field.pending) return;
+  const request = {revision,trigger:el}, slug = view.slug;
+  field.pending = request;
+  field.writeGeneration++;
+  field.error = "";
+  const current = () => field.pending === request;
+  el.disabled = true;
+  flagFeedback(view, nombre);
   try {
-    const r = await api(`projects/${encodeURIComponent(_flagsSlug)}/flags`, {
+    const r = await api(`projects/${encodeURIComponent(slug)}/flags`, {
       method: "PATCH", body: JSON.stringify({ [nombre]: valor }),
     });
-    if (r.error) { toast("Error: " + r.error, "err"); await loadFlags(_flagsSlug); return; }
-    toast(`${nombre}: ${valor === null ? "vuelve al default" : JSON.stringify(valor)}`,
-          nombre === "sandbox" && valor === false ? "warn" : "ok");
-    // Re-render: cambia el badge fijo/default y aparece o desaparece el ↺.
-    renderFlags($("#edit-flags"), r.flags || {});
+    if (!current()) return;
+    if (r.error) throw new Error(r.error);
+    // A PATCH may return a full snapshot. Only reconcile its own field:
+    // another field may have an unsent draft or a newer request in flight.
+    field.persisted = r.flags?.[nombre] || field.persisted;
+    if (field.revision === revision) {
+      if (valor === null && field.persisted) {
+        field.draft = flagStoredValue(field.persisted);
+      }
+      field.dirty = false;
+      field.feedback = "Guardado confirmado.";
+    } else field.feedback = "Guardado anterior confirmado; quedan cambios sin guardar.";
+    const shown = flagDisplayView(view);
+    if (shown) {
+      if (field.revision === revision && field.control && shown.box.contains(field.control)) {
+        if (field.control.type === "checkbox") field.control.checked = !!field.draft;
+        else field.control.value = field.draft;
+      }
+      toast(`${nombre}: ${valor === null ? "vuelve al default" : JSON.stringify(valor)}`,
+            nombre === "sandbox" && valor === false ? "warn" : "ok");
+    }
   } catch (e) {
-    toast("Error: " + e.message, "err");
-    await loadFlags(_flagsSlug);
+    if (!current()) return;
+    field.dirty = true;
+    field.error = "No se confirm\u00f3 el guardado. Se conserva el valor del campo. " + e.message;
+    if (flagDisplayView(view)) toast("Error: " + e.message, "err");
+  } finally {
+    if (field.pending === request) {
+      field.pending = null;
+      field.writeGeneration++; // invalidate GET begun before this settlement
+      if (el.isConnected) el.disabled = false;
+      const shown = flagDisplayView(view);
+      if (shown) flagFeedback(shown, nombre);
+    }
   }
 }
 
@@ -1345,6 +1552,12 @@ function parseNightConfig(raw) {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
+
+
+
+
+
+
 function wireEditForm(slug, project) {
   // Iter 4.7: el botón guardar vive DENTRO del form renderizado
   // (#edit-save-inline), no en el footer estático del modal (#edit-save).
@@ -1433,6 +1646,7 @@ function wireEditForm(slug, project) {
 // ---- experto (corre /experts/run desde la UI) ----
 
 function openExpertModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   modalLoad({
     id: "expert-modal",
     title: `Experto · ${slug}`,
@@ -1441,13 +1655,13 @@ function openExpertModal(slug) {
       api(`projects/${encodeURIComponent(slug)}/system-prompt`),
     ]).then(([proj, sp]) => ({ project: proj.project, system_prompt: sp })),
     render: renderExpertForm,
-    after: (r) => wireExpertForm(slug, r),
+    after: (r) => wireExpertForm(slug, r, $("#expert-modal")),
     watchdogDetail: `Leyendo el system_prompt efectivo del proyecto y los
       bloques ADR-010/011/020. Tarda unos segundos la primera vez.`,
   });
 }
 
-function renderExpertForm(r) {
+function renderExpertForm(r, inlineActions = false) {
   const p = r.project || {};
   const sp = r.system_prompt || {};
   const blocks = sp.blocks || {};
@@ -1493,6 +1707,7 @@ function renderExpertForm(r) {
     <span class="text-xs text-zinc-400" id="expert-conv-info"></span>
     <button class="btn btn-xs hidden" id="expert-conv-reset" type="button">nueva conversación</button>
   </div>
+  ${inlineActions ? '<div class="toolbar mt-3"><button id="expert-run-inline" class="btn btn-primary" type="button" disabled>Ejecutar experto</button></div>' : ''}
   <div id="expert-output" class="mt-4 hidden">
     <h4>Output</h4>
     <pre class="chat-md" id="expert-output-text"></pre>
@@ -1506,16 +1721,18 @@ function renderExpertForm(r) {
 const EXPERT_SYNC_TIMEOUT_MS = 330_000;
 
 
-function wireExpertForm(slug, r) {
-  const run = $("#expert-run");
-  const input = $("#expert-input");
-  const isAsync = $("#expert-async");
-  const output = $("#expert-output");
-  const outputText = $("#expert-output-text");
-  const convCheck = $("#expert-conv");
-  const convInfo = $("#expert-conv-info");
-  const convReset = $("#expert-conv-reset");
+function wireExpertForm(slug, r, root = document) {
+  const find = selector => root.querySelector(selector);
+  const run = find("#expert-run-inline") || find("#expert-run");
+  const input = find("#expert-input");
+  const isAsync = find("#expert-async");
+  const output = find("#expert-output");
+  const outputText = find("#expert-output-text");
+  const convCheck = find("#expert-conv");
+  const convInfo = find("#expert-conv-info");
+  const convReset = find("#expert-conv-reset");
   if (!run) return;
+  const current = () => input.isConnected && root.contains(input);
 
   // Conversación viva del modal (2026-07-12): la primera corrida con
   // "🧵 mantener conversación" crea una en el relay y las siguientes
@@ -1525,16 +1742,19 @@ function wireExpertForm(slug, r) {
     if (convInfo) convInfo.textContent = convId ? `conv: ${convId.slice(0, 8)}…` : "";
     if (convReset) convReset.classList.toggle("hidden", !convId);
   };
-  onClick("#expert-conv-reset", () => { convId = null; refreshConvUi(); toast("Conversación reiniciada.", "ok"); });
+  if (convReset) convReset.onclick = () => { convId = null; refreshConvUi(); toast("Conversación reiniciada.", "ok"); };
 
-  const refresh = () => { run.disabled = !input.value.trim(); };
+  let running = false;
+  const refresh = () => { run.disabled = running || !input.value.trim(); };
   refresh();
   input.addEventListener("input", refresh);
 
-  onClick("#expert-run", async () => {
+  run.onclick = async () => {
+    if (!current() || running) return;
     const prompt = input.value.trim();
     if (!prompt) { toast("El mensaje es obligatorio.", "err"); return; }
-    run.disabled = true;
+    running = true;
+    refresh();
     output.classList.add("hidden");
     outputText.textContent = isAsync.checked ? "arrancando (async)…" : "corriendo…";
     output.classList.remove("hidden");
@@ -1559,6 +1779,7 @@ function wireExpertForm(slug, r) {
           new_conversation: keep && !convId,
         }),
       }, isAsync.checked ? undefined : EXPERT_SYNC_TIMEOUT_MS);
+      if (!current()) return;
       if (data.error) {
         outputText.textContent = `Error: ${data.error}`;
         toast("Error: " + data.error, "err");
@@ -1574,6 +1795,7 @@ function wireExpertForm(slug, r) {
         }
       }
     } catch (err) {
+      if (!current()) return;
       // En sync no tenemos chat_id —el server lo devuelve recién al
       // terminar—, así que si igual se corta hay que decir DÓNDE mirar:
       // el run sigue corriendo del otro lado y avisar "error" a secas
@@ -1587,9 +1809,9 @@ OJO: el run NO se canceló, sigue corriendo en el `
         : `Error: ${err.message}`;
       toast("Error: " + err.message, "err");
     } finally {
-      run.disabled = false;
+      if (current()) { running = false; refresh(); }
     }
-  });
+  };
 }
 
 // ============================================================
@@ -1620,12 +1842,24 @@ const ADMIN_TABS = [
 // los handlers internos. Más simple que andar pasando (slug, data, tab).
 let _adminCtx = null;
 
+export function openProjectAdmin(slug) {
+  if (!_ownerProjects) {
+    toast("Administrar proyectos requiere una cuenta administradora.", "err");
+    return false;
+  }
+  openAdminModal(slug);
+  return true;
+}
+
 function openAdminModal(slug) {
+  if (!_ownerProjects) { toast("Esta herramienta requiere una cuenta administradora.", "err"); return; }
   // UI 2026-07-20: sidepanel en vez de modal fullscreen. Mantiene
   // el contexto del tab visible (la lista de proyectos queda detrás).
   // Si el viewport es <md, sigue funcionando (el panel ocupa 92vw).
-  _adminCtx = { slug, data: null, tab: "general" };
   const gen = openSidePanel(`Administrar · ${slug}`);
+  const ctx = { slug, data: null, tab: "general", generation: gen };
+  _adminCtx = ctx;
+  const current = () => ctx === _adminCtx && isSidePanelCurrent(gen);
   Promise.all([
     api(`projects/${encodeURIComponent(slug)}`),
     api(`projects/${encodeURIComponent(slug)}/system-prompt`),
@@ -1634,15 +1868,15 @@ function openAdminModal(slug) {
         null, 30_000).catch(() => ({ ok: false })),
     api(`projects/${encodeURIComponent(slug)}/night`),
   ]).then(([proj, sp, cbm, diff, night]) => {
-    if (!isSidePanelCurrent(gen)) return;
+    if (!current()) return;
     const r = { project: proj.project, system_prompt: sp, cbm, diff, night };
-    _adminCtx.data = r;
+    ctx.data = r;
     setSidePanelBody(renderAdminShell(r));
     wireAdminTabs();
-    wireAdminDanger();
+    wireAdminDanger(ctx);
     activateAdminTab("general");
   }).catch((e) => {
-    if (!isSidePanelCurrent(gen)) return;
+    if (!current()) return;
     setSidePanelBody(
       `<p class="fail p-4 text-sm">error: ${escape(e.message)}</p>`);
   });
@@ -1696,8 +1930,9 @@ function activateAdminTab(key) {
     case "workspace": panel.innerHTML = renderWorkspace(data.project);
                        wireWorkspace(slug, data.project);
                        return;
-    case "index":     panel.innerHTML = renderCbmDetail(data.cbm);
-                       wireCbmReindex(slug);
+    case "index":     panel.innerHTML = renderCbmDetail(data.cbm)
+                         + '<div class="toolbar mt-3"><button id="cbm-reindex-inline" class="btn btn-primary" type="button">Reindexar proyecto</button><span id="cbm-msg-inline" class="muted" role="status" aria-live="polite"></span></div>';
+                       wireCbmReindex(slug, panel);
                        return;
     case "git":       panel.innerHTML = renderGitRemote(data.project)
                          + renderDiffDetail(data.diff);
@@ -1709,9 +1944,9 @@ function activateAdminTab(key) {
     case "expert":    panel.innerHTML = renderExpertForm({
                          project: data.project,
                          system_prompt: data.system_prompt,
-                       });
+                       }, true);
                        wireExpertForm(slug, { project: data.project,
-                                              system_prompt: data.system_prompt });
+                                              system_prompt: data.system_prompt }, panel);
                        return;
     case "danger":    panel.innerHTML = renderDanger(data.project);
                        return;
@@ -1751,28 +1986,34 @@ function renderDanger(project) {
   </div>`;
 }
 
-function wireAdminDanger() {
-  document.addEventListener("click", async (e) => {
-    const slug = _adminCtx?.slug;
-    if (!slug) return;
+function wireAdminDanger(ctx) {
+  const root = document.getElementById("admin-panel")?.parentElement;
+  if (!root) return;
+  const current = () => ctx === _adminCtx && isSidePanelCurrent(ctx.generation)
+    && root.isConnected;
+  root.addEventListener("click", async (e) => {
+    const slug = ctx.slug;
+    if (!current()) return;
     if (e.target.id === "admin-disable") {
       if (!await confirmModal({
         body: `¿Desactivar "${slug}"? (soft, reversible)`,
         confirmText: "Desactivar",
-      })) return;
+      }) || !current()) return;
       try {
         await api(`projects/${slug}`, {
           method: "PATCH",
           body: JSON.stringify({ enabled: false }),
         });
+        if (!current()) return;
         toast("Desactivado ✓", "ok");
         loadProjects();
         refreshStatus();
         // refrescar el ctx
         const proj = await api(`projects/${slug}`);
-        if (_adminCtx) _adminCtx.data.project = proj.project;
-        activateAdminTab("danger");
-      } catch (err) { toast("Error: " + err.message, "err"); }
+        if (!current()) return;
+        ctx.data.project = proj.project;
+        if (ctx.tab === "danger") activateAdminTab("danger");
+      } catch (err) { if (current()) toast("Error: " + err.message, "err"); }
     }
     if (e.target.id === "admin-delete") {
       const ok = await confirmModal({
@@ -1782,16 +2023,17 @@ function wireAdminDanger() {
         confirmText: "Sí, purgar",
         danger: true,
       });
-      if (!ok) return;
+      if (!ok || !current()) return;
       try {
         const r = await api(`projects/${slug}`, { method: "DELETE" });
+        if (!current()) return;
         if (r.error) { toast("Error: " + r.error, "err"); return; }
         toast("Purgado ✓", "ok");
         loadProjects();
         loadOrphans();
         refreshStatus();
-        closeModal("admin-modal");
-      } catch (err) { toast("Error: " + err.message, "err"); }
+        closeSidePanel();
+      } catch (err) { if (current()) toast("Error: " + err.message, "err"); }
     }
   });
 }
@@ -1807,6 +2049,7 @@ function renderWorkspace(project) {
       indexa y el experto los lee en el system prompt.
     </p>
 
+    <p id="ws-operation-warning" class="warn-box" role="status" hidden></p>
     <div class="toolbar">
       <select id="ws-subdir" class="select text-sm">
         <option value="">(raíz)</option>
@@ -1874,12 +2117,79 @@ function renderWorkspace(project) {
   </div>`;
 }
 
-async function wsLoadSubdirs(project) {
+let _wsView = null, _wsDocument = null, _wsReadGeneration = 0;
+const _workspaceOperations = new Map();
+
+function wsWrites(view) {
+  const conversation = view.context?.projectSlug === view.slug ? view.context.conversationId || "" : "";
+  const scope = JSON.stringify([String(view.slug).toLowerCase(), conversation]);
+  if (!_workspaceOperations.has(scope)) _workspaceOperations.set(scope, new Map());
+  return view.saveRequests = _workspaceOperations.get(scope);
+}
+
+function wsPathKey(view, path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  if (normalized.startsWith("/") || normalized[1] === ":") return null;
+  const parts = normalized.split("/").filter(part => part && part !== ".");
+  if (!parts.length || parts.includes("..")) return null; // backend rejects traversal too
+  const key = parts.join("/");
+  return view.windowsPaths ? key.toLowerCase() : key;
+}
+
+function wsDefinitiveRejection(error) {
+  return [400, 401, 403, 404, 405, 409, 413, 415, 422].includes(error?.status);
+}
+
+function wsCurrent(view) {
+  return !!view && _wsView === view && isSidePanelCurrent(view.generation)
+    && document.getElementById("ws-list") === view.list;
+}
+
+function wsSyncSaveButton() {
+  const button = document.getElementById("ws-save"), doc = _wsDocument;
+  if (!button) return;
+  button.disabled = !!(doc && wsWrites(doc.view).get(wsPathKey(doc.view, doc.path))?.pending && wsCurrent(doc.view)
+    && document.getElementById("ws-content") === doc.content);
+  const warning = document.getElementById("ws-operation-warning");
+  if (warning && wsCurrent(_wsView)) {
+    const uncertain = [...wsWrites(_wsView).values()].some(write => !write.pending && !write.confirmed && !write.rejected);
+    warning.hidden = !uncertain;
+    warning.textContent = uncertain ? "No se pudo confirmar si el archivo quedó guardado. Se conserva el borrador. Revisa el archivo en el servidor antes de guardar o abrir otro." : "";
+  }
+}
+
+function wsSelectDocument(doc) {
+  _wsDocument = doc;
+  wsSyncSaveButton();
+  const msg = document.getElementById("ws-msg");
+  if (msg) msg.textContent = "";
+}
+
+function wsRecordEdit(view = _wsView) {
+  if (wsCurrent(view)) view.editGeneration = (view.editGeneration || 0) + 1;
+}
+
+function wsDestination(view) {
+  return `${view.slug} · ${view.context.conversationId ? `conversación ${view.context.conversationId}` : "raíz del proyecto, sin conversación"}`;
+}
+
+async function wsNewPath(view) {
+  const pending = confirmModal({title:"Archivo nuevo",body:`Destino fijado: ${wsDestination(view)}.`,confirmText:"Abrir editor",cancelText:"Cancelar"});
+  const label = document.createElement("label"); label.className = "field"; label.textContent = "Ruta relativa del archivo";
+  const input = document.createElement("input"); input.className = "input"; input.setAttribute("aria-label", "Ruta relativa del archivo nuevo");
+  label.append(input); document.getElementById("confirm-modal-body").append(label);
+  setTimeout(() => { if (document.getElementById("confirm-modal").classList.contains("open")) input.focus(); }, 60);
+  return await pending && wsCurrent(view) ? input.value.trim() : "";
+}
+
+async function wsLoadSubdirs(project, view = _wsView) {
+  if (!wsCurrent(view)) return;
   // Walk nivel 1: lista dirs del repo para popular el select.
   // Si falla, el select queda con la opción "(raíz)".
   try {
     const r = await api(
-      `projects/${encodeURIComponent(project.slug)}/workspace/files${taskWorkspaceQuery(project.slug)}`);
+      `projects/${encodeURIComponent(project.slug)}/workspace/files${taskWorkspaceQuery(project.slug, {}, view.context)}`);
+    if (!wsCurrent(view)) return;
     const dirs = (r.entries || [])
       .filter((e) => e.is_dir)
       .map((e) => `<option value="${escape(e.path)}">${escape(e.path)}/</option>`)
@@ -1889,13 +2199,14 @@ async function wsLoadSubdirs(project) {
   } catch (_) { /* best-effort */ }
 }
 
-async function wsLoadFiles(slug, subdir) {
-  const list = document.getElementById("ws-list");
-  if (!list) return;
+async function wsLoadFiles(slug, subdir, view = _wsView) {
+  if (!wsCurrent(view) || view.slug !== slug) return;
+  const list = view.list, generation = ++view.listGeneration;
   list.innerHTML = `<p class="muted text-xs">cargando…</p>`;
   try {
-    const q = taskWorkspaceQuery(slug, { subdir });
+    const q = taskWorkspaceQuery(slug, { subdir }, view.context);
     const r = await api(`projects/${encodeURIComponent(slug)}/workspace/files${q}`);
+    if (!wsCurrent(view) || generation !== view.listGeneration) return;
     const entries = r.entries || [];
     if (entries.length === 0) {
       list.innerHTML = `<p class="muted text-xs">(vacío)</p>`;
@@ -1912,21 +2223,57 @@ async function wsLoadFiles(slug, subdir) {
           <span class="muted text-xs ml-2">${sizeKb} KB</span></button>`;
     }).join("");
   } catch (e) {
+    if (!wsCurrent(view) || generation !== view.listGeneration) return;
     list.innerHTML = `<p class="fail text-xs">Error: ${escape(e.message)}</p>`;
   }
 }
 
-async function wsOpenFile(slug, path) {
+async function wsOpenFile(slug, path, view = _wsView) {
+  if (!wsCurrent(view) || view.slug !== slug) return;
   const editor = document.getElementById("ws-editor");
   const pathEl = document.getElementById("ws-file-path");
   const content = document.getElementById("ws-content");
   const preview = document.getElementById("ws-preview");
   const previewBtn = document.getElementById("ws-preview-btn");
   if (!editor || !pathEl || !content) return;
+  const generation = ++_wsReadGeneration;
+  const current = () => wsCurrent(view) && generation === _wsReadGeneration
+    && document.getElementById("ws-content") === content;
+  if (_wsDocument?.content === content && content.value !== _wsDocument.saved
+      && !await confirmModal({title:"Cambiar de archivo",body:"El archivo abierto tiene cambios sin guardar. ¿Descartarlos para abrir otro archivo?",confirmText:"Descartar cambios",danger:true})) return;
+  if (!current()) return;
+  const before = content.value;
+  const edits = view.editGeneration || 0;
+  const unchanged = () => content.value === before && (view.editGeneration || 0) === edits;
+  const saves = wsWrites(view);
   try {
-    const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug, { path })}`);
-    pathEl.textContent = r.path;
+    let r;
+    while (current()) {
+      // API paths are logical, not physical identities (symlinks are allowed).
+      // Preserve independent file write locks, but don't adopt a read as clean
+      // while any known write in this workspace might still change its target.
+      const observed = new Map(saves);
+      const uncertain = [...observed.values()].some(write => !write.pending && !write.confirmed && !write.rejected);
+      if (uncertain) { toast("No se pudo confirmar el guardado anterior. Se conserva el borrador; revisa el archivo en el servidor antes de abrir otro.", "warn"); return; }
+      const pending = [...observed.values()].filter(write => write.pending);
+      if (pending.length) {
+        const confirmed = await Promise.all(pending.map(write => write.done));
+        if (!current()) return;
+        if (!unchanged()) { toast("Se conservó el borrador editado mientras se esperaba el guardado. Vuelve a abrir el archivo cuando termines de editar.", "warn"); return; }
+        if (confirmed.some(result => !result)) { toast("No se confirmó un guardado de este workspace. Se conserva el editor; revisa su resultado antes de reabrir.", "warn"); return; }
+        continue;
+      }
+      r = await api(
+        `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug, { path }, view.context)}`);
+      if (!current()) return;
+      if (!unchanged()) { toast("Se conserva el borrador que cambió mientras se leía el archivo. Vuelve a abrirlo cuando termines de editar.", "warn"); return; }
+      if (saves.size !== observed.size || [...saves].some(([key, write]) => observed.get(key) !== write))
+        continue; // A PUT overlapped the GET: read again after that write.
+      break;
+    }
+    if (!current() || !r) return;
+    wsSelectDocument({view,slug,path:r.path,content,saved:r.content});
+    pathEl.textContent = `${r.path} · ${wsDestination(view)}`;
     content.value = r.content;
     content.dataset.path = r.path;
     editor.classList.remove("hidden");
@@ -1943,32 +2290,57 @@ async function wsOpenFile(slug, path) {
       }
     }
   } catch (e) {
+    if (!current()) return;
     toast("No se pudo abrir: " + e.message, "err");
   }
 }
 
-async function wsSaveFile(slug) {
+async function wsSaveFile(slug, view = _wsView) {
   const content = document.getElementById("ws-content");
   const msg = document.getElementById("ws-msg");
   const saveBtn = document.getElementById("ws-save");
-  if (!content || !saveBtn) return;
-  const path = content.dataset.path;
-  if (!path) return;
-  saveBtn.disabled = true;
+  const doc = _wsDocument;
+  if (!content || !saveBtn || !wsCurrent(view)
+      || !doc || doc.view !== view || doc.slug !== slug || doc.content !== content) return;
+  const path = doc.path, value = content.value;
+  const key = wsPathKey(view, path), saves = wsWrites(view), previous = saves.get(key);
+  if (!key) { toast("La ruta del archivo no es válida; usa una ruta relativa sin '..'.", "err"); return; }
+  if (previous?.pending) return;
+  if ([...saves.values()].some(write => !write.pending && !write.confirmed && !write.rejected)) {
+    toast("No se pudo confirmar el guardado anterior. Se conserva el borrador; revisa el archivo en el servidor antes de guardar de nuevo.", "warn"); return;
+  }
+  const current = () => wsCurrent(view) && _wsDocument === doc && document.getElementById("ws-content") === content;
+  const url = `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug, {}, view.context)}`;
+  const request = {pending:true,confirmed:false,rejected:false};
+  request.done = new Promise(resolve => { request.finish = resolve; });
+  saves.set(key, request);
+  wsSyncSaveButton();
   msg.textContent = "guardando…";
   try {
     const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/file${taskWorkspaceQuery(slug)}`, {
+      url, {
         method: "PUT",
-        body: JSON.stringify({ path, content: content.value, overwrite: true }),
+        body: JSON.stringify({ path, content: value, overwrite: true }),
       });
+    request.confirmed = true;
+    if (!current()) return;
+    doc.saved = value;
     msg.textContent = `guardado ✓ (${r.size} chars)`;
+    if (content.value !== value) msg.textContent += " · quedan cambios posteriores sin guardar";
     toast("Archivo guardado ✓", "ok");
   } catch (e) {
-    msg.textContent = "";
+    request.rejected = wsDefinitiveRejection(e);
+    if (!current()) return;
+    msg.textContent = "Error al guardar: " + e.message;
     toast("Error al guardar: " + e.message, "err");
   } finally {
-    saveBtn.disabled = false;
+    if (saves.get(key) === request) {
+      request.pending = false;
+      request.finish(request.confirmed || request.rejected);
+      // The DOM button can now belong to another document. Reconcile its
+      // current owner's lock; never release B while B's own PUT is pending.
+      if (wsCurrent(_wsView) && wsWrites(_wsView) === saves) wsSyncSaveButton();
+    }
   }
 }
 
@@ -1986,6 +2358,8 @@ async function wsTogglePreview() {
   const preview = document.getElementById("ws-preview");
   const btn = document.getElementById("ws-preview-btn");
   if (!content || !preview || !btn) return;
+  const doc = _wsDocument;
+  if (!doc || doc.content !== content || !wsCurrent(doc.view)) return;
   const active = btn.dataset.active === "1";
   if (active) {
     // Back to editor
@@ -2004,6 +2378,7 @@ async function wsTogglePreview() {
     ]);
   }
   // Render markdown — sanitizado: esto va directo a innerHTML.
+  if (_wsDocument !== doc || !wsCurrent(doc.view) || document.getElementById("ws-content") !== content) return;
   const md = content.value || "";
   preview.innerHTML = _purifyMod.default.sanitize(_markedMod.marked.parse(md));
   preview.classList.remove("hidden");
@@ -2012,13 +2387,16 @@ async function wsTogglePreview() {
   btn.textContent = "✏️ Editar";
 }
 
-async function wsScaffold(slug) {
+async function wsScaffold(slug, view = _wsView) {
+  if (!wsCurrent(view) || view.slug !== slug) return;
   const prompt = document.getElementById("ws-scaffold-prompt")?.value.trim();
   const overwrite = !!document.getElementById("ws-scaffold-overwrite")?.checked;
   const out = document.getElementById("ws-scaffold-output");
   const btn = document.getElementById("ws-scaffold-generate");
   if (!prompt) { toast("Prompt requerido.", "err"); return; }
   if (!out || !btn) return;
+  const current = () => wsCurrent(view) && document.getElementById("ws-scaffold-output") === out;
+  const url = `projects/${encodeURIComponent(slug)}/workspace/scaffold${taskWorkspaceQuery(slug, {}, view.context)}`;
   btn.disabled = true;
   out.innerHTML = `<p class="muted text-xs">generando (puede tardar 5-60s, el LLM a veces se toma su tiempo)…</p>`;
   try {
@@ -2026,10 +2404,11 @@ async function wsScaffold(slug) {
     // no tiene guard — si el LLM tarda más, el server sigue gastando API
     // hasta terminar o fallar; el cliente se rinde y muestra retry hint.
     const r = await api(
-      `projects/${encodeURIComponent(slug)}/workspace/scaffold${taskWorkspaceQuery(slug)}`, {
+      url, {
         method: "POST",
         body: JSON.stringify({ prompt, apply: false, overwrite }),
       }, 60_000);
+    if (!current()) return;
     if (r.error) {
       out.innerHTML = renderScaffoldError(r.error);
       return;
@@ -2046,6 +2425,7 @@ async function wsScaffold(slug) {
     const rejectedRows = (r.rejected || []).map((p) =>
       `<li><code class="text-xs">${escape(p)}</code></li>`).join("");
     out.innerHTML = `
+      <p class="muted text-xs">Destino fijado: ${escape(wsDestination(view))}. Aplicar vuelve a generar los archivos; el preview no es una reserva inmutable.</p>
       <p class="muted text-xs mb-2"><strong>${escape(r.rationale || "(sin rationale)")}</strong></p>
       <table class="status-detail"><thead><tr>
         <th class="th">path</th><th class="th">size</th><th class="th"></th>
@@ -2059,12 +2439,14 @@ async function wsScaffold(slug) {
         <span class="muted text-xs">apply=true usa overwrite=${overwrite ? "true" : "false"}</span>
       </div>`;
     onClick("#ws-scaffold-apply", async () => {
+      if (!current()) return;
       try {
         const r2 = await api(
-          `projects/${encodeURIComponent(slug)}/workspace/scaffold${taskWorkspaceQuery(slug)}`, {
+          url, {
             method: "POST",
             body: JSON.stringify({ prompt, apply: true, overwrite }),
           }, 60_000);
+        if (!current()) return;
         if (r2.error) {
           toast(r2.error, "err", 6000);
           return;
@@ -2072,8 +2454,9 @@ async function wsScaffold(slug) {
         toast(`Aplicados ${r2.written.length} archivos ✓`, "ok");
         // refrescar lista
         const subdir = document.getElementById("ws-subdir")?.value || "";
-        await wsLoadFiles(slug, subdir);
+        await wsLoadFiles(slug, subdir, view);
       } catch (e) {
+        if (!current()) return;
         toast(toastMessage(e.message), "err", 6000);
       }
     });
@@ -2084,7 +2467,10 @@ async function wsScaffold(slug) {
         const editor = document.getElementById("ws-editor");
         const pathEl = document.getElementById("ws-file-path");
         const ta = document.getElementById("ws-content");
-        if (editor && pathEl && ta) {
+        if (current() && editor && pathEl && ta) {
+          if (_wsDocument?.content === ta && ta.value !== _wsDocument.saved) { toast("Guarda o cierra el borrador actual antes de abrir el preview.", "warn"); return; }
+          ++_wsReadGeneration;
+          wsSelectDocument({view,slug,path,content:ta,saved:""});
           pathEl.textContent = path;
           ta.value = content;
           ta.dataset.path = path;
@@ -2092,9 +2478,10 @@ async function wsScaffold(slug) {
         }
       }));
   } catch (e) {
+    if (!current()) return;
     out.innerHTML = renderScaffoldError(e.message);
   } finally {
-    btn.disabled = false;
+    if (current()) btn.disabled = false;
   }
 }
 
@@ -2127,22 +2514,37 @@ function toastMessage(msg) {
 }
 
 function wireWorkspace(slug, project) {
+  const view = _wsView = {slug,context:captureTaskWorkspaceContext(slug),generation:sidepanelGen(),
+    list:document.getElementById("ws-list"),listGeneration:0,
+    windowsPaths:/^(?:[a-z]:[\\/]|\\\\)/i.test(project.repo_path || "")};
+  ++_wsReadGeneration; wsSelectDocument(null);
   const sel = document.getElementById("ws-subdir");
   const scaffoldPanel = document.getElementById("ws-scaffold-panel");
+  const content = document.getElementById("ws-content");
+  if (content) content.oninput = () => wsRecordEdit(view);
 
-  wsLoadSubdirs(project);
-  wsLoadFiles(slug, "");
+  const note = document.createElement("p"); note.className = "muted text-xs";
+  note.textContent = `Workspace fijado: ${wsDestination(view)}. Cambiar el foco de otra ventana no cambia este destino.`;
+  view.list?.before(note);
+  wsLoadSubdirs(project, view);
+  wsLoadFiles(slug, "", view);
 
-  if (sel) sel.onchange = () => wsLoadFiles(slug, sel.value);
-  onClick("#ws-refresh", () => wsLoadFiles(slug, sel?.value || ""));
-  onClick("#ws-new-file", () => {
-    const name = prompt("Path del archivo nuevo (relativo al repo):");
-    if (!name) return;
+  if (sel) sel.onchange = () => wsLoadFiles(slug, sel.value, view);
+  onClick("#ws-refresh", () => wsLoadFiles(slug, sel?.value || "", view));
+  onClick("#ws-new-file", async () => {
+    if (!wsCurrent(view)) return;
     const editor = document.getElementById("ws-editor");
     const pathEl = document.getElementById("ws-file-path");
     const ta = document.getElementById("ws-content");
+    if (_wsDocument?.content === ta && ta.value !== _wsDocument.saved
+        && !await confirmModal({title:"Archivo nuevo",body:"El archivo abierto tiene cambios sin guardar. ¿Descartarlos?",confirmText:"Descartar cambios",danger:true})) return;
+    const name = await wsNewPath(view);
+    if (!name) return;
+    if (!wsCurrent(view)) return;
     if (editor && pathEl && ta) {
-      pathEl.textContent = name;
+      ++_wsReadGeneration;
+      wsSelectDocument({view,slug,path:name,content:ta,saved:""});
+      pathEl.textContent = `${name} · ${wsDestination(view)}`;
       ta.value = "";
       ta.dataset.path = name;
       editor.classList.remove("hidden");
@@ -2152,25 +2554,36 @@ function wireWorkspace(slug, project) {
     scaffoldPanel.classList.toggle("hidden");
   });
   onClick("#ws-cancel", () => {
+    ++_wsReadGeneration;
+    wsSelectDocument(null);
     document.getElementById("ws-editor").classList.add("hidden");
   });
-  onClick("#ws-save", () => wsSaveFile(slug));
+  onClick("#ws-save", () => wsSaveFile(slug, view));
   onClick("#ws-preview-btn", () => wsTogglePreview());
-  onClick("#ws-scaffold-generate", () => wsScaffold(slug));
+  onClick("#ws-scaffold-generate", () => wsScaffold(slug, view));
 
   // clicks en la lista: si es archivo, abrir; si es dir, navegar.
   onClick("#ws-list", (e) => {
     const entry = e.target.closest(".ws-entry");
     if (!entry) return;
-    if (entry.dataset.path) wsOpenFile(slug, entry.dataset.path);
+    if (entry.dataset.path) wsOpenFile(slug, entry.dataset.path, view);
     else if (entry.dataset.dir && sel) {
       sel.value = entry.dataset.dir;
-      wsLoadFiles(slug, sel.value);
+      wsLoadFiles(slug, sel.value, view);
     }
   });
 }
 
-export function initProjects() {
+export function initProjects(actor) {
+  _ownerProjects = actor?.role === "owner";
+  if ($("#project-new")) $("#project-new").hidden = !_ownerProjects;
+  if ($("#projects-orphans")) $("#projects-orphans").hidden = !_ownerProjects;
+  if (!_ownerProjects) {
+    const sub = document.querySelector("#tab-projects .panel-sub");
+    if (sub) sub.textContent = "Registra y sigue los PR del equipo en los repositorios de tus proyectos, sin iniciar un chat.";
+    onClick("#projects-refresh", loadProjects);
+    return;
+  }
   onClick("#project-new", openNewModal);
   onClick("#projects-refresh", loadProjects);
   onClick("#projects-orphans", () => {

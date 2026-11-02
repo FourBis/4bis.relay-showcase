@@ -381,6 +381,8 @@ async def api_skills_browse_install(request: web.Request) -> web.Response:
                     Path(job.clone_dir), rel, cache.dir,
                     overwrite=overwrite, enabled=enabled)
                 installed.append(name)
+                # A cancelled HTTP coroutine does not stop this worker.
+                cache.invalidate()
             except FileExistsError as e:
                 errors.append({"path": rel,
                                "error": f"ya existe una skill '{e}' "
@@ -389,8 +391,6 @@ async def api_skills_browse_install(request: web.Request) -> web.Response:
                 errors.append({"path": rel, "error": str(e)})
 
     await asyncio.to_thread(_install_all)
-    if installed:
-        cache.invalidate()
     return web.json_response({"installed": installed, "errors": errors,
                               "enabled": enabled})
 
