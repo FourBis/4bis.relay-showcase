@@ -665,7 +665,7 @@ async def _tools_del_agente(proj, db):
 
 
 def _proj(tmp, **extra):
-    p = {"slug": "demo", "repo_path": str(tmp), "system_prompt": "p",
+    p = {"slug": "demo", "name": "Demo", "repo_path": str(tmp), "system_prompt": "p",
          "mcp_servers": [], "native_tools": [], "defaults_json": {}}
     p.update(extra)
     return p

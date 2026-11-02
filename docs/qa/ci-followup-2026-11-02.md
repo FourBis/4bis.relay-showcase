@@ -14,8 +14,9 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [PR #42](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375052221) | 70 fallos, 1.056 aprobados, 1 omitido, 8 errores y 11 subtests aprobados. |
 | [Commit integrado](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783956) | 75 fallos, 1.051 aprobados, 1 omitido, 8 errores y 11 subtests aprobados. |
 | [Primera corrección, `e3c30a2`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41461180731) | 14 fallos, 1.128 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
+| [Segunda corrección, `27fd145`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41465812512) | 3 fallos, 1.139 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 
-En los cuatro casos, la primera tanda falló y las etapas siguientes quedaron
+En los cinco casos, la primera tanda falló y las etapas siguientes quedaron
 omitidas. La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
@@ -44,6 +45,14 @@ una interrupción. La recuperación comprueba la misma identidad y que no se
 repitan nodos ya ejecutados. Estas modificaciones tienen revisión estática;
 su resultado en ejecución corresponde a una nueva revisión del PR, no al run
 fallido anterior.
+
+La segunda ejecución dejó tres fallos de preparación de fixtures: dos proyectos
+SQL sin el nombre obligatorio y una expectativa HTTP que no representaba el
+middleware vigente. El miembro invitado puede leer, pero no controlar el trabajo;
+el middleware rechaza ese POST con 404 antes de entrar al handler. La fixture
+conserva la comprobación de que no cambian el trabajo ni sus eventos. El contrato
+HTTP no se amplía para hacer pasar el caso y el nombre sintético completa la
+preparación de los proyectos SQL sin modificar el esquema del producto.
 
 ## Alcance de la corrección
 

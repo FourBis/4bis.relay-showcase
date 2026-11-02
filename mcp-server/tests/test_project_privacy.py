@@ -272,6 +272,8 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
                 task_response = await client.get(
                     f"/conversations/{conv_id}/task", headers=member_headers
                 )
+                task_before = await db.get_conversation_task(conv_id)
+                events_before = await db.list_conversation_events(conv_id)
                 pr_response = await client.post(
                     f"/conversations/{conv_id}/git/pr",
                     headers=member_headers,
@@ -286,7 +288,12 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
         assert detail_response.status == 200
         assert task_response.status == 200
         assert pr_response.status == 403
-        assert control_response.status == 403
+        assert control_response.status == 404
+        control_body = await control_response.text()
+        assert control_body == "Consulta no disponible."
+        assert "PRIVATE_" not in control_body
+        assert await db.get_conversation_task(conv_id) == task_before
+        assert await db.list_conversation_events(conv_id) == events_before
         assert (await db.get_conversation_task(conv_id))["state"] == "blocked"
         assert not inspect.await_args_list or all(
             call.args[2] == conv_id for call in inspect.await_args_list
@@ -305,6 +312,8 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
         listed_task = _conversation_task(listed)
         detailed_task = _conversation_task(await detail_response.json())
         task_body = await task_response.json()
+        assert task_body["can_control"] is False
+        assert task_body["allowed_actions"] == []
         task_view = _task_payload(
             task_body.get("task_json", task_body.get("task", task_body))
         )
