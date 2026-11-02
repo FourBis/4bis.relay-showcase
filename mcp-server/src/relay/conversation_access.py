@@ -64,6 +64,10 @@ def access_tx(conn, conversation_id, actor):
                          "AND email=? COLLATE NOCASE AND revoked_at IS NULL", (conversation_id, actor)).fetchone()
     mode = share["permission"] if share and assigned else None
     read = creator or admin or mode in {"read", "collaborate"}
+    if task.get("mode") == "external_pr" and (task.get("mcp_private") or not assigned or defaults.get("read_only")):
+        # External registrations require current project access even for
+        # creators: list/search must match the register's detail boundary.
+        return denied
     if task.get("mcp_private"):
         # The trusted local adapter is not a personally authenticated MCP user.
         from .private_mcp_access import allowed_project_tx
@@ -196,7 +200,7 @@ async def listing(db, actor, *, scope="mine", project=None, status=None, limit=1
             where.append("c.requested_by=? COLLATE NOCASE")
             params.append(actor)
         elif scope == "shared":
-            where.append("c.requested_by<>? COLLATE NOCASE AND EXISTS (SELECT 1 FROM conversation_shares s "
+            where.append("COALESCE(c.requested_by,'')<>? COLLATE NOCASE AND EXISTS (SELECT 1 FROM conversation_shares s "
                          "WHERE s.conversation_id=c.id AND s.email=? COLLATE NOCASE AND s.revoked_at IS NULL)")
             params.extend([actor, actor])
         elif scope != "admin":

@@ -148,7 +148,9 @@ def _safe_skill_dir(base_dir: Path, dir_name: str) -> Optional[Path]:
     Para operar sobre skills existentes (ver/borrar), cuyo dir puede no
     ser kebab-case (creadas a mano). None si el nombre es sospechoso.
     """
-    if not dir_name or any(c in dir_name for c in ("/", "\\", "..")):
+    # Rechaza controles antes de consultar el filesystem, también en Windows.
+    if (not dir_name or any(c in dir_name for c in ("/", "\\", ".."))
+            or any(ord(c) < 32 or ord(c) == 127 for c in dir_name)):
         return None
     target = base_dir / dir_name
     if target.parent != base_dir:

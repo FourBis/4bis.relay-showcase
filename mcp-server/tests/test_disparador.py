@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import experts, planificador
+from relay import experts, identity, planificador
 from relay.db import Database
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -77,6 +77,16 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         for k in _ENV_KEYS:
             os.environ.pop(k, None)
         self._tmp.cleanup()
+
+    async def _chat_para_pregunta(self, *, source="grafo"):
+        # La pregunta apunta a un run y un hilo existentes, con el mismo
+        # actor local que usa esta fixture; un ID inventado no concede ACL.
+        cid = await self.db.create_conversation(
+            project_slug="demo", requested_by=identity.OWNER)
+        chat_id = await self.db.create_chat(
+            project_slug="demo", source=source, author="pytest", target="demo",
+            conversation_id=cid, requested_by=identity.OWNER)
+        return cid, chat_id
 
     async def _md_del_chat(self, chat: dict, timeout: float = 5.0) -> str:
         """Contenido del .md, esperando a que la exportación lo escriba.
@@ -208,14 +218,21 @@ class TestEndpoints(_Base):
         self.assertFalse(body["corriendo"])
 
     async def test_get_graphs_por_conversacion(self) -> None:
+        for cid in ("c9", "nada"):
+            await self.db.create_conversation(
+                project_slug="demo", conversation_id=cid, requested_by=identity.OWNER)
         await self.db.create_task_graph("g1", "objetivo", tareas=[
             {"id": "a", "titulo": "A"}, {"id": "b", "titulo": "B"}],
-            conversation_id="c9")
+            project_slug="demo", conversation_id="c9")
         r = await self.client.get("/graphs?conversation=c9")
+        self.assertEqual(r.status, 200)
         self.assertEqual((await r.json())["graph"]["id"], "g1")
 
         vacio = await self.client.get("/graphs?conversation=nada")
+        self.assertEqual(vacio.status, 200)
         self.assertIsNone((await vacio.json())["graph"])
+        inexistente = await self.client.get("/graphs?conversation=no-existe")
+        self.assertEqual(inexistente.status, 404)
 
     async def test_cancel_corta_el_grafo_y_lo_marca(self) -> None:
         arranco = asyncio.Event()
@@ -337,7 +354,9 @@ class TestDisparadorDelChat(_Base):
             lambda: asyncio.run_coroutine_threadsafe is not None)
         for _ in range(250):
             chat = await self.db.get_chat(chat_id)
-            if chat and chat["status"] != "running":
+            # La aceptación durable nace queued; todavía no es un resultado.
+            if (chat and chat.get("finished_at")
+                    and chat["status"] not in {"queued", "running"}):
                 return chat
             await asyncio.sleep(0.02)
         raise AssertionError("el run no terminó")
@@ -371,14 +390,21 @@ class TestDisparadorDelChat(_Base):
              patch.object(experts, "build_model", lambda s: object()), \
              patch("relay.orquestador.lanzar", fake_lanzar):
             chat = await self._correr()
+            self.assertEqual(chat["status"], "ok", chat.get("error"))
 
-        # `_correr` vuelve apenas el chat deja de estar `running`, y desde
+        # `_correr` espera el cierre durable, y desde
         # c00408f eso ya NO implica que el .md exista: `finalization.finish`
         # guarda primero el resultado durable y exporta después, justo para
         # que un disco lleno no deje el run sin cerrar. La ventana entre
         # las dos escrituras es real y la UI la contempla (cae al
         # `output_payload` cuando falta `md_path`), así que el test espera
         # el artefacto en vez de asumir que ya está.
+        output = await self.db.run(
+            "SELECT payload FROM chat_outputs WHERE chat_id=?", (chat["id"],))
+        self.assertEqual(len(output), 1)
+        content = json.loads(output[0]["payload"])["content"]
+        for expected in ("Leer el esquema", "Cargar datos", "3 tareas"):
+            self.assertIn(expected, content)
         md = await self._md_del_chat(chat)
         self.assertIn("Leer el esquema", md)
         self.assertIn("Cargar datos", md)
@@ -490,24 +516,65 @@ class TestRetomar(_Base):
         self.assertEqual(await self.db.get_task_graph("g_legacy"), before)
         launch.assert_not_called()
 
-    async def test_permiso_403_precede_tarea_write_detenida(self) -> None:
-        conv_id = await self.db.create_conversation(project_slug="demo")
-        await self.db.update_conversation_task(conv_id, mode="write", state="paused")
-        await self.db.create_task_graph("g_write_paused", "x", tareas=[
-            {"id": "write_paused_a", "titulo": "A"}], project_slug="demo",
-            conversation_id=conv_id)
-        await self.db.set_task_graph_state("g_write_paused", "cancelado")
-        before = await self.db.get_task_graph("g_write_paused")
-        project = await self.db.get_project("demo")
+    async def test_resume_oculta_tarea_write_pausada_a_cuenta_ajena(self) -> None:
+        import time
+        from relay import identity, native_auth
+        from relay.server_common import GRAFOS_KEY
 
-        with patch("relay.coordination.resolved_project", new=AsyncMock(return_value=project)), \
-             patch("relay.identity.can_write_project", return_value=False), \
-             patch("relay.server_graph_routes._largar_grafo") as launch:
-            response = await self.client.post("/graphs/g_write_paused/resume")
+        original_users = await self.db.list_users()
+        creator, outsider = "creator@example.test", "outsider@example.test"
+        for actor in (creator, outsider):
+            await self.db.set_user_role(actor, "member", project_slugs=["demo"])
+        identity.load_roles(await self.db.list_users())
+        try:
+            conv_id = await self.db.create_conversation(project_slug="demo", requested_by=creator)
+            await self.db.update_conversation_task(conv_id, mode="write", read_only=False,
+                state="paused", source_repo=self._tmp.name, workspace_path=self._tmp.name,
+                branch="codex/task-paused")
+            await self.db.create_task_graph("g_write_paused", "x", tareas=[
+                {"id": "write_paused_a", "titulo": "A"}], project_slug="demo",
+                conversation_id=conv_id)
+            await self.db.update_task("write_paused_a", estado="fallado", error="budget_exceeded")
+            await self.db.set_task_graph_state("g_write_paused", "cancelado")
+            before_graph = await self.db.get_task_graph("g_write_paused")
+            before_task = await self.db.get_conversation_task(conv_id)
+            before_conversation = await self.db.get_conversation(conv_id)
+            before_nodes = await self.db.run(
+                "SELECT * FROM tasks WHERE graph_id=? ORDER BY id", ("g_write_paused",))
+            before_workers = dict(self.app[GRAFOS_KEY])
 
-        self.assertEqual(response.status, 403)
-        self.assertEqual(await self.db.get_task_graph("g_write_paused"), before)
-        launch.assert_not_called()
+            # Sesión personal vigente: tener el proyecto asignado no comparte el hilo.
+            token = "fixture-paused-graph-outsider-session"
+            await self.db.set_config(native_auth.ENABLED, "1")
+            await self.db.run(
+                "INSERT INTO login_sessions(token_hash,email,expires_at) VALUES(?,?,?)",
+                (native_auth._hash(token), outsider, time.time() + 60))
+            headers = {"Cookie": f"{native_auth.SESSION_COOKIE}={token}"}
+            me = await self.client.get("/admin/api/me", headers=headers)
+            self.assertEqual(me.status, 200)
+            account = await me.json()
+            self.assertEqual(account["email"], outsider)
+            self.assertEqual(account["role"], "member")
+            self.assertEqual(account["project_slugs"], ["demo"])
+            with patch("relay.coordination.resolved_project", new=AsyncMock(
+                    side_effect=AssertionError("No se debe resolver un workspace sin acceso"))) as resolve, \
+                 patch("relay.task_workspace.resolved_project", new=resolve), \
+                 patch("relay.server_graph_routes._largar_grafo") as launch:
+                response = await self.client.post("/graphs/g_write_paused/resume", headers=headers)
+
+            self.assertEqual(response.status, 404)
+            self.assertEqual(await response.text(), "Consulta no disponible.")
+            self.assertEqual(await self.db.get_task_graph("g_write_paused"), before_graph)
+            self.assertEqual(await self.db.get_conversation_task(conv_id), before_task)
+            self.assertEqual(await self.db.get_conversation(conv_id), before_conversation)
+            self.assertEqual(await self.db.run(
+                "SELECT * FROM tasks WHERE graph_id=? ORDER BY id", ("g_write_paused",)), before_nodes)
+            self.assertEqual(dict(self.app[GRAFOS_KEY]), before_workers)
+            resolve.assert_not_awaited()
+            launch.assert_not_called()
+        finally:
+            identity.load_roles(original_users)
+
 
     async def test_resume_relanza_un_grafo_cortado(self) -> None:
         await self.db.create_task_graph("g1", "x", tareas=[
@@ -629,12 +696,13 @@ class TestRetomar(_Base):
         """
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g2", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c2",
-             "detalle": "ejecuta la migración"}], project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c2")
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id,
+             "detalle": "ejecuta la migración"}], project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g2")     # deja la pregunta
-        q = (await self.db.list_expert_questions(chat_id="c2"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -661,13 +729,14 @@ class TestRetomar(_Base):
         pregunta, el humano contestaba y el grafo seguía parado."""
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g1", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c1"},
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id},
             {"id": "b", "titulo": "cargar", "deps": ["a"]}],
-            project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c1")
+            project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g1")     # deja la pregunta
-        q = (await self.db.list_expert_questions(chat_id="c1"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -694,13 +763,14 @@ class TestRetomar(_Base):
     async def test_parar_desde_la_pregunta_no_relanza_nada(self) -> None:
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g1", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c1"},
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id},
             {"id": "b", "titulo": "cargar", "deps": ["a"]}],
-            project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c1")
+            project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g1")
-        q = (await self.db.list_expert_questions(chat_id="c1"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -720,14 +790,16 @@ class TestRetomar(_Base):
         """El chat normal no puede cambiar de comportamiento por esto:
         una pregunta de `ask_human` fuera de un grafo tiene que seguir
         devolviendo su `resume_prompt` para que el hilo retome."""
+        cid, chat_id = await self._chat_para_pregunta(source="test")
         await self.db.create_expert_question(
-            "q_suelta", "chat_sin_grafo",
+            "q_suelta", chat_id,
             json.dumps({"title": "¿Instalo pnpm?",
                         "options": [{"key": "o0", "label": "Dale"}]}),
-            project_slug="demo", kind="choice")
+            project_slug="demo", conversation_id=cid, kind="choice")
 
         r = await self.client.post("/questions/q_suelta/answer",
                                    json={"choice": "o0"})
+        self.assertEqual(r.status, 200)
         body = await r.json()
         self.assertNotIn("grafo", body)
         self.assertIn("pnpm", body["resume_prompt"])

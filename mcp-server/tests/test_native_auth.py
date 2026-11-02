@@ -166,6 +166,9 @@ async def test_agent_reads_durable_result_while_markdown_export_is_pending(
     monkeypatch.setattr("relay.server_conversation_routes.git_flow.is_git_repo",
                         AsyncMock(return_value=False))
     monkeypatch.setattr("relay.server_expert_routes._run_expert_bg", AsyncMock())
+    # Este caso guarda el resultado manualmente; la cola no debe competir
+    # con ese cierre ni iniciar un ejecutor real durante la lectura durable.
+    monkeypatch.setattr(task_service, "start_pending", lambda *_: None)
 
     created = await client.post("/conversations", json={
         "project": "demo", "author": "spoof@example.test"})
@@ -277,7 +280,7 @@ async def test_agent_cannot_append_to_another_members_read_only_task(auth, monke
     else:
         monkeypatch.setattr("relay.git_flow.is_git_repo", AsyncMock(return_value=True))
     response = await client.post("/experts/run", json=body)
-    assert response.status == 403, await response.text()
+    assert response.status == 404, await response.text()
     start.assert_not_called()
     assert await db.get_conversation(cid) == before
     assert await db.list_conversation_events(cid) == []

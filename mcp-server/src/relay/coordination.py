@@ -15,6 +15,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .task_workspace import TaskWorkspaceError, resolved_project
+from .graph_resume_inspection import ResumeInspectionDenied, ResumeInspectionStale
 
 
 _current: ContextVar = ContextVar("relay_workspace_lease", default=None)
@@ -219,6 +220,13 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
             project = await db.get_project(slug.strip()) if isinstance(slug, str) else None
             if not project:
                 return await handler(request)
+            if conv_id and row:
+                task = await db.get_conversation_task(conv_id)
+                if isinstance(task, dict) and task.get("mode") == "external_pr":
+                    return web.json_response(
+                        {"error": "external_pr_read_only", "message":
+                         "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
+                         "conversation_id": conv_id}, status=409)
             if checkout_only:
                 # Disabled/missing paths remain the handler's authorization or
                 # validation error. A directory without Git has no checkout to
@@ -228,13 +236,6 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
                 if (not project.get("enabled") or not repo or not Path(repo).is_dir()
                         or not await git_flow.is_git_repo(repo)):
                     return await handler(request)
-            if conv_id and row:
-                task = await db.get_conversation_task(conv_id)
-                if isinstance(task, dict) and task.get("mode") == "external_pr":
-                    return web.json_response(
-                        {"error": "external_pr_read_only", "message":
-                         "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
-                         "conversation_id": conv_id}, status=409)
             if enqueue and conv_id and row:
                 task = await db.get_conversation_task(conv_id)
                 if task.get("mode"):
@@ -245,6 +246,14 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
             if conv_id and row:
                 try:
                     project = await resolved_project(db, project, conv_id)
+                except ResumeInspectionDenied:
+                    return web.json_response({"error": "No tienes permiso para reanudar este plan."}, status=403)
+                except ResumeInspectionStale:
+                    payload = {"error": "La tarea cambió; revisa el plan antes de retomarlo.",
+                               "code": "workspace_inspection_stale"}
+                    if source == "graph":
+                        payload["graph_id"] = request.match_info["id"]
+                    return web.json_response(payload, status=409)
                 except TaskWorkspaceError as e:
                     return web.json_response(
                         {"error": "task_workspace_blocked", "message": str(e),

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -585,7 +586,7 @@ def _load_runtime_config_sync() -> None:
     if not path.is_file():
         return
     try:
-        with sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as conn:
             rows = conn.execute("SELECT key, value FROM system_config").fetchall()
     except sqlite3.Error:
         return
@@ -637,7 +638,7 @@ def private_mcp_boot_enabled() -> bool:
         if not path.is_file():
             return False
         uri = path.resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
             row = conn.execute("SELECT value FROM system_config WHERE key=?",
                                ("RELAY_PRIVATE_MCP_ENABLED",)).fetchone()
         return bool(row and row[0] == "1")

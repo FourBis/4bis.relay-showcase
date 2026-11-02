@@ -1,12 +1,13 @@
 # FourBis Relay
 
-This branch prepares a reviewable local extension: conversation sharing,
-recovery of uncertain requests, optional external PR review, account archival,
-and personal MCP consultations scoped to a project. The
-[parity receipt](docs/qa/parity-2026-11-01.md) separates code, demo, and pending
-validation. It does not establish remote integration or deployment. The demo
-changes on this branch use synthetic data; the published URL may still show
-an earlier version.
+Conversation sharing, request recovery, optional external PR review, and
+personal MCP consultations were integrated into `develop` through
+[PR #42](https://github.com/FourBis/4bis.relay-showcase/pull/42), including
+[#41](https://github.com/FourBis/4bis.relay-showcase/pull/41). The integration CI
+failed; this branch prepares its correction. See the
+[validation status](docs/qa/ci-followup-2026-11-02.md) before treating it as
+verified functionality. The published demo uses synthetic data and does not
+validate the server or a connected installation.
 
 [Español](README.md) · **English** · [Interactive demo](https://fourbis.github.io/4bis.relay-showcase/) · [Setup](docs/SETUP.md)
 
@@ -29,7 +30,7 @@ The [public demo](https://fourbis.github.io/4bis.relay-showcase/) recreates part
 | State | Evidence and scope |
 |---|---|
 | Implemented in public code | The [capability map](docs/CAPABILITY_MAP.md) links modules, conditions, and limits. Not every integration is configured by default. |
-| Integrated into `develop` | [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) added external PR registration and optional issue synchronization; [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrected concurrent observations. Code integration does not establish deployment. |
+| Integrated into `develop` | [PR #42](https://github.com/FourBis/4bis.relay-showcase/pull/42) integrated the extension and maintenance from [#41](https://github.com/FourBis/4bis.relay-showcase/pull/41). Integration CI failed; the [follow-up](docs/qa/ci-followup-2026-11-02.md) separates preparation, checks, and deployment. |
 | Demonstrated in the browser | The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) checked the five scenarios in that version. This branch adds a sixth scenario, Models and inbox, with static review only; it has no new browser validation. All scenarios use synthetic data, without models, GitHub, or a backend. |
 | Available in an instance | This depends on the installed version, permissions, and configuration. This review does not establish a connected deployment or operational availability of external PR registration. |
 

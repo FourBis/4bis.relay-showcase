@@ -116,15 +116,19 @@ def test_run_verifier_failure_is_needs_human():
     assert _pasos == [], "sin verificador no hay pasos verificados"
 
 
-def test_run_verifier_model_unavailable_still_propagates():
-    """ModelUnavailable sigue propagando: es config rota, no una caída
-    transitoria, y el caller quiere enterarse."""
+def test_run_verifier_model_unavailable_requires_review():
+    """Una verificación sin modelo no aprueba ni pierde el resultado del ejecutor."""
     with patch.object(expert_models, "build_model",
-                      side_effect=expert_models.ModelUnavailable("sin key")):
-        with pytest.raises(expert_models.ModelUnavailable):
-            asyncio.run(expert_stages._run_verifier(
-                user="x", plan="p", executor_result={"content": "c"},
-                model_spec="test", ponytail=""))
+                      side_effect=expert_models.ModelUnavailable("sin key")) as build:
+        verdict, feedback, usage, error, steps = asyncio.run(expert_stages._run_verifier(
+            user="x", plan="p", executor_result={"content": "c"},
+            model_spec="test", ponytail=""))
+    build.assert_called_once_with("test")
+    assert verdict == "needs_human"
+    assert "NO fue verificado" in feedback
+    assert usage == {}, "un modelo ausente no acredita consumo medido"
+    assert error == "ModelUnavailable: sin key"
+    assert steps == [], "sin verificación no se acreditan pasos"
 
 
 # ---------- config: cascada de las etapas ----------
@@ -1153,6 +1157,8 @@ def test_render_tool_calls_empty():
 @pytest.fixture
 async def env():
     with tempfile.TemporaryDirectory() as tmp:
+        repo_path = Path(tmp) / "repo"
+        repo_path.mkdir()
         env_vars = {
             "STATE_DIR": str(Path(tmp) / "state"),
             "FOURBIS_DB_PATH": str(Path(tmp) / "relay.db"),
@@ -1166,8 +1172,9 @@ async def env():
             await db.init_schema()
             await db.set_config("FOURBIS_MODEL", "test")
             await db.upsert_project({
-                "slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
+                "slug": "demo", "name": "Demo", "repo_path": str(repo_path),
                 "system_prompt": "experto demo", "mcp_servers": [],
+                "defaults_json": {"read_only": True, "three_stage": True, "verifier": True},
             })
             app = create_app()
             cli = TestClient(TestServer(app))
@@ -1190,8 +1197,15 @@ async def test_run_staged_end_to_end(env):
         "target": "demo", "user": "hola",
         "source": "test", "author": "pytest",
     })
-    assert r.status == 202
-    chat_id = (await r.json())["id"]
+    assert r.status == 202, await r.text()
+    accepted = await r.json()
+    chat_id = accepted["id"]
+    conversation_id = accepted["conversation_id"]
+    assert conversation_id
+    task = await db.get_conversation_task(conversation_id)
+    assert task["mode"] == "read_only"
+    assert task["read_only"] is True and task["no_checkout"] is True
+    assert (await db.get_conversation(conversation_id))["requested_by"] == "owner"
 
     for _ in range(100):
         chat = await db.get_chat(chat_id)
@@ -1225,7 +1239,7 @@ async def test_system_active_shape(env):
         "target": "demo", "user": "hola",
         "source": "test", "author": "pytest",
     })
-    assert r.status == 202
+    assert r.status == 202, await r.text()
 
     r = await cli.get("/system/active")
     assert r.status == 200
@@ -1250,6 +1264,7 @@ async def test_progress_phases_include_staged_phases(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
 
     seen_phases: set[str] = set()
@@ -1305,6 +1320,19 @@ def test_stages_json_truncates_long_plan():
     assert len(json.loads(raw)["plan"]) == 4000
 
 
+async def _wait_for_finished_chat(db, chat_id):
+    """Esperar cierre durable; queued y running todavía no son un resultado."""
+    row = None
+    for _ in range(100):
+        row = await db.get_chat(chat_id)
+        if (row and row.get("status") in {"ok", "error", "cancelled"}
+                and row.get("finished_at")):
+            return row
+        await asyncio.sleep(0.02)
+    pytest.fail(f"el run no cerró tras 100 sondeos: status={(row or {}).get('status')!r}, "
+                f"error={(row or {}).get('error')!r}")
+
+
 async def test_stages_persisted_and_served_by_chats_get(env):
     """E2E: el run guarda las etapas y GET /chats/{id} las devuelve.
 
@@ -1317,15 +1345,12 @@ async def test_stages_persisted_and_served_by_chats_get(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
 
-    for _ in range(100):
-        row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
-            break
-        await asyncio.sleep(0.02)
+    row = await _wait_for_finished_chat(db, chat_id)
+    assert row["status"] == "ok", row.get("error")
 
-    row = await db.get_chat(chat_id)
     assert row["stages_json"], "el run por etapas no persistió stages_json"
 
     r = await cli.get(f"/chats/{chat_id}")
@@ -1344,12 +1369,11 @@ async def test_chats_get_survives_corrupt_stages_json(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
-    for _ in range(100):
-        row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
-            break
-        await asyncio.sleep(0.02)
+    row = await _wait_for_finished_chat(db, chat_id)
+    assert row["status"] == "ok", row.get("error")
+    assert row["stages_json"], "la fixture debe cerrar con etapas antes de corromperlas"
 
     await db.run("UPDATE chats SET stages_json=? WHERE id=?",
                  ("{roto", chat_id))
