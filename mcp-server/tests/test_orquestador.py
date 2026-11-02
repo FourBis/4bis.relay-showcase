@@ -449,8 +449,9 @@ async def test_un_nodo_que_para_deja_la_decision_anotada(db):
     assert "a mitad" in q["detail"]
     # Las tres salidas reales que tiene el humano, no un sí/no.
     assert [o["label"] for o in q["options"]] == [
-        "Reintentala igual", "Dala por fallada y seguí con el resto",
-        "Pará el plan"]
+        "Reinténtala igual", "Dala por fallada y sigue con el resto",
+        "Para el plan"]
+    assert [o["key"] for o in q["options"]] == ["reintentar", "fallar", "parar"]
 
 
 async def test_sin_conversacion_no_explota_al_preguntar(db):
@@ -941,6 +942,7 @@ async def test_salir_por_la_mala_no_deja_nodos_corriendo_sueltos(db):
     await db.create_task_graph("g", "x", tareas=[
         {"id": "t1", "titulo": "larga", "archivos": ["src/a.py"],
          "idempotente": True}])
+    max_attempts = (await db.get_task_graph("g"))["tasks"][0]["max_intentos"]
     arranco = asyncio.Event()
     murio = {"si": False}
 
@@ -964,8 +966,19 @@ async def test_salir_por_la_mala_no_deja_nodos_corriendo_sueltos(db):
     assert await db.files_claimed_by_others("nadie") == set(), \
         "quedó un archivo tomado por una tarea que ya no existe"
     fila = (await db.get_task_graph("g"))["tasks"][0]
-    # Idempotente → vuelve a `pendiente` y se puede retomar.
-    assert fila["estado"] == grafo.PENDIENTE
+    # Una interrupción sin resultado completo espera una decisión humana,
+    # incluso si era idempotente: cancelar no concede otro intento.
+    assert fila["estado"] == grafo.ESPERANDO
+    assert fila["intentos"] == 1
+    assert fila["max_intentos"] == max_attempts
+    assert fila["started_at"] and fila["ended_at"]
+    questions = await db.list_expert_questions(chat_id="g", only_open=True)
+    assert len(questions) == 1
+    question = json.loads(questions[0]["question_json"])
+    assert question["graph_id"] == "g" and question["task_id"] == "t1"
+    assert "La ejecución se interrumpió" in question["detail"]
+    await orquestador.correr_grafo(db, "g", ejecutar=_nunca)
+    assert (await db.get_task_graph("g"))["tasks"][0] == fila
 
 
 async def test_doble_cancelacion_espera_limpieza_y_conserva_claims(db):
@@ -1058,7 +1071,10 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
 
     task = (await db.get_task_graph("g-cancel"))["tasks"][0]
     assert task["chat_id"] == chat_id
-    assert task["estado"] == (grafo.PENDIENTE if idempotente else grafo.ESPERANDO)
+    assert task["estado"] == grafo.ESPERANDO
+    assert task["intentos"] == 1
+    assert task["max_intentos"] == graph["tasks"][0]["max_intentos"]
+    assert task["started_at"] and task["ended_at"]
     assert await db.files_claimed_by_others("nadie") == set()
     assert saved.read_text(encoding="utf-8") == "avance conservado"
     chat = await db.get_chat(chat_id)
@@ -1072,9 +1088,13 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
     assert "checkpoint" in history and "step-1" in history
     assert output["exported"] == 1
     assert history not in Path(chat["md_path"]).read_text(encoding="utf-8")
-    if not idempotente:
-        questions = await db.list_expert_questions(chat_id=chat_id, only_open=True)
-        assert len(questions) == 1
+    questions = await db.list_expert_questions(chat_id=chat_id, only_open=True)
+    assert len(questions) == 1
+    question = json.loads(questions[0]["question_json"])
+    assert question["graph_id"] == "g-cancel" and question["task_id"] == "t1"
+    assert "La ejecución se interrumpió" in question["detail"]
+    await orquestador.correr_grafo(db, "g-cancel", ejecutar=_nunca)
+    assert (await db.get_task_graph("g-cancel"))["tasks"][0] == task
 
 
 async def test_una_reserva_pisada_no_gasta_un_intento(db):

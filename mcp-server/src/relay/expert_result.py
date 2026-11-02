@@ -128,7 +128,9 @@ def snapshot_run(
             (usage.cache_read_tokens or 0) + cache_prev if usage is not None
             else (cache_prev or None)),
         "tool_calls": (
-            usage.tool_calls
+            # An in-flight tool can be observed before the SDK counts it.
+            # Keep that evidence without adding the two counters together.
+            max(usage.tool_calls, state.tool_calls_count)
             if legs == 1 and not (cap_rounds or provider_retries or steers) and usage is not None
             and usage.tool_calls is not None
             else state.tool_calls_count),

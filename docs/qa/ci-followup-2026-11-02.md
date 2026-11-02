@@ -16,9 +16,11 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [Primera corrección, `e3c30a2`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41461180731) | 14 fallos, 1.128 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 | [Segunda corrección, `27fd145`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41465812512) | 3 fallos, 1.139 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 | [Tercera corrección, `dbe2cff`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41468558707) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests. Demo estática aprobada. Segunda tanda: 41 fallos y 263 aprobados. |
+| [Cuarta corrección, `b3e9130`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41473567507) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 309 aprobados. Orquestación: 4 fallos, 26 aprobados y 79 no seleccionados. |
 
 En los cinco primeros casos, la primera tanda falló y las etapas siguientes quedaron
-omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas.
+omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas;
+en el séptimo falló orquestación y las dos últimas quedaron omitidas.
 La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
@@ -64,6 +66,17 @@ la salida anticipada para ese caso. Las listas y búsquedas de PR externos tambi
 exigen acceso vigente al proyecto, como su detalle: al revocar el permiso no
 deben devolver sus metadatos. El historial ordinario conserva su propia política.
 Estos cambios requieren su propio CI; el run `dbe2cff` sigue fallido.
+
+Una revisión posterior detectó que la autorización para configurar la política
+de sincronización podía quedar obsoleta durante una espera. La corrección vuelve
+a leer la cuenta en la transacción de guardado y verifica el acceso después de
+consultar datos remotos. Las carreras de revocación se cubren con identidades
+sintéticas; el siguiente CI debe verificar estas modificaciones.
+
+La tanda de orquestación también evidenció un contador perdido al cancelar una
+herramienta ya iniciada: se conserva el mayor conteo observado sin sumar fuentes.
+Los casos de interrupción exigen decisión humana y comprueban que no se repita
+la ejecución ni se aumente el presupuesto; los textos usan el idioma vigente.
 
 ## Alcance de la corrección
 
