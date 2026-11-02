@@ -13,13 +13,37 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [PR #41](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41374797436) | 12 fallos, 1.105 aprobados, 1 omitido y 11 subtests aprobados. |
 | [PR #42](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375052221) | 70 fallos, 1.056 aprobados, 1 omitido, 8 errores y 11 subtests aprobados. |
 | [Commit integrado](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783956) | 75 fallos, 1.051 aprobados, 1 omitido, 8 errores y 11 subtests aprobados. |
+| [Primera corrección, `e3c30a2`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41461180731) | 14 fallos, 1.128 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 
-En los tres casos, la primera tanda falló y las etapas siguientes quedaron
+En los cuatro casos, la primera tanda falló y las etapas siguientes quedaron
 omitidas. La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
 terminó correctamente para la demo. Su éxito no convierte los checks del
 servidor en satisfactorios ni acredita una instalación operativa.
+
+## Segunda tanda de corrección
+
+Los fallos restantes del primer candidato separaron tres contratos concretos:
+el cliente de la fixture debe cerrarse antes de borrar su directorio temporal;
+las consultas SQL del runner necesitan actor y conversación legítimos; y una
+invitación de lectura válida debe aparecer en el listado aunque una conversación
+histórica tenga creador `NULL`. El cambio del listado conserva su comprobación
+de invitación, cuenta vigente y acceso; no concede control a quien sólo lee.
+
+Los cleanups de las fixtures se registran en orden inverso a su ejecución:
+cierre de clientes y app antes de borrar los temporales. No se añaden esperas,
+reintentos de borrado ni desactivación de workers para ocultar archivos abiertos.
+El orden corresponde al [contrato de unittest](https://docs.python.org/3/library/unittest.html#unittest.TestCase.addCleanup).
+
+La lectura preventiva de las etapas todavía omitidas también identificó fixtures
+anteriores a los contratos de conocimiento y recuperación. Ahora preparan
+fuentes reales con actor/CID, distinguen control del creador e invitaciones de
+lectura, y conservan la intención pendiente de verificación con su firma ante
+una interrupción. La recuperación comprueba la misma identidad y que no se
+repitan nodos ya ejecutados. Estas modificaciones tienen revisión estática;
+su resultado en ejecución corresponde a una nueva revisión del PR, no al run
+fallido anterior.
 
 ## Alcance de la corrección
 

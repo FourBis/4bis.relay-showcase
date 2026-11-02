@@ -7,7 +7,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from relay import coordination, identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle, server_questions, server_task_routes, task_service
+from relay import conversation_access, coordination, identity, orquestador, server_common, server_graph_helpers, server_graph_routes, server_lifecycle, server_questions, server_task_routes, task_service
 from relay.db import Database
 
 
@@ -16,6 +16,9 @@ async def graph_client(tmp_path, monkeypatch):
     db = Database(path=tmp_path / "graph.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    await db.set_user_role("dev@example.test", "member", project_slugs=["demo"])
+    await db.set_user_role("other@example.test", "member", project_slugs=[])
+    await db.set_user_role("creator@example.test", "member", project_slugs=[])
     monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
     monkeypatch.setattr(identity, "_roles", {
         "dev@example.test": "member", "other@example.test": "member"})
@@ -69,29 +72,44 @@ async def test_legacy_cancel_is_repeatable_and_preserves_nodes(graph_client, pro
     "disabled_user", "finance", "unregistered", "revoked", "disabled_project",
     "read_only_project", "subadmin"])
 async def test_cancel_respects_current_access_controls(graph_client, linked, restriction):
+    """Con CID controla su creador; sin CID se conserva el permiso del proyecto."""
     client, db, app, launch = graph_client
     actor = "dev@example.test"
-    conv_id = await db.create_conversation(project_slug="demo") if linked else None
+    conv_id = (await db.create_conversation(project_slug="demo", requested_by=actor)
+               if linked else None)
     if linked:
         await db.update_conversation_task(conv_id, mode="write", state="running")
+        assert (await conversation_access.get_access(db, conv_id, actor))["can_control"] is True
     await db.create_task_graph("access", "demo", tareas=[
         {"id": "access-node", "titulo": "Nodo"}], project_slug="demo", conversation_id=conv_id)
     if restriction == "disabled_user":
         identity._disabled.add(actor)
+        await db.set_user_role(actor, "member", enabled=False, project_slugs=["demo"])
     elif restriction == "finance":
         identity._roles[actor] = "finance"
+        await db.set_user_role(actor, "finance", project_slugs=[])
     elif restriction == "unregistered":
         identity._roles.pop(actor)
+        await db.delete_user(actor)
     elif restriction == "revoked":
         identity._project_grants[actor] = []
+        await db.set_user_role(actor, "member", project_slugs=[])
     elif restriction == "disabled_project":
         await db.disable_project("demo")
     elif restriction == "read_only_project":
         await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True}})
     else:
         identity._roles[actor] = "subadmin"
+        await db.set_user_role(actor, "subadmin", project_slugs=["demo"])
     before = await db.get_task_graph("access")
-    expected = 200 if restriction == "subadmin" else 403
+    creator_can_stop = linked and restriction in {
+        "revoked", "disabled_project", "read_only_project", "subadmin"}
+    expected = 200 if creator_can_stop or restriction == "subadmin" else 403
+    if linked:
+        access = await conversation_access.get_access(db, conv_id, actor)
+        assert access["can_control"] is (expected == 200)
+        if restriction in {"revoked", "disabled_project", "read_only_project"}:
+            assert access["can_collaborate"] is False
     for _ in range(2):
         response = await client.post("/graphs/access/cancel", headers={"X-Test-Actor": actor})
         assert response.status == expected
@@ -101,6 +119,37 @@ async def test_cancel_respects_current_access_controls(graph_client, linked, res
             assert graph == before
         else:
             assert graph["estado"] == "cancelado"
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("role", ["member", "subadmin"])
+@pytest.mark.parametrize("read_share", [False, True])
+async def test_project_grant_and_read_share_do_not_control_another_creators_graph(
+        graph_client, role, read_share):
+    client, db, app, launch = graph_client
+    actor = "dev@example.test"
+    identity._roles[actor] = role
+    await db.set_user_role(actor, role, project_slugs=["demo"])
+    cid = await db.create_conversation(project_slug="demo", requested_by="creator@example.test")
+    await db.update_conversation_task(cid, mode="write", state="ready")
+    await db.create_task_graph("foreign", "Ajeno", tareas=[
+        {"id": "foreign-node", "titulo": "Conservar"}],
+        project_slug="demo", conversation_id=cid)
+    if read_share:
+        await conversation_access.set_share(db, cid, identity.OWNER, actor, "read")
+    access = await conversation_access.get_access(db, cid, actor)
+    assert access["project_assigned"] is True
+    assert access["can_read"] is read_share
+    assert access["can_control"] is False
+    assert access["can_collaborate"] is False
+    before = await db.get_task_graph("foreign")
+    state_before = await db.get_conversation_task(cid)
+    for action in ("cancel", "resume"):
+        response = await client.post(f"/graphs/foreign/{action}", headers={"X-Test-Actor": actor})
+        assert response.status == 403
+        assert await db.get_task_graph("foreign") == before
+        assert await db.get_conversation_task(cid) == state_before
+    assert not app[server_common.GRAFOS_KEY]
     launch.assert_not_called()
 
 
@@ -467,7 +516,8 @@ async def test_unlinked_question_requires_project_access(graph_client, action, a
 
 
 async def _waiting_question(db, state, kind="grafo"):
-    cid = await db.create_conversation(project_slug="demo")
+    cid = await db.create_conversation(
+        project_slug="demo", requested_by="dev@example.test")
     await db.update_conversation_task(cid, mode="write", state=state)
     if kind != "chat":
         await db.create_task_graph("stopped", "Espera", tareas=[
@@ -642,7 +692,7 @@ async def test_question_answer_rejects_invalid_body_without_mutation(graph_clien
     launch.assert_not_called()
 
 
-@pytest.mark.parametrize("interruption", ["cancel", "revoke"])
+@pytest.mark.parametrize("interruption", ["cancel", "disable_actor"])
 async def test_slow_question_input_does_not_reserve_controls_or_old_permissions(
         graph_client, monkeypatch, interruption):
     client, db, app, launch = graph_client
@@ -669,7 +719,9 @@ async def test_slow_question_input_does_not_reserve_controls_or_old_permissions(
             assert (await asyncio.wait_for(server_task_routes.task_action(cancel), 2)).status == 200
             assert (await db.get_conversation_task(cid))["state"] == "cancelled"
         else:
-            identity._project_grants["dev@example.test"] = []
+            identity._disabled.add("dev@example.test")
+            await db.set_user_role("dev@example.test", "member", enabled=False,
+                                   project_slugs=["demo"])
         release.set()
         response = await asyncio.wait_for(answering, 2)
         assert response.status == (409 if interruption == "cancel" else 403)

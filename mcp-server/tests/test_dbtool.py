@@ -510,6 +510,8 @@ def test_describir_marca_las_escribibles():
 class EndpointsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        # Los clientes se agregan después y cierran primero (cleanup LIFO).
+        self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
@@ -517,14 +519,11 @@ class EndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database()
         await self.db.init_schema()
 
-    async def asyncTearDown(self) -> None:
-        self._tmp.cleanup()
-
     async def _client(self):
         from relay.server import create_app
         client = TestClient(TestServer(create_app()))
-        await client.start_server()
         self.addAsyncCleanup(client.close)
+        await client.start_server()
         return client
 
     async def test_get_no_devuelve_el_dsn_entero(self) -> None:
@@ -637,20 +636,31 @@ async def _tools_del_agente(proj, db):
 
     from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import FunctionModel
+    from relay.user_accounts import bind_actor
 
-    await db.create_conversation(project_slug=proj["slug"], conversation_id="v1")
+    actor = "sql-owner@example.test"
+    await db.set_user_role(actor, "owner")
+    await db.upsert_project(proj)
+    cid = await db.create_conversation(project_slug=proj["slug"], requested_by=actor)
+    chat_id = await db.create_chat(project_slug=proj["slug"], source="test", author=actor,
+                                  target=proj["slug"], conversation_id=cid, requested_by=actor)
     nombres = set()
+    invoked = False
 
     def responder(messages, info):
+        nonlocal invoked
+        invoked = True
         nombres.update(tool.name for tool in info.function_tools)
         return ModelResponse(parts=[TextPart("ok")])
 
     with patch.object(expert_models, "build_model",
                       lambda s: FunctionModel(responder)), \
-         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None), \
+         bind_actor(db, actor):
         await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
-            chat_id="c1", conversation_id="v1")
+            chat_id=chat_id, conversation_id=cid)
+    assert invoked, "La ausencia de tools SQL sólo vale si el agente llegó al modelo."
     return nombres
 
 
@@ -694,6 +704,8 @@ class PermisoSinDsnTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        # Registrar primero el directorio permite cerrar la app antes de borrarlo.
+        self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
@@ -702,11 +714,8 @@ class PermisoSinDsnTests(unittest.IsolatedAsyncioTestCase):
         await self.db.init_schema()
         from relay.server import create_app
         self.client = TestClient(TestServer(create_app()))
-        await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
-
-    async def asyncTearDown(self) -> None:
-        self._tmp.cleanup()
+        await self.client.start_server()
 
     async def test_post_sin_dsn_conserva_la_cadena(self) -> None:
         await self.db.upsert_db_connection(

@@ -196,7 +196,7 @@ async def listing(db, actor, *, scope="mine", project=None, status=None, limit=1
             where.append("c.requested_by=? COLLATE NOCASE")
             params.append(actor)
         elif scope == "shared":
-            where.append("c.requested_by<>? COLLATE NOCASE AND EXISTS (SELECT 1 FROM conversation_shares s "
+            where.append("COALESCE(c.requested_by,'')<>? COLLATE NOCASE AND EXISTS (SELECT 1 FROM conversation_shares s "
                          "WHERE s.conversation_id=c.id AND s.email=? COLLATE NOCASE AND s.revoked_at IS NULL)")
             params.extend([actor, actor])
         elif scope != "admin":

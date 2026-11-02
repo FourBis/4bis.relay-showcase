@@ -244,7 +244,16 @@ async def test_read_only_creator_can_control_own_task_without_write_rights(
         actor["email"] = creator
         historical = await db.create_conversation(project_slug="demo", requested_by=creator)
         legacy = await server_task_routes._task_snapshot(request, db, historical)
-        assert not legacy.get("allowed_actions") and not legacy.get("can_control")
+        # La proyección materializa el hilo y conserva el control de su creador.
+        # No concede asignación, escritura ni publicación.
+        assert legacy["allowed_actions"] == ["continue", "pause", "cancel"]
+        assert legacy["can_control"] is True
+        assert legacy["access"]["is_creator"] is True
+        assert legacy["access"]["project_assigned"] is False
+        assert not {"enable_write", "publish", "track"} & set(legacy["allowed_actions"])
+        actor["email"] = "granted@example.test"
+        with pytest.raises(PermissionError):
+            await server_task_routes._task_snapshot(request, db, historical)
 
         for email in ("other@example.test", "disabled@example.test", "finance@example.test", "unregistered@example.test"):
             actor["email"] = email
