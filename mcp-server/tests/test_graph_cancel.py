@@ -481,7 +481,7 @@ async def test_graph_question_controls_belong_to_creator(graph_client, action, k
         launch.assert_not_called()
 
 
-async def test_owner_resume_denial_preserves_workspace_diagnostic(graph_client):
+async def test_owner_resume_denial_preserves_workspace_diagnostic(graph_client, monkeypatch):
     client, db, app, launch = graph_client
     cid = await db.create_conversation(project_slug="demo")
     await db.update_conversation_task(cid, mode="write", state="ready",
@@ -490,9 +490,22 @@ async def test_owner_resume_denial_preserves_workspace_diagnostic(graph_client):
     await db.create_task_graph("disabled", "demo", tareas=[
         {"id": "pending", "titulo": "Pendiente"}], project_slug="demo", conversation_id=cid)
     before = await db.get_conversation_task(cid)
+    graph_before = await db.get_task_graph("disabled")
+    access = await conversation_access.get_access(db, cid, identity.OWNER)
+    assert access["can_control"] is True  # Detener sigue siendo una acción permitida.
+    assert access["can_send"] is False
+    resolved = AsyncMock(wraps=coordination.resolved_project)
+    acquire = Mock(wraps=coordination.acquire)
+    monkeypatch.setattr(coordination, "resolved_project", resolved)
+    monkeypatch.setattr(coordination, "acquire", acquire)
     response = await client.post("/graphs/disabled/resume")
     assert response.status == 403
+    assert "diagnóstico original" not in await response.text()
     assert await db.get_conversation_task(cid) == before
+    assert await db.get_task_graph("disabled") == graph_before
+    assert not app[server_common.GRAFOS_KEY]
+    resolved.assert_not_awaited()
+    acquire.assert_not_called()
     launch.assert_not_called()
 
 

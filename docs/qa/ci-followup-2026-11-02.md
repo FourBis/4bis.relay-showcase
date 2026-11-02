@@ -17,10 +17,12 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [Segunda corrección, `27fd145`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41465812512) | 3 fallos, 1.139 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 | [Tercera corrección, `dbe2cff`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41468558707) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests. Demo estática aprobada. Segunda tanda: 41 fallos y 263 aprobados. |
 | [Cuarta corrección, `b3e9130`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41473567507) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 309 aprobados. Orquestación: 4 fallos, 26 aprobados y 79 no seleccionados. |
+| [Quinta corrección, `2dd97fb`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41477755864) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados. Grafos: 14 fallos, 388 aprobados y 5 subtests. |
 
 En los cinco primeros casos, la primera tanda falló y las etapas siguientes quedaron
 omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas;
-en el séptimo falló orquestación y las dos últimas quedaron omitidas.
+en el séptimo falló orquestación y las dos últimas quedaron omitidas. En el
+octavo falló grafos y quedó omitida la última etapa de limpieza.
 La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
@@ -77,6 +79,15 @@ La tanda de orquestación también evidenció un contador perdido al cancelar un
 herramienta ya iniciada: se conserva el mayor conteo observado sin sumar fuentes.
 Los casos de interrupción exigen decisión humana y comprueban que no se repita
 la ejecución ni se aumente el presupuesto; los textos usan el idioma vigente.
+
+En la tanda de grafos se preparan conversaciones y chats de fixture reales y
+se espera a que finalice el trabajo antes de leer el plan. La reanudación ahora
+rechaza un proyecto ya deshabilitado antes de inspeccionar su workspace. Sigue
+pendiente una carrera de diagnóstico si la autorización cambia durante las
+esperas posteriores: cerrarla requiere condicionar la escritura del diagnóstico
+a una comprobación atómica de permisos y estado. La autorización se vuelve a
+comprobar antes de reparar o relanzar el grafo; esto no acredita que el
+diagnóstico permanezca intacto en esa carrera.
 
 ## Alcance de la corrección
 

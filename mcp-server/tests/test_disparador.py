@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import experts, planificador
+from relay import experts, identity, planificador
 from relay.db import Database
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -77,6 +77,16 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         for k in _ENV_KEYS:
             os.environ.pop(k, None)
         self._tmp.cleanup()
+
+    async def _chat_para_pregunta(self, *, source="grafo"):
+        # La pregunta apunta a un run y un hilo existentes, con el mismo
+        # actor local que usa esta fixture; un ID inventado no concede ACL.
+        cid = await self.db.create_conversation(
+            project_slug="demo", requested_by=identity.OWNER)
+        chat_id = await self.db.create_chat(
+            project_slug="demo", source=source, author="pytest", target="demo",
+            conversation_id=cid, requested_by=identity.OWNER)
+        return cid, chat_id
 
     async def _md_del_chat(self, chat: dict, timeout: float = 5.0) -> str:
         """Contenido del .md, esperando a que la exportación lo escriba.
@@ -208,14 +218,21 @@ class TestEndpoints(_Base):
         self.assertFalse(body["corriendo"])
 
     async def test_get_graphs_por_conversacion(self) -> None:
+        for cid in ("c9", "nada"):
+            await self.db.create_conversation(
+                project_slug="demo", conversation_id=cid, requested_by=identity.OWNER)
         await self.db.create_task_graph("g1", "objetivo", tareas=[
             {"id": "a", "titulo": "A"}, {"id": "b", "titulo": "B"}],
-            conversation_id="c9")
+            project_slug="demo", conversation_id="c9")
         r = await self.client.get("/graphs?conversation=c9")
+        self.assertEqual(r.status, 200)
         self.assertEqual((await r.json())["graph"]["id"], "g1")
 
         vacio = await self.client.get("/graphs?conversation=nada")
+        self.assertEqual(vacio.status, 200)
         self.assertIsNone((await vacio.json())["graph"])
+        inexistente = await self.client.get("/graphs?conversation=no-existe")
+        self.assertEqual(inexistente.status, 404)
 
     async def test_cancel_corta_el_grafo_y_lo_marca(self) -> None:
         arranco = asyncio.Event()
@@ -337,7 +354,9 @@ class TestDisparadorDelChat(_Base):
             lambda: asyncio.run_coroutine_threadsafe is not None)
         for _ in range(250):
             chat = await self.db.get_chat(chat_id)
-            if chat and chat["status"] != "running":
+            # La aceptación durable nace queued; todavía no es un resultado.
+            if (chat and chat.get("finished_at")
+                    and chat["status"] not in {"queued", "running"}):
                 return chat
             await asyncio.sleep(0.02)
         raise AssertionError("el run no terminó")
@@ -371,14 +390,21 @@ class TestDisparadorDelChat(_Base):
              patch.object(experts, "build_model", lambda s: object()), \
              patch("relay.orquestador.lanzar", fake_lanzar):
             chat = await self._correr()
+            self.assertEqual(chat["status"], "ok", chat.get("error"))
 
-        # `_correr` vuelve apenas el chat deja de estar `running`, y desde
+        # `_correr` espera el cierre durable, y desde
         # c00408f eso ya NO implica que el .md exista: `finalization.finish`
         # guarda primero el resultado durable y exporta después, justo para
         # que un disco lleno no deje el run sin cerrar. La ventana entre
         # las dos escrituras es real y la UI la contempla (cae al
         # `output_payload` cuando falta `md_path`), así que el test espera
         # el artefacto en vez de asumir que ya está.
+        output = await self.db.run(
+            "SELECT payload FROM chat_outputs WHERE chat_id=?", (chat["id"],))
+        self.assertEqual(len(output), 1)
+        content = json.loads(output[0]["payload"])["content"]
+        for expected in ("Leer el esquema", "Cargar datos", "3 tareas"):
+            self.assertIn(expected, content)
         md = await self._md_del_chat(chat)
         self.assertIn("Leer el esquema", md)
         self.assertIn("Cargar datos", md)
@@ -670,12 +696,13 @@ class TestRetomar(_Base):
         """
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g2", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c2",
-             "detalle": "ejecuta la migración"}], project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c2")
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id,
+             "detalle": "ejecuta la migración"}], project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g2")     # deja la pregunta
-        q = (await self.db.list_expert_questions(chat_id="c2"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -702,13 +729,14 @@ class TestRetomar(_Base):
         pregunta, el humano contestaba y el grafo seguía parado."""
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g1", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c1"},
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id},
             {"id": "b", "titulo": "cargar", "deps": ["a"]}],
-            project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c1")
+            project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g1")     # deja la pregunta
-        q = (await self.db.list_expert_questions(chat_id="c1"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -735,13 +763,14 @@ class TestRetomar(_Base):
     async def test_parar_desde_la_pregunta_no_relanza_nada(self) -> None:
         from relay import orquestador
 
+        cid, chat_id = await self._chat_para_pregunta()
         await self.db.create_task_graph("g1", "x", tareas=[
-            {"id": "a", "titulo": "migrar", "chat_id": "c1"},
+            {"id": "a", "titulo": "migrar", "chat_id": chat_id},
             {"id": "b", "titulo": "cargar", "deps": ["a"]}],
-            project_slug="demo")
-        await self.db.update_task("a", estado="corriendo", chat_id="c1")
+            project_slug="demo", conversation_id=cid)
+        await self.db.update_task("a", estado="corriendo", chat_id=chat_id)
         await orquestador.sanar(self.db, "g1")
-        q = (await self.db.list_expert_questions(chat_id="c1"))[0]
+        q = (await self.db.list_expert_questions(chat_id=chat_id))[0]
         corridos: list = []
 
         async def fake_lanzar(db, project, graph_id, **kw):
@@ -761,14 +790,16 @@ class TestRetomar(_Base):
         """El chat normal no puede cambiar de comportamiento por esto:
         una pregunta de `ask_human` fuera de un grafo tiene que seguir
         devolviendo su `resume_prompt` para que el hilo retome."""
+        cid, chat_id = await self._chat_para_pregunta(source="test")
         await self.db.create_expert_question(
-            "q_suelta", "chat_sin_grafo",
+            "q_suelta", chat_id,
             json.dumps({"title": "¿Instalo pnpm?",
                         "options": [{"key": "o0", "label": "Dale"}]}),
-            project_slug="demo", kind="choice")
+            project_slug="demo", conversation_id=cid, kind="choice")
 
         r = await self.client.post("/questions/q_suelta/answer",
                                    json={"choice": "o0"})
+        self.assertEqual(r.status, 200)
         body = await r.json()
         self.assertNotIn("grafo", body)
         self.assertIn("pnpm", body["resume_prompt"])

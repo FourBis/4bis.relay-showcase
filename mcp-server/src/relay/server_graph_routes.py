@@ -167,6 +167,33 @@ _ETAPA = {
 
 
 
+async def _resume_access_denial(request, graph):
+    """Control permite detener; retomar vuelve a comprobar permisos de ejecución."""
+    cid = graph.get("conversation_id")
+    if not cid:
+        return None  # Los grafos históricos conservan su autorización existente.
+    from . import conversation_access
+    db, actor = request.app[DB_KEY], identity.requester(request)
+    def check(conn):
+        current = conn.execute("SELECT conversation_id,project_slug FROM task_graphs WHERE id=?",
+                               (graph["id"],)).fetchone()
+        if (not current or current["conversation_id"] != cid
+                or current["project_slug"] != graph.get("project_slug")):
+            raise PermissionError("El origen del grafo cambió")
+        access = conversation_access.require_tx(conn, cid, actor, "control")
+        if not conn.execute("SELECT 1 FROM projects WHERE slug=? COLLATE NOCASE",
+                            (current["project_slug"],)).fetchone():
+            return  # El handler conserva el conflicto de proyecto eliminado.
+        row = conn.execute("SELECT task_json FROM conversations WHERE id=?", (cid,)).fetchone()
+        state = json.loads(row["task_json"] or "{}")
+        if not access["can_send"] or state.get("mode") == "write" and not access["can_collaborate"]:
+            raise PermissionError("La ejecución ya no está autorizada")
+    try:
+        await conversation_access.transaction(db, check)
+    except PermissionError:
+        return web.json_response({"error": "No tienes permiso para reanudar este plan."}, status=403)
+
+
 @_require_auth
 async def graphs_resume(request: web.Request) -> web.Response:
     db = request.app[DB_KEY]
@@ -176,6 +203,9 @@ async def graphs_resume(request: web.Request) -> web.Response:
     # El guard de workspace puede reparar estado; autorizar antes de entrar.
     if not await identity.can_control_graph(request, db, graph):
         return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
+    denial = await _resume_access_denial(request, graph)
+    if denial is not None:
+        return denial
     # Mismo orden que pausar/cancelar: conversación antes del grafo.
     async with AsyncExitStack() as controls:
         if conv_id := graph.get("conversation_id"):
@@ -186,6 +216,9 @@ async def graphs_resume(request: web.Request) -> web.Response:
                     {"error": "La tarea está completando otra acción; espera y reintenta.",
                      "graph_id": graph["id"]}, status=409)
             await controls.enter_async_context(lock)
+        denial = await _resume_access_denial(request, graph)
+        if denial is not None:
+            return denial
         return await _resume_with_workspace(request)
 
 
@@ -228,6 +261,10 @@ async def _resume_graph(request: web.Request) -> web.Response:
             return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
         cid = graph.get("conversation_id")
         state = await db.get_conversation_task(cid) if cid else {}
+        # Última autorización antes de reparar o relanzar, ya bajo los controles.
+        denial = await _resume_access_denial(request, graph)
+        if denial is not None:
+            return denial
         if (state.get("state") in task_service.STOPPED
                 or cid in getattr(db, "_task_cancellations", {})):
             return web.json_response(
