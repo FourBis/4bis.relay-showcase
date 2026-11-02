@@ -30,7 +30,7 @@ The [public demo](https://fourbis.github.io/4bis.relay-showcase/) recreates part
 |---|---|
 | Implemented in public code | The [capability map](docs/CAPABILITY_MAP.md) links modules, conditions, and limits. Not every integration is configured by default. |
 | Integrated into `develop` | [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) added external PR registration and optional issue synchronization; [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrected concurrent observations. Code integration does not establish deployment. |
-| Demonstrated in the browser | All five scenarios use synthetic data, without models, GitHub, or a backend. The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) records the local checks. |
+| Demonstrated in the browser | The [October 26 review](docs/qa/showcase-verified-status-2026-10-26.md) checked the five scenarios in that version. This branch adds a sixth scenario, Models and inbox, with static review only; it has no new browser validation. All scenarios use synthetic data, without models, GitHub, or a backend. |
 | Available in an instance | This depends on the installed version, permissions, and configuration. This review does not establish a connected deployment or operational availability of external PR registration. |
 
 ## Explore Relay

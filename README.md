@@ -30,7 +30,7 @@ La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte 
 |---|---|
 | Implementado en el código público | El [mapa de capacidades](docs/CAPABILITY_MAP.md) enlaza módulos, condiciones y límites. No todas las integraciones están configuradas por defecto. |
 | Integrado en `develop` | El [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) incorporó el registro de PR externos y la sincronización opcional de issues; el [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrigió observaciones concurrentes. Integración de código no equivale a despliegue. |
-| Demostrado en el navegador | Los cinco escenarios usan datos sintéticos, sin modelos, GitHub ni backend. La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) documenta la comprobación local. |
+| Demostrado en el navegador | La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) comprobó los cinco escenarios de esa versión. Esta rama añade un sexto escenario, Modelos y bandeja, con revisión estática; no tiene una comprobación nueva en navegador. Todos usan datos sintéticos, sin modelos, GitHub ni backend. |
 | Disponible en una instancia | Depende de la versión instalada, sus permisos y su configuración. Esta revisión no acredita un despliegue conectado ni la disponibilidad operativa de PR externos. |
 
 ## Explora Relay
