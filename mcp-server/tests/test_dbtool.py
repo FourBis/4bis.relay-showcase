@@ -233,16 +233,60 @@ def test_cero_filas_no_es_un_error(base):
 
 
 def test_error_del_motor_vuelve_como_texto(base):
-    """Es información para el modelo: le dice qué corregir."""
-    out = _run(dbtool.consultar(base, "SELECT no_existe FROM t"))
-    assert out.startswith("error de sqlite")
-    assert "no_existe" in out
+    """Conserva causa y siguiente paso sin repetir un identificador privado."""
+    sql = "SELECT columna_privada_demo FROM t"
+    out = _run(dbtool.consultar(base, sql))
+    assert out.startswith("error de sqlite:")
+    assert "columna inexistente" in out
+    assert "esquema permitido" in out and "corrige" in out
+    assert "columna_privada_demo" not in out
+    assert sql not in out and base not in out
+
+
+@pytest.mark.parametrize("sql,causa", [
+    ("SELECT * FROM tabla_privada_demo", "tabla inexistente"),
+    ("SELECT FROM t", "sintaxis SQL no válida"),
+])
+def test_error_sqlite_distingue_causas_sin_repetir_la_consulta(base, sql, causa):
+    out = _run(dbtool.consultar(base, sql))
+    assert out.startswith("error de sqlite:")
+    assert causa in out
+    assert "Consulta el esquema permitido" in out or "Revisa la sintaxis" in out
+    assert "tabla_privada_demo" not in out
+    assert sql not in out and base not in out
+
+
+@pytest.mark.parametrize("kind,prefix,causa", [
+    ("sqlite", "no such column: ", "columna inexistente"),
+    ("sqlite", "detalle desconocido: ", "revisa la conexión y la consulta"),
+    ("postgres", "detalle desconocido: ", "revisa la conexión y la consulta"),
+])
+def test_error_del_driver_no_repite_datos_sensibles(monkeypatch, caplog, kind, prefix, causa):
+    dsn = "postgres://usuario_demo:clave_demo@host.example/base_demo?token=token_demo"
+    path = "/ruta_privada_demo/base_demo.db"
+    query = "SELECT columna_privada_demo FROM tabla_privada_demo"
+    raw = prefix + f"{dsn}; {path}; {query}; parámetro=valor_privado_demo"
+
+    async def fail(*args, **kwargs):
+        raise sqlite3.OperationalError(raw) if kind == "sqlite" else RuntimeError(raw)
+
+    monkeypatch.setattr(dbtool, f"_{kind}", fail)
+    out = _run(dbtool.consultar(path if kind == "sqlite" else dsn, "SELECT 1"))
+    assert out.startswith(f"error de {kind}:") and causa in out
+    for private in (dsn, path, query, "usuario_demo", "clave_demo", "token_demo",
+                    "columna_privada_demo", "tabla_privada_demo", "valor_privado_demo"):
+        assert private not in out
+        assert private not in caplog.text
 
 
 def test_archivo_inexistente_vuelve_como_texto(tmp_path):
-    out = _run(dbtool.consultar(str(tmp_path / "nada.db"), "SELECT 1"))
+    path = tmp_path / "base_privada_demo.db"
+    out = _run(dbtool.consultar(str(path), "SELECT 1"))
     assert out.startswith("error:")
-    assert "nada.db" in out
+    assert "no se encontró la base local" in out
+    assert "Revisa la conexión registrada" in out
+    assert str(tmp_path) not in out and path.name not in out
+    assert not path.exists(), "La consulta no debe crear una base inexistente."
 
 
 def test_sqlite_de_lectura_se_abre_en_modo_ro(base):

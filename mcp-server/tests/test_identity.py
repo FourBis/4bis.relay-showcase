@@ -286,16 +286,28 @@ async def test_el_chat_completo_de_un_member(roles):
         assert resp.status == 200, f"{method} {path} corta el flujo del chat"
 
 
-async def test_la_allowlist_existe_de_verdad():
+@pytest.mark.parametrize("private_mcp", [False, True])
+async def test_la_allowlist_existe_de_verdad(monkeypatch, private_mcp):
     """Guard contra el peor bug posible acá: que la allowlist nombre
     rutas que ya no existen y el member quede sin poder hacer nada,
     o peor, que se acepte cualquier string sin que nadie se entere."""
+    from relay import config
     from relay.server import create_app
+    # Sólo compone el router: no arranca la app, DB, OAuth ni servicio MCP.
+    monkeypatch.setattr(config, "private_mcp_boot_enabled", lambda: private_mcp)
     app = create_app()
     reales = set()
     for r in app.router.routes():
         if r.resource is not None:
             metodo = "GET" if r.method == "HEAD" else r.method
             reales.add((metodo, r.resource.canonical))
-    huerfanas = (identity.MEMBER_ALLOWED | identity._FINANCE_ROUTES | identity._TEAM_ROUTES | identity._ACCOUNT_ROUTES) - reales
+    optional = {("GET", "/mcp/relay"), ("POST", "/mcp/relay")}
+    expected = identity.MEMBER_ALLOWED | identity._FINANCE_ROUTES | identity._TEAM_ROUTES | identity._ACCOUNT_ROUTES
+    assert optional <= expected
+    if private_mcp:
+        assert optional <= reales
+    else:
+        assert optional.isdisjoint(reales)
+        expected -= optional
+    huerfanas = expected - reales
     assert not huerfanas, f"la allowlist nombra rutas inexistentes: {huerfanas}"
