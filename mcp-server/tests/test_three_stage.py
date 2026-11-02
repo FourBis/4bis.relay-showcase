@@ -1320,6 +1320,19 @@ def test_stages_json_truncates_long_plan():
     assert len(json.loads(raw)["plan"]) == 4000
 
 
+async def _wait_for_finished_chat(db, chat_id):
+    """Esperar cierre durable; queued y running todavía no son un resultado."""
+    row = None
+    for _ in range(100):
+        row = await db.get_chat(chat_id)
+        if (row and row.get("status") in {"ok", "error", "cancelled"}
+                and row.get("finished_at")):
+            return row
+        await asyncio.sleep(0.02)
+    pytest.fail(f"el run no cerró tras 100 sondeos: status={(row or {}).get('status')!r}, "
+                f"error={(row or {}).get('error')!r}")
+
+
 async def test_stages_persisted_and_served_by_chats_get(env):
     """E2E: el run guarda las etapas y GET /chats/{id} las devuelve.
 
@@ -1335,13 +1348,9 @@ async def test_stages_persisted_and_served_by_chats_get(env):
     assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
 
-    for _ in range(100):
-        row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
-            break
-        await asyncio.sleep(0.02)
+    row = await _wait_for_finished_chat(db, chat_id)
+    assert row["status"] == "ok", row.get("error")
 
-    row = await db.get_chat(chat_id)
     assert row["stages_json"], "el run por etapas no persistió stages_json"
 
     r = await cli.get(f"/chats/{chat_id}")
@@ -1362,11 +1371,9 @@ async def test_chats_get_survives_corrupt_stages_json(env):
     })
     assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
-    for _ in range(100):
-        row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
-            break
-        await asyncio.sleep(0.02)
+    row = await _wait_for_finished_chat(db, chat_id)
+    assert row["status"] == "ok", row.get("error")
+    assert row["stages_json"], "la fixture debe cerrar con etapas antes de corromperlas"
 
     await db.run("UPDATE chats SET stages_json=? WHERE id=?",
                  ("{roto", chat_id))
