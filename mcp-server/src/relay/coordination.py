@@ -15,6 +15,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .task_workspace import TaskWorkspaceError, resolved_project
+from .graph_resume_inspection import ResumeInspectionDenied, ResumeInspectionStale
 
 
 _current: ContextVar = ContextVar("relay_workspace_lease", default=None)
@@ -245,6 +246,11 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
             if conv_id and row:
                 try:
                     project = await resolved_project(db, project, conv_id)
+                except ResumeInspectionDenied:
+                    return web.json_response({"error": "No tienes permiso para reanudar este plan."}, status=403)
+                except ResumeInspectionStale:
+                    return web.json_response({"error": "La tarea cambió; revisa el plan antes de retomarlo.",
+                                              "code": "workspace_inspection_stale"}, status=409)
                 except TaskWorkspaceError as e:
                     return web.json_response(
                         {"error": "task_workspace_blocked", "message": str(e),

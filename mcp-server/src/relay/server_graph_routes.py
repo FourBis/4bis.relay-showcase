@@ -219,7 +219,9 @@ async def graphs_resume(request: web.Request) -> web.Response:
         denial = await _resume_access_denial(request, graph)
         if denial is not None:
             return denial
-        return await _resume_with_workspace(request)
+        from .graph_resume_inspection import resume_inspection_scope
+        with resume_inspection_scope(db, graph, identity.requester(request)):
+            return await _resume_with_workspace(request)
 
 
 @coordination.guard_workspace(DB_KEY, source="graph")

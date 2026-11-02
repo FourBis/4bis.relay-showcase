@@ -85,10 +85,12 @@ En la tanda de grafos se preparan conversaciones y chats de fixture reales y
 se espera a que finalice el trabajo antes de leer el plan. La reanudación ahora
 rechaza un proyecto ya deshabilitado antes de inspeccionar su workspace. Sigue
 pendiente una carrera de diagnóstico si la autorización cambia durante las
-esperas posteriores: cerrarla requiere condicionar la escritura del diagnóstico
-a una comprobación atómica de permisos y estado. La autorización se vuelve a
-comprobar antes de reparar o relanzar el grafo; esto no acredita que el
-diagnóstico permanezca intacto en esa carrera.
+esperas posteriores. La corrección preparada vuelve a comprobar permisos y
+versiones en la misma transacción que fusiona el diagnóstico; un cambio de
+estado o una revocación impide esa escritura. La lectura Git puede terminar tras
+la revocación y las versiones por contenido no detectan un cambio que vuelva
+exactamente a su valor anterior. Los casos de carrera se incorporan a la etapa
+existente de grafos del CI; su resultado todavía debe comprobarse.
 
 El último fallo observado consultaba las etapas de un chat aún en cola. La
 fixture espera ahora un estado terminal con fecha de cierre, sin esperar a que

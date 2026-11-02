@@ -173,7 +173,8 @@ def _largar_grafo(app: web.Application, project: dict, graph_id: str,
             if (graph.get("conversation_id") and not
                     (await conversation_access.get_access(db, graph["conversation_id"], actor))["can_control"]):
                 raise PermissionError("Ya no tienes permiso para verificar este plan")
-        with user_accounts.bind_actor(db, actor):
+        from .graph_resume_inspection import suspend_resume_inspection
+        with user_accounts.bind_actor(db, actor), suspend_resume_inspection():
             child = coordination.spawn_workspace(
                 db, effective, _correr_grafo_bg(
                     app, effective, graph_id,
