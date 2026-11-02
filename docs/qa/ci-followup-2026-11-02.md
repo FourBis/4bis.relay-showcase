@@ -19,11 +19,13 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [Cuarta corrección, `b3e9130`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41473567507) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 309 aprobados. Orquestación: 4 fallos, 26 aprobados y 79 no seleccionados. |
 | [Quinta corrección, `2dd97fb`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41477755864) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados. Grafos: 14 fallos, 388 aprobados y 5 subtests. |
 | [Sexta corrección, `7aecd6e`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41483169524) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados. Grafos: 1 fallo, 401 aprobados y 5 subtests. |
+| [Séptima corrección, `3777e98`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41486562564) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados; grafos: 402 aprobados y 5 subtests. Etapa final: 9 fallos y 131 aprobados. |
 
 En los cinco primeros casos, la primera tanda falló y las etapas siguientes quedaron
 omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas;
 en el séptimo falló orquestación y las dos últimas quedaron omitidas. En el
 octavo y el noveno falló grafos y quedó omitida la última etapa de limpieza.
+En el décimo, la etapa final falló después de aprobar las anteriores.
 La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
@@ -97,6 +99,11 @@ fixture espera ahora un estado terminal con fecha de cierre, sin esperar a que
 aparezca el dato que pretende comprobar; mantiene las aserciones de etapas y
 su lectura por API. La nueva ejecución debe confirmar el resultado.
 
+Los casos nocturnos preparan su propio estado y worktree privado. Comprueban que
+el checkout de origen quede intacto, que los gates restauren cambios conocidos
+y que los archivos nuevos no seguidos se conserven para recuperación manual.
+El resultado de estos ajustes corresponde al siguiente CI.
+
 ## Alcance de la corrección
 
 Se distingue un defecto del producto de un fixture que todavía representa un
@@ -123,7 +130,8 @@ los resultados del commit integrado de arriba siguen siendo evidencia histórica
 fallida, aunque una corrección posterior pase.
 
 No se ejecutan suites locales, aplicación, consultas SQLite, modelos, proveedores
-ni navegador durante esta corrección. Tampoco se modifican workflows,
+ni navegador durante esta corrección. El workflow existente añade los casos de
+carrera a la etapa de grafos sin quitar comprobaciones. No se modifican
 presupuestos, credenciales o servicios para obtener un resultado favorable.
 El recorrido visual de la versión corregida y una instalación real permanecen
 pendientes de comprobación autorizada.
