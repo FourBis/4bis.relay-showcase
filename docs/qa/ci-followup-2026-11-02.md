@@ -15,9 +15,11 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [Commit integrado](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783956) | 75 fallos, 1.051 aprobados, 1 omitido, 8 errores y 11 subtests aprobados. |
 | [Primera corrección, `e3c30a2`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41461180731) | 14 fallos, 1.128 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
 | [Segunda corrección, `27fd145`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41465812512) | 3 fallos, 1.139 aprobados, 1 omitido, 0 errores y 11 subtests aprobados. |
+| [Tercera corrección, `dbe2cff`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41468558707) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests. Demo estática aprobada. Segunda tanda: 41 fallos y 263 aprobados. |
 
-En los cinco casos, la primera tanda falló y las etapas siguientes quedaron
-omitidas. La diferencia en fallos de archivos bloqueados en Windows no acredita
+En los cinco primeros casos, la primera tanda falló y las etapas siguientes quedaron
+omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas.
+La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
 terminó correctamente para la demo. Su éxito no convierte los checks del
@@ -53,6 +55,15 @@ el middleware rechaza ese POST con 404 antes de entrar al handler. La fixture
 conserva la comprobación de que no cambian el trabajo ni sus eventos. El contrato
 HTTP no se amplía para hacer pasar el caso y el nombre sintético completa la
 preparación de los proyectos SQL sin modificar el esquema del producto.
+
+En la siguiente tanda se preparan identidades y permisos persistidos para los
+casos de PR externos y se prueba la revocación durante IO contra la base actual.
+También se corrige la precedencia que permitía alcanzar el ejecutor de un PR
+externo cuando el proyecto no tenía repositorio Git: el rechazo ocurre antes de
+la salida anticipada para ese caso. Las listas y búsquedas de PR externos también
+exigen acceso vigente al proyecto, como su detalle: al revocar el permiso no
+deben devolver sus metadatos. El historial ordinario conserva su propia política.
+Estos cambios requieren su propio CI; el run `dbe2cff` sigue fallido.
 
 ## Alcance de la corrección
 

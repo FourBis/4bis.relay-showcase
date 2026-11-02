@@ -490,24 +490,65 @@ class TestRetomar(_Base):
         self.assertEqual(await self.db.get_task_graph("g_legacy"), before)
         launch.assert_not_called()
 
-    async def test_permiso_403_precede_tarea_write_detenida(self) -> None:
-        conv_id = await self.db.create_conversation(project_slug="demo")
-        await self.db.update_conversation_task(conv_id, mode="write", state="paused")
-        await self.db.create_task_graph("g_write_paused", "x", tareas=[
-            {"id": "write_paused_a", "titulo": "A"}], project_slug="demo",
-            conversation_id=conv_id)
-        await self.db.set_task_graph_state("g_write_paused", "cancelado")
-        before = await self.db.get_task_graph("g_write_paused")
-        project = await self.db.get_project("demo")
+    async def test_resume_oculta_tarea_write_pausada_a_cuenta_ajena(self) -> None:
+        import time
+        from relay import identity, native_auth
+        from relay.server_common import GRAFOS_KEY
 
-        with patch("relay.coordination.resolved_project", new=AsyncMock(return_value=project)), \
-             patch("relay.identity.can_write_project", return_value=False), \
-             patch("relay.server_graph_routes._largar_grafo") as launch:
-            response = await self.client.post("/graphs/g_write_paused/resume")
+        original_users = await self.db.list_users()
+        creator, outsider = "creator@example.test", "outsider@example.test"
+        for actor in (creator, outsider):
+            await self.db.set_user_role(actor, "member", project_slugs=["demo"])
+        identity.load_roles(await self.db.list_users())
+        try:
+            conv_id = await self.db.create_conversation(project_slug="demo", requested_by=creator)
+            await self.db.update_conversation_task(conv_id, mode="write", read_only=False,
+                state="paused", source_repo=self._tmp.name, workspace_path=self._tmp.name,
+                branch="codex/task-paused")
+            await self.db.create_task_graph("g_write_paused", "x", tareas=[
+                {"id": "write_paused_a", "titulo": "A"}], project_slug="demo",
+                conversation_id=conv_id)
+            await self.db.update_task("write_paused_a", estado="fallado", error="budget_exceeded")
+            await self.db.set_task_graph_state("g_write_paused", "cancelado")
+            before_graph = await self.db.get_task_graph("g_write_paused")
+            before_task = await self.db.get_conversation_task(conv_id)
+            before_conversation = await self.db.get_conversation(conv_id)
+            before_nodes = await self.db.run(
+                "SELECT * FROM tasks WHERE graph_id=? ORDER BY id", ("g_write_paused",))
+            before_workers = dict(self.app[GRAFOS_KEY])
 
-        self.assertEqual(response.status, 403)
-        self.assertEqual(await self.db.get_task_graph("g_write_paused"), before)
-        launch.assert_not_called()
+            # Sesión personal vigente: tener el proyecto asignado no comparte el hilo.
+            token = "fixture-paused-graph-outsider-session"
+            await self.db.set_config(native_auth.ENABLED, "1")
+            await self.db.run(
+                "INSERT INTO login_sessions(token_hash,email,expires_at) VALUES(?,?,?)",
+                (native_auth._hash(token), outsider, time.time() + 60))
+            headers = {"Cookie": f"{native_auth.SESSION_COOKIE}={token}"}
+            me = await self.client.get("/admin/api/me", headers=headers)
+            self.assertEqual(me.status, 200)
+            account = await me.json()
+            self.assertEqual(account["email"], outsider)
+            self.assertEqual(account["role"], "member")
+            self.assertEqual(account["project_slugs"], ["demo"])
+            with patch("relay.coordination.resolved_project", new=AsyncMock(
+                    side_effect=AssertionError("No se debe resolver un workspace sin acceso"))) as resolve, \
+                 patch("relay.task_workspace.resolved_project", new=resolve), \
+                 patch("relay.server_graph_routes._largar_grafo") as launch:
+                response = await self.client.post("/graphs/g_write_paused/resume", headers=headers)
+
+            self.assertEqual(response.status, 404)
+            self.assertEqual(await response.text(), "Consulta no disponible.")
+            self.assertEqual(await self.db.get_task_graph("g_write_paused"), before_graph)
+            self.assertEqual(await self.db.get_conversation_task(conv_id), before_task)
+            self.assertEqual(await self.db.get_conversation(conv_id), before_conversation)
+            self.assertEqual(await self.db.run(
+                "SELECT * FROM tasks WHERE graph_id=? ORDER BY id", ("g_write_paused",)), before_nodes)
+            self.assertEqual(dict(self.app[GRAFOS_KEY]), before_workers)
+            resolve.assert_not_awaited()
+            launch.assert_not_called()
+        finally:
+            identity.load_roles(original_users)
+
 
     async def test_resume_relanza_un_grafo_cortado(self) -> None:
         await self.db.create_task_graph("g1", "x", tareas=[

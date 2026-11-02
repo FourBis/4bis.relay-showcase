@@ -219,6 +219,13 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
             project = await db.get_project(slug.strip()) if isinstance(slug, str) else None
             if not project:
                 return await handler(request)
+            if conv_id and row:
+                task = await db.get_conversation_task(conv_id)
+                if isinstance(task, dict) and task.get("mode") == "external_pr":
+                    return web.json_response(
+                        {"error": "external_pr_read_only", "message":
+                         "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
+                         "conversation_id": conv_id}, status=409)
             if checkout_only:
                 # Disabled/missing paths remain the handler's authorization or
                 # validation error. A directory without Git has no checkout to
@@ -228,13 +235,6 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
                 if (not project.get("enabled") or not repo or not Path(repo).is_dir()
                         or not await git_flow.is_git_repo(repo)):
                     return await handler(request)
-            if conv_id and row:
-                task = await db.get_conversation_task(conv_id)
-                if isinstance(task, dict) and task.get("mode") == "external_pr":
-                    return web.json_response(
-                        {"error": "external_pr_read_only", "message":
-                         "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
-                         "conversation_id": conv_id}, status=409)
             if enqueue and conv_id and row:
                 task = await db.get_conversation_task(conv_id)
                 if task.get("mode"):

@@ -45,6 +45,10 @@ async def registration(tmp_path, monkeypatch):
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path / "repo"),
                              "defaults_json": {"external_pr_policy": POLICY}})
+    await db.set_user_role(WHO, "member", project_slugs=["demo"])
+    monkeypatch.setattr(identity, "_roles", {WHO: "member"})
+    monkeypatch.setattr(identity, "_disabled", set())
+    monkeypatch.setattr(identity, "_project_grants", {WHO: ["demo"]})
     project = await db.get_project("demo")
     remote = remote_snapshot()
     monkeypatch.setattr(external_pr, "read_snapshot", AsyncMock(side_effect=lambda *_, **__: copy.deepcopy(remote)))
@@ -331,6 +335,8 @@ async def test_routes_enforce_project_permission_and_authenticated_attribution(
         registration, monkeypatch, role, granted, enabled, read_only, expected):
     from relay import server_common, server_external_pr_routes
     db, project, body, _ = registration
+    db_grants = ["demo"] if granted and role in {"member", "subadmin"} else []
+    await db.set_user_role(WHO, role, enabled=enabled, project_slugs=db_grants)
     if read_only:
         await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True}})
     monkeypatch.setattr(identity, "_roles", {WHO: role})
@@ -356,6 +362,7 @@ async def test_routes_enforce_project_permission_and_authenticated_attribution(
             assert result["requested_by"] == WHO
             cid = result["id"]
             monkeypatch.setattr(identity, "_project_grants", {WHO: []})
+            await db.set_user_role(WHO, role, project_slugs=[])
             denied = await client.post(f"/conversations/{cid}/external-pr", json={"action": "refresh"})
             assert denied.status == 403
         else:
@@ -387,6 +394,7 @@ async def test_task_get_is_local_and_denied_after_project_grant_revocation(regis
         assert response.status == 200
         assert (await response.json())["mode"] == "external_pr"
         monkeypatch.setattr(identity, "_project_grants", {WHO: []})
+        await db.set_user_role(WHO, "member", project_slugs=[])
         assert (await client.get(f"/conversations/{task['id']}/task")).status == 403
     finally:
         await client.close()
