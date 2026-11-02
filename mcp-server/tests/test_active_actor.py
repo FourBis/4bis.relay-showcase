@@ -65,7 +65,10 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
     monkeypatch.setattr(server_common, "_check_auth", lambda request: True)
     monkeypatch.setattr(identity, "requester", lambda request: "alex@example.test")
     monkeypatch.setattr(identity, "can_control_graph", AsyncMock(return_value=True))
-    request = SimpleNamespace(app={DB_KEY: db, GRAFOS_KEY: {"g1": SimpleNamespace(relay_actor=active_actor)}},
+    # El registro contiene asyncio.Task: representa un worker vivo del actor.
+    worker = SimpleNamespace(relay_actor=active_actor,
+                             done=lambda: False, cancelling=lambda: 0)
+    request = SimpleNamespace(app={DB_KEY: db, GRAFOS_KEY: {"g1": worker}},
         match_info={"q_id": "q1"}, json=AsyncMock(return_value={"choice": "retry"}))
     response = await server_graph_routes.expert_question_answer(request)
     if active_actor == "alex@example.test":
@@ -83,10 +86,16 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("active_actor", ["alex@example.test", "sam@example.test", None])
-async def test_night_answer_checks_actor_before_persisting(monkeypatch, active_actor):
+async def test_night_answer_checks_actor_before_persisting(monkeypatch, tmp_path, active_actor):
     from relay import identity, server_common, server_questions
-    db = SimpleNamespace(get_night_question=AsyncMock(return_value={"run_id": "n1"}),
-                         answer_night_question=AsyncMock(return_value=True))
+    from relay.db import Database
+    # El acceso nocturno consulta la cuenta vigente en una transacción real.
+    # Sólo el almacenamiento de la respuesta se simula para observar su admisión.
+    db = Database(path=tmp_path / "night.db")
+    await db.init_schema()
+    await db.set_user_role("alex@example.test", "owner")
+    monkeypatch.setattr(db, "get_night_question", AsyncMock(return_value={"run_id": "n1"}))
+    monkeypatch.setattr(db, "answer_night_question", AsyncMock(return_value=True))
     monkeypatch.setattr(server_common, "_check_auth", lambda request: True)
     monkeypatch.setattr(identity, "requester", lambda request: "alex@example.test")
     request = SimpleNamespace(app={DB_KEY: db, NIGHT_KEY: {"n1": (SimpleNamespace(relay_actor=active_actor), None)}},
@@ -94,7 +103,10 @@ async def test_night_answer_checks_actor_before_persisting(monkeypatch, active_a
     response = await server_questions.night_question_answer(request)
     if active_actor == "alex@example.test":
         assert response.status == 200
-        db.answer_night_question.assert_awaited_once()
+        db.answer_night_question.assert_awaited_once_with(
+            "q1", {"choice": "continue", "free_text": None}, actor="alex@example.test")
     else:
-        assert response.status == 409
+        # La política actual oculta tanto preguntas ajenas como inexistentes.
+        assert response.status == 404
+        request.json.assert_not_awaited()
         db.answer_night_question.assert_not_awaited()

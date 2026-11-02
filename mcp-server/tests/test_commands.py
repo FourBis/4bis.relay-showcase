@@ -315,13 +315,16 @@ async def test_bang_comando_error_reporta_ok_false(env, monkeypatch, error):
     assert "falló" in body["text"]
 
 
-async def test_bang_desconocido_sigue_al_experto(env):
+async def test_bang_desconocido_sigue_al_experto(env, monkeypatch):
     """El guard es aditivo: un `!` que no es comando registrado tiene que
     caer al experto como siempre (un "!ojo con esto" no se secuestra)."""
     cli = env
     db = cli.server.app[DB_KEY]
+    project = db.path.parent / "demo-project"
+    project.mkdir()
+    monkeypatch.setattr("relay.task_service.start_pending", lambda *_: None)
     await db.upsert_project(
-        {"slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
+        {"slug": "demo", "name": "Demo", "repo_path": str(project),
          "defaults_json": {"model": "test"}})
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "!ojo con esto", "source": "ui"})

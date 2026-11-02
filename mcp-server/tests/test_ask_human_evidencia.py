@@ -19,7 +19,7 @@ Cómo correr:
     python -m pytest tests/test_ask_human_evidencia.py -q
 """
 from __future__ import annotations
-from relay import cbm_runtime, expert_evidence, expert_models, expert_runner
+from relay import cbm_runtime, expert_evidence, expert_models, expert_runner, user_accounts
 
 import json
 import tempfile
@@ -46,6 +46,7 @@ CASO_REAL = (
 async def db(tmp_path):
     d = Database(path=tmp_path / "test.db")
     await d.init_schema()
+    await d.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
     return d
 
 
@@ -123,8 +124,9 @@ async def test_ask_human_sin_evidencia_reintenta_y_no_registra_pregunta(db):
 
     proj = _project(str(tempfile.mkdtemp()))
     await db.create_conversation(
-        project_slug="demo", conversation_id="conv-sin-evidencia")
-    with patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
+        project_slug="demo", conversation_id="conv-sin-evidencia", requested_by="owner")
+    with user_accounts.bind_actor(db, "owner"), \
+         patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
          patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
         await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
@@ -152,8 +154,9 @@ async def test_ask_human_con_evidencia_valida_la_persiste(db):
 
     proj = _project(str(tempfile.mkdtemp()))
     await db.create_conversation(
-        project_slug="demo", conversation_id="conv-con-evidencia")
-    with patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
+        project_slug="demo", conversation_id="conv-con-evidencia", requested_by="owner")
+    with user_accounts.bind_actor(db, "owner"), \
+         patch.object(expert_models, "build_model", lambda s: FunctionModel(act)), \
          patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
         await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
@@ -206,16 +209,17 @@ async def test_pregunta_persistida_detiene_modelo_y_tools(db, tmp_path, monkeypa
         return ModelResponse(parts=parts)
 
     project = {**_project(str(tmp_path)), "id": 1}
-    await db.create_conversation(project_slug="demo", conversation_id="pause")
+    await db.create_conversation(project_slug="demo", conversation_id="pause", requested_by="owner")
     monkeypatch.setattr(expert_models, "build_model", lambda _: FunctionModel(act))
     monkeypatch.setattr(cbm_runtime, "cbm_binary_path", lambda: None)
     nudges = []
     async def progress(**event):
         if event.get("phase") == "question":
             nudges.append("Continúa investigando")
-    result = await expert_runner.run_expert(
-        project, "hola", db=db, model_override="minimax:MiniMax-M3",
-        chat_id="pause", conversation_id="pause", steer=nudges, on_progress=progress)
+    with user_accounts.bind_actor(db, "owner"):
+        result = await expert_runner.run_expert(
+            project, "hola", db=db, model_override="minimax:MiniMax-M3",
+            chat_id="pause", conversation_id="pause", steer=nudges, on_progress=progress)
 
     assert effects == (["before"] if batch else [])
     assert len(requests) == 1
@@ -238,9 +242,10 @@ async def test_pregunta_persistida_detiene_modelo_y_tools(db, tmp_path, monkeypa
     # El historial cerrado admite la respuesta humana sin repetir las tools.
     monkeypatch.setattr(expert_models, "build_model", lambda _: FunctionModel(
         lambda messages, info: ModelResponse(parts=[TextPart("Respuesta recibida.")])))
-    resumed = await expert_runner.run_expert(
-        project, "Puedes continuar", db=db, model_override="minimax:MiniMax-M3",
-        chat_id="resumed", conversation_id="pause", message_history_json=result["messages_json"])
+    with user_accounts.bind_actor(db, "owner"):
+        resumed = await expert_runner.run_expert(
+            project, "Puedes continuar", db=db, model_override="minimax:MiniMax-M3",
+            chat_id="resumed", conversation_id="pause", message_history_json=result["messages_json"])
     assert resumed["content"] == "Respuesta recibida."
     assert resumed["question_id"] == ""
     assert effects == (["before"] if batch else [])

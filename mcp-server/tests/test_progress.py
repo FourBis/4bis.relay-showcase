@@ -1,4 +1,4 @@
-"""Tests de Fase 1: liveness on-demand (A) + progreso SSE al bot (B).
+"""Progreso del experto, callbacks explícitos y lectura autorizada en Relay.
 
 Cubre:
   - run_expert: messages_json persiste igual (contrato ADR-025)
@@ -6,10 +6,9 @@ Cubre:
   - run_expert: on_progress se invoca con (thinking, tool_call)
   - server: GET /experts/status/{chat_id} devuelve snapshot durante run
   - server: GET /experts/status/{chat_id} devuelve 404 si no existe
-  - server: notify recibe kind=progress durante tool_call (TestModel
-    con custom_tool no llama tools reales; usamos un Tool nativo propio
-    que se ejecuta via TestModel.call_tools=[...] — ver `build_agent`
-    helper más abajo)
+  - server: conserva progreso y resultado durable sin enviar el hilo a
+    una audiencia externa no verificada.
+  - callback: un NotifyClient pasado explícitamente mantiene su contrato.
   - db: finish_chat persiste phase_at_end y last_tool
 
 Cómo correr:
@@ -305,7 +304,7 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
         await db.set_config("FOURBIS_MODEL", "test")
         await db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name,
-            "defaults_json": {"model": "test"},
+            "defaults_json": {"model": "test", "three_stage": False},
         })
 
     async def asyncTearDown(self) -> None:
@@ -344,7 +343,10 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_during_run(self) -> None:
         """Mientras el run corre, /status devuelve snapshot vivo.
         Después de terminar, /status devuelve finished=true."""
-        from relay.server import create_app
+        from relay.server import create_app, PROGRESS_KEY, DB_KEY
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+        started, release = asyncio.Event(), asyncio.Event()
         notifications: list[dict] = []
 
         async def fake_send(self_, agent_id, kind, message, metadata=None):
@@ -353,52 +355,50 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
                                   "metadata": metadata or {}})
             return True
 
-        with patch.object(NotifyClient, "send", fake_send):
+        async def answer(messages, info):
+            started.set()
+            await release.wait()
+            return ModelResponse(parts=[TextPart("Respuesta de prueba.")])
+
+        with patch.object(NotifyClient, "send", fake_send), \
+             patch.object(expert_models, "build_model", lambda _: FunctionModel(answer)):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
-                r = await client.post("/experts/run", json={
-                    "target": "demo", "user": "hola",
-                    "source": "test", "author": "pytest",
-                })
-                self.assertEqual(r.status, 202)
-                chat_id = (await r.json())["id"]
-
-                # status mientras corre: phase puede ser thinking/tool_call
-                # según timing, pero el snapshot debe existir.
-                r = await client.get(f"/experts/status/{chat_id[:8]}")
-                self.assertEqual(r.status, 200)
-                snap = await r.json()
-                self.assertEqual(snap["target"], "demo")
-                self.assertIn(snap["phase"], ("thinking", "tool_call", "writing",
-                                               "planner", "verifier",
-                                               "documenter"))
-                self.assertFalse(snap["finished"])
-
-                # esperar a que termine
-                await _wait(lambda: len(notifications) > 0
-                            and notifications[-1]["kind"] == "response")
-
-                # status post-mortem: finished=true. TestModel responde
-                # tan rápido que la phase puede no haber avanzado de
-                # "thinking" — lo único que garantizamos acá es finished.
+                try:
+                    r = await client.post("/experts/run", json={
+                        "target": "demo", "user": "hola",
+                        "source": "test", "author": "pytest",
+                    })
+                    self.assertEqual(r.status, 202)
+                    chat_id = (await r.json())["id"]
+                    # Admission is queued now. Wait for the actual model,
+                    # rather than assuming its progress store precedes 202.
+                    await asyncio.wait_for(started.wait(), timeout=10)
+                    r = await client.get(f"/experts/status/{chat_id[:8]}")
+                    self.assertEqual(r.status, 200)
+                    snap = await r.json()
+                    self.assertEqual(snap["target"], "demo")
+                    self.assertIn(snap["phase"], ("thinking", "tool_call", "writing"))
+                    self.assertFalse(snap["finished"])
+                finally:
+                    release.set()
+                await _wait(lambda: app[PROGRESS_KEY][chat_id].finished)
                 r = await client.get(f"/experts/status/{chat_id}")
                 self.assertEqual(r.status, 200)
-                snap = await r.json()
-                self.assertTrue(snap["finished"])
-                self.assertIn(snap["phase"],
-                              ("thinking", "tool_call", "writing", "done",
-                               "planner", "verifier", "documenter"))
+                self.assertTrue((await r.json())["finished"])
+                row = await app[DB_KEY].get_chat(chat_id)
+                self.assertEqual(row["status"], "ok")
+                self.assertTrue(Path(row["md_path"]).is_file())
+                self.assertEqual(notifications, [])
 
-    async def test_run_emits_progress_then_response_e2e(self) -> None:
-        """END-TO-END de la data que colgaba a Discord: un run que usa una
-        tool emite notify(kind=progress) DURANTE y notify(kind=response) al
-        FINAL. El bot debe tratar progress como NO-terminal y cerrar solo en
-        response — antes cerraba en el primer progress → embed colgado en 🟡.
+    async def test_run_keeps_tool_progress_and_durable_response_in_relay(self) -> None:
+        """A real queued run keeps tool progress and its durable response.
 
-        TestModel default (call_tools=[]) no llama tools, así que forzamos un
-        TestModel que llame `cbm_query` (cbm mockeado) para reproducir la
-        secuencia real progress→response."""
-        from relay.server import create_app
+        The HTTP caller supplies no verified Discord audience. Passing a
+        NotifyClient to the background worker must not publish the thread.
+        Explicit notification callbacks retain their separate positive tests.
+        """
+        from relay.server import create_app, PROGRESS_KEY, DB_KEY
         from pydantic_ai.models.test import TestModel
 
         notifications: list[dict] = []
@@ -423,18 +423,19 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
                 })
                 self.assertEqual(r.status, 202)
                 chat_id = (await r.json())["id"]
-                await _wait(lambda: any(
-                    n["kind"] == "response" for n in notifications))
-
-        kinds = [n["kind"] for n in notifications]
-        # la data exacta: al menos un progress, y el ÚLTIMO es response
-        self.assertIn("progress", kinds, f"sin progress en {kinds}")
-        self.assertEqual(kinds[-1], "response", f"secuencia: {kinds}")
-        # el progress vino ANTES del response terminal (no al revés)
-        self.assertLess(kinds.index("progress"), len(kinds) - 1)
-        # todos los notify son del mismo chat (el bot los rutea por chat_id)
-        self.assertTrue(
-            all(n["agent_id"] == f"chat:{chat_id}" for n in notifications))
+                await _wait(lambda: chat_id in app[PROGRESS_KEY]
+                            and app[PROGRESS_KEY][chat_id].finished)
+                r = await client.get(f"/experts/status/{chat_id}")
+                self.assertEqual(r.status, 200)
+                snap = await r.json()
+                self.assertTrue(snap["finished"])
+                self.assertGreater(snap["tool_calls"], 0)
+                self.assertEqual(snap["last_tool"], "cbm_query")
+                row = await app[DB_KEY].get_chat(chat_id)
+                self.assertEqual(row["status"], "ok")
+                self.assertGreater(row["tool_calls"], 0)
+                self.assertTrue(Path(row["md_path"]).is_file())
+                self.assertEqual(notifications, [])
 
 
 # ---------- db: fase_at_end + last_tool persiste ----------

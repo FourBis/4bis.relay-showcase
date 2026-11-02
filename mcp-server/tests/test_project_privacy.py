@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import admin, identity
+from relay import admin, conversation_access, identity
 from relay.db import Database
 
 
@@ -248,10 +248,20 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
     member_headers = {"Cf-Access-Jwt-Assertion": "fixture-jwt"}
     inspect = AsyncMock(return_value=None)
     try:
+        # La asignación no comparte hilos: sin invitación el detalle no existe
+        # para este miembro, aunque pertenezca al proyecto.
+        await db.set_user_role("member@example.test", "member",
+                               project_slugs=["fixture"])
+        with patch("relay.identity.verify", return_value="member@example.test"):
+            hidden = await client.get(f"/conversations/{conv_id}", headers=member_headers)
+            assert hidden.status == 404
+            assert "PRIVATE_" not in await hidden.text()
+        await conversation_access.set_share(
+            db, conv_id, identity.OWNER, "member@example.test", "read")
         with patch("relay.task_workspace.inspect_workspace", inspect):
             with patch("relay.identity.verify", return_value="member@example.test"):
                 list_response = await client.get(
-                    "/conversations", headers=member_headers
+                    "/conversations?scope=shared", headers=member_headers
                 )
                 detail_response = await client.get(
                     f"/conversations/{conv_id}", headers=member_headers
