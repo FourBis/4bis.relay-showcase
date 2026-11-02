@@ -249,8 +249,11 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
                 except ResumeInspectionDenied:
                     return web.json_response({"error": "No tienes permiso para reanudar este plan."}, status=403)
                 except ResumeInspectionStale:
-                    return web.json_response({"error": "La tarea cambió; revisa el plan antes de retomarlo.",
-                                              "code": "workspace_inspection_stale"}, status=409)
+                    payload = {"error": "La tarea cambió; revisa el plan antes de retomarlo.",
+                               "code": "workspace_inspection_stale"}
+                    if source == "graph":
+                        payload["graph_id"] = request.match_info["id"]
+                    return web.json_response(payload, status=409)
                 except TaskWorkspaceError as e:
                     return web.json_response(
                         {"error": "task_workspace_blocked", "message": str(e),

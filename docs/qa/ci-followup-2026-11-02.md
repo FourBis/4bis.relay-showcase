@@ -20,12 +20,14 @@ esa integración, conservando sus controles de acceso y seguridad.
 | [Quinta corrección, `2dd97fb`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41477755864) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados. Grafos: 14 fallos, 388 aprobados y 5 subtests. |
 | [Sexta corrección, `7aecd6e`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41483169524) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados. Grafos: 1 fallo, 401 aprobados y 5 subtests. |
 | [Séptima corrección, `3777e98`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41486562564) | Primera tanda: 1.142 aprobados, 1 omitido y 11 subtests; demo aprobada; PR externos: 340 aprobados; orquestación: 30 aprobados y 79 no seleccionados; grafos: 402 aprobados y 5 subtests. Etapa final: 9 fallos y 131 aprobados. |
+| [Octava corrección, `079adbf`](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41489219264) | Primera tanda, demo, PR externos y orquestación aprobadas. Grafos: 1 fallo, 414 aprobados y 5 subtests; la etapa final quedó omitida. |
 
 En los cinco primeros casos, la primera tanda falló y las etapas siguientes quedaron
 omitidas. En el sexto, falló la segunda tanda y las tres últimas quedaron omitidas;
 en el séptimo falló orquestación y las dos últimas quedaron omitidas. En el
 octavo y el noveno falló grafos y quedó omitida la última etapa de limpieza.
-En el décimo, la etapa final falló después de aprobar las anteriores.
+En el décimo, la etapa final falló después de aprobar las anteriores. En el
+undécimo falló un caso de grafos y la etapa final quedó omitida.
 La diferencia en fallos de archivos bloqueados en Windows no acredita
 que el contrato de esos endpoints sea distinto entre las ejecuciones.
 El [workflow de Pages](https://github.com/FourBis/4bis.relay-showcase/actions/runs/41375783806)
@@ -98,6 +100,11 @@ El último fallo observado consultaba las etapas de un chat aún en cola. La
 fixture espera ahora un estado terminal con fecha de cierre, sin esperar a que
 aparezca el dato que pretende comprobar; mantiene las aserciones de etapas y
 su lectura por API. La nueva ejecución debe confirmar el resultado.
+
+El primer CI de la protección atómica detectó que el conflicto 409 no incluía
+el identificador del grafo para una tarea detenida. La respuesta conserva ahora
+ese identificador en rutas de grafo, junto al código de conflicto; los casos de
+concurrencia comprueban ambos campos además de la ausencia de mutación.
 
 Los casos nocturnos preparan su propio estado y worktree privado. Comprueban que
 el checkout de origen quede intacto, que los gates restauren cambios conocidos

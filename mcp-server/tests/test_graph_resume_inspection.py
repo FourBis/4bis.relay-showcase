@@ -163,7 +163,9 @@ async def test_changed_observation_preserves_the_concurrent_writer(resume_env, m
         response = await asyncio.wait_for(request, 10)
         assert response.status == (403 if change == "graph_origin" else 409)
         if response.status == 409:
-            assert (await response.json())["code"] == "workspace_inspection_stale"
+            result = await response.json()
+            assert result["code"] == "workspace_inspection_stale"
+            assert result["graph_id"] == "g"
         assert await db.get_conversation_task(cid) == expected
         assert await db.get_task_graph("g") == graph_expected
         assert not app[server_common.GRAFOS_KEY]
