@@ -331,7 +331,7 @@ async def graphs_resume(request: web.Request) -> web.Response:
     if graph is None:
         return web.json_response({"error": "not found"}, status=404)
     # El guard de workspace puede reparar estado; autorizar antes de entrar.
-    if not await identity.can_control_graph(request, db, graph):
+    if not await identity.can_control_graph(request, db, graph, for_resume=True):
         return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
     # Mismo orden que pausar/cancelar: conversación antes del grafo.
     async with AsyncExitStack() as controls:
@@ -343,18 +343,12 @@ async def graphs_resume(request: web.Request) -> web.Response:
                     {"error": "La tarea está completando otra acción; espera y reintenta.",
                      "graph_id": graph["id"]}, status=409)
             await controls.enter_async_context(lock)
-        return await _resume_with_workspace(request)
-
-
-@coordination.guard_workspace(DB_KEY, source="graph")
-async def _resume_with_workspace(request: web.Request) -> web.Response:
-    graph_id = request.match_info["id"]
-    lock = _graph_control_lock(request.app, graph_id)
-    if lock.locked():
-        return web.json_response(
-            {"error": "El grafo está completando otra acción; espera y reintenta.",
-             "graph_id": graph_id}, status=409)
-    async with lock:
+        lock = _graph_control_lock(request.app, graph["id"])
+        if lock.locked():
+            return web.json_response(
+                {"error": "El grafo está completando otra acción; espera y reintenta.",
+                 "graph_id": graph["id"]}, status=409)
+        await controls.enter_async_context(lock)
         return await _resume_graph(request)
 
 
@@ -381,10 +375,16 @@ async def _resume_graph(request: web.Request) -> web.Response:
     from . import task_service
 
     async def control_denial(graph):
-        if not await identity.can_control_graph(request, db, graph):
+        if not await identity.can_control_graph(request, db, graph, for_resume=True):
             return web.json_response({"error": "No tienes permiso para controlar esta tarea."}, status=403)
         cid = graph.get("conversation_id")
         state = await db.get_conversation_task(cid) if cid else {}
+        if state.get("mode") == "external_pr":
+            return web.json_response({"error": "external_pr_read_only"}, status=409)
+        conversation = await db.get_conversation(cid) if cid else None
+        if (conversation and conversation.get("project_slug") and
+                conversation["project_slug"].casefold() != (graph.get("project_slug") or "").casefold()):
+            return web.json_response({"error": "la conversación pertenece a otro proyecto"}, status=400)
         if (state.get("state") in task_service.STOPPED
                 or cid in getattr(db, "_task_cancellations", {})):
             return web.json_response(
@@ -400,8 +400,9 @@ async def _resume_graph(request: web.Request) -> web.Response:
     if denial is not None:
         return denial
     # A legacy cancelled/failed graph can contain an exhausted pending node.
-    # Heal under the existing conversation/workspace/graph controls BEFORE
-    # eligibility, so it can expose its question without granting an attempt.
+    # Sanar sólo reconcilia SQLite: no necesita un checkout para preguntar.
+    # Los locks de conversación/grafo protegen la reparación; ejecutar sigue
+    # exigiendo el guard de workspace, antes de conceder intentos o activar.
     repair = asyncio.create_task(orquestador.sanar(db, graph_id))
     try:
         await asyncio.shield(repair)
@@ -429,41 +430,62 @@ async def _resume_graph(request: web.Request) -> web.Response:
                 or metadata_close_pending(graph, verifier_enabled=verifier_enabled))
 
     verification_only = closing_only(g)
-    # A proven final check never grants attempts to budget-failed nodes or
-    # enters the normal correction scheduler. Preserve normal Retomar otherwise.
-    if not verification_only:
-        await prepare_graph_resume(db, g)
-    g = await db.get_task_graph(graph_id)
-    if g is None:
-        return web.json_response({"error": "not found"}, status=404)
-    nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in g["tasks"]]
-    if verification_only and not closing_only(g):
-        return web.json_response({"error": "El cierre cambió; revisa el plan antes de retomarlo.",
-                                  "graph_id": graph_id}, status=409)
-    if (not verification_only and not G.listas(nodes)
-            and not any(n.estado == G.CORRIENDO for n in nodes)):
-        reason = ("Responde la pregunta pendiente antes de retomar."
-                  if any(n.estado == G.ESPERANDO for n in nodes)
-                  else "Continúa la conversación indicando cómo resolver el fallo."
-                  if G.estado_del_grafo(nodes) != "hecho"
-                  else "El plan ya terminó.")
-        return web.json_response({"error": "No hay tareas que se puedan retomar. " + reason,
-                                  "graph_id": graph_id}, status=409)
-    denial = await control_denial(g)
-    if denial is not None:
-        return denial
-    # Un grafo cancelado o fallado vuelve a `activo`: retomarlo es
-    # justamente decir "esto sigue". Si no, `estado_del_grafo` lo dejaría
-    # como estaba y el panel mostraría un plan muerto avanzando.
-    if g["estado"] != "activo":
-        await db.set_task_graph_state(graph_id, "activo")
+
+    def idle_response(graph):
+        nodes = [G.Nodo.desde_fila(t, t.get("deps") or ()) for t in graph["tasks"]]
+        if (not verification_only and not G.listas(nodes)
+                and not any(n.estado == G.CORRIENDO for n in nodes)):
+            reason = ("Responde la pregunta pendiente antes de retomar."
+                      if any(n.estado == G.ESPERANDO for n in nodes)
+                      else "Continúa la conversación indicando cómo resolver el fallo."
+                      if G.estado_del_grafo(nodes) != "hecho"
+                      else "El plan ya terminó.")
+            return web.json_response({"error": "No hay tareas que se puedan retomar. " + reason,
+                                      "graph_id": graph_id}, status=409)
+
+    # Un fallo puede reabrirse por presupuesto o desvío: requiere workspace.
+    if not any(t["estado"] == G.FALLADO for t in g["tasks"]):
+        idle = idle_response(g)
+        if idle is not None:
+            return idle
+
+    @coordination.guard_workspace(DB_KEY, source="graph")
+    async def resume_execution(_request):
+        g = await db.get_task_graph(graph_id)
+        if g is None:
+            return web.json_response({"error": "not found"}, status=404)
+        current_project = await db.get_project(g.get("project_slug") or "")
+        if not current_project or _graph_verifier_enabled(current_project) != verifier_enabled:
+            return web.json_response({"error": "El proyecto cambió; revisa el plan antes de retomarlo."}, status=409)
         denial = await control_denial(g)
         if denial is not None:
             return denial
-    _largar_grafo(request.app, project, graph_id, identity.requester(request),
-                  **({"verification_only": True} if verification_only else {}))
-    return web.json_response(
-        _grafo_publico(await db.get_task_graph(graph_id)), status=202)
+        # El cierre final no concede intentos ni entra al scheduler normal.
+        if not verification_only:
+            await prepare_graph_resume(db, g)
+        g = await db.get_task_graph(graph_id)
+        if g is None:
+            return web.json_response({"error": "not found"}, status=404)
+        if verification_only and not closing_only(g):
+            return web.json_response({"error": "El cierre cambió; revisa el plan antes de retomarlo.",
+                                      "graph_id": graph_id}, status=409)
+        idle = idle_response(g)
+        if idle is not None:
+            return idle
+        denial = await control_denial(g)
+        if denial is not None:
+            return denial
+        if g["estado"] != "activo":
+            await db.set_task_graph_state(graph_id, "activo")
+            denial = await control_denial(g)
+            if denial is not None:
+                return denial
+        _largar_grafo(request.app, current_project, graph_id, identity.requester(request),
+                      **({"verification_only": True} if verification_only else {}))
+        return web.json_response(
+            _grafo_publico(await db.get_task_graph(graph_id)), status=202)
+
+    return await resume_execution(request)
 
 
 @_require_auth
@@ -742,7 +764,7 @@ async def _retomar_grafo_tras_respuesta(
             state = await db.get_conversation_task(cid) if cid else {}
             # Check the central ACL after the other reads, immediately before
             # the synchronous registry checks and eventual launch.
-            if not await identity.can_control_graph(request, db, graph):
+            if not await identity.can_control_graph(request, db, graph, for_resume=True):
                 return {**info, "blocked": "Ya no tienes permiso para continuar este plan."}
             if (gid in getattr(db, "_graph_cancellations", {})
                     or cid in getattr(db, "_task_cancellations", {})):

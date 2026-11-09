@@ -233,16 +233,21 @@ def test_cero_filas_no_es_un_error(base):
 
 
 def test_error_del_motor_vuelve_como_texto(base):
-    """Es información para el modelo: le dice qué corregir."""
+    """El error es útil sin copiar SQL ni rutas privadas al historial."""
     out = _run(dbtool.consultar(base, "SELECT no_existe FROM t"))
     assert out.startswith("error de sqlite")
-    assert "no_existe" in out
+    assert "OperationalError" in out
+    assert "no_existe" not in out
+    assert "SELECT" not in out
+    assert base not in out
 
 
 def test_archivo_inexistente_vuelve_como_texto(tmp_path):
     out = _run(dbtool.consultar(str(tmp_path / "nada.db"), "SELECT 1"))
-    assert out.startswith("error:")
-    assert "nada.db" in out
+    assert out.startswith("error: no se encontró la base local")
+    assert "nada.db" not in out
+    assert str(tmp_path) not in out
+    assert "SELECT 1" not in out
 
 
 def test_sqlite_de_lectura_se_abre_en_modo_ro(base):

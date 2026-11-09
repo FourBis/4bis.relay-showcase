@@ -1153,11 +1153,16 @@ def test_render_tool_calls_empty():
 @pytest.fixture
 async def env():
     with tempfile.TemporaryDirectory() as tmp:
+        repo_path = Path(tmp) / "demo-repo"
+        repo_path.mkdir()
+        skills_dir = Path(tmp) / "skills"
+        skills_dir.mkdir()
         env_vars = {
             "STATE_DIR": str(Path(tmp) / "state"),
             "FOURBIS_DB_PATH": str(Path(tmp) / "relay.db"),
             "FOURBIS_CHATS_DIR": str(Path(tmp) / "chats"),
             "FOURBIS_JSONL_DIR": str(Path(tmp) / "jsonl"),
+            "FOURBIS_SKILLS_DIR": str(skills_dir),
             "FOURBIS_MODEL": "test",
             "LOG_LEVEL": "WARNING",
         }
@@ -1166,7 +1171,7 @@ async def env():
             await db.init_schema()
             await db.set_config("FOURBIS_MODEL", "test")
             await db.upsert_project({
-                "slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
+                "slug": "demo", "name": "Demo", "repo_path": str(repo_path),
                 "system_prompt": "experto demo", "mcp_servers": [],
             })
             app = create_app()
@@ -1250,6 +1255,7 @@ async def test_progress_phases_include_staged_phases(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
 
     seen_phases: set[str] = set()
@@ -1317,11 +1323,12 @@ async def test_stages_persisted_and_served_by_chats_get(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
 
     for _ in range(100):
         row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
+        if row and row.get("status") in {"ok", "error"} and row.get("md_path"):
             break
         await asyncio.sleep(0.02)
 
@@ -1344,10 +1351,11 @@ async def test_chats_get_survives_corrupt_stages_json(env):
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "x", "source": "test", "author": "pytest",
     })
+    assert r.status == 202, await r.text()
     chat_id = (await r.json())["id"]
     for _ in range(100):
         row = await db.get_chat(chat_id)
-        if row and row.get("status") != "running":
+        if row and row.get("status") in {"ok", "error"} and row.get("md_path"):
             break
         await asyncio.sleep(0.02)
 

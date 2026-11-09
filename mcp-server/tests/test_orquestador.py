@@ -342,8 +342,8 @@ async def test_el_coordinador_entra_solo_cuando_algo_falla(db):
     assert llamadas == ["mal"]
 
 
-async def test_el_coordinador_puede_pedir_un_reintento_que_la_regla_negaria(db):
-    """Nemotron mira el error y decide: 'esto fue un 429, reintentá'."""
+async def test_el_coordinador_no_puede_anular_la_regla_de_idempotencia(db):
+    """Una recomendación de retry no vuelve seguro un efecto no idempotente."""
     await db.create_task_graph("g", "x", tareas=[
         {"id": "t1", "titulo": "escribe", "max_intentos": 5}])
     intentos = {"n": 0}
@@ -357,7 +357,10 @@ async def test_el_coordinador_puede_pedir_un_reintento_que_la_regla_negaria(db):
 
     prog = await orquestador.correr_grafo(db, "g", ejecutar=ejecutar,
                                           coordinar=coordinar)
-    assert intentos["n"] == 2 and prog["estado"] == "hecho"
+    assert intentos["n"] == 1
+    task = (await db.get_task_graph("g"))["tasks"][0]
+    assert task["estado"] == grafo.ESPERANDO and task["intentos"] == 1
+    assert len(await db.list_expert_questions(only_open=True)) == 1
 
 
 async def test_un_nodo_que_revienta_no_voltea_el_grafo(db):
@@ -964,8 +967,10 @@ async def test_salir_por_la_mala_no_deja_nodos_corriendo_sueltos(db):
     assert await db.files_claimed_by_others("nadie") == set(), \
         "quedó un archivo tomado por una tarea que ya no existe"
     fila = (await db.get_task_graph("g"))["tasks"][0]
-    # Idempotente → vuelve a `pendiente` y se puede retomar.
-    assert fila["estado"] == grafo.PENDIENTE
+    # Aunque la tarea sea idempotente, un corte no demuestra que el intento
+    # terminó sin efecto: se conserva para una decisión humana.
+    assert fila["estado"] == grafo.ESPERANDO
+    assert len(await db.list_expert_questions(only_open=True)) == 1
 
 
 async def test_doble_cancelacion_espera_limpieza_y_conserva_claims(db):
@@ -1058,12 +1063,16 @@ async def test_cancelar_nodo_conserva_chat_historial_y_archivos(db, tmp_path, mo
 
     task = (await db.get_task_graph("g-cancel"))["tasks"][0]
     assert task["chat_id"] == chat_id
-    assert task["estado"] == (grafo.PENDIENTE if idempotente else grafo.ESPERANDO)
+    # La cancelación interrumpió un intento sin resultado durable; ambas
+    # clases requieren revisión humana antes de volver a ejecutarse.
+    assert task["estado"] == grafo.ESPERANDO
     assert await db.files_claimed_by_others("nadie") == set()
     assert saved.read_text(encoding="utf-8") == "avance conservado"
     chat = await db.get_chat(chat_id)
     assert chat["status"] == chat["phase_at_end"] == "cancelled"
-    assert chat["finished_at"] and chat["tool_calls"] == 1
+    # La tool se inició, pero la cancelación ocurrió antes de su resultado;
+    # el conteo durable acredita solo tool calls completadas.
+    assert chat["finished_at"] and chat["tool_calls"] == 0
     assert chat["tokens_in"] is not None and chat["duration_ms"] >= 0
     assert any(e.get("tool") == "checkpoint" for e in json.loads(chat["progress_events"]))
     output = (await db.run("SELECT payload, exported FROM chat_outputs WHERE chat_id=?",
@@ -2300,7 +2309,7 @@ async def test_un_chat_ilegible_no_voltea_la_verificacion_del_grafo(db):
     assert await orquestador._evidencia_de_los_nodos(_DB(), g) == ""
 
 
-async def test_el_cierre_del_grafo_le_pasa_la_evidencia_al_verificador():
+async def test_el_cierre_del_grafo_le_pasa_la_evidencia_al_verificador(db):
     """El enganche, no la funcion: que el payload la lleve de verdad.
 
     Un test sobre `_evidencia_de_los_nodos` sola pasa igual aunque nadie
@@ -2312,24 +2321,24 @@ async def test_el_cierre_del_grafo_le_pasa_la_evidencia_al_verificador():
     ]
     vistos: list = []
 
-    class _DB:
-        async def get_chat(self, _cid):
-            return {"progress_events": json.dumps(eventos)}
-
-        async def set_task_graph_verificacion(self, *a):
-            return None
-
     async def falso_verificar(**kw):
         vistos.append(kw.get("executor_result") or {})
         return {"verdict": "complete", "feedback": "ok", "modelo": "test"}
 
-    g = {"objetivo": "x", "tasks": [
-        {"id": "t1", "titulo": "construir", "chat_id": "c1",
-         "estado": "hecho", "deps": [], "orden": 0}]}
+    await db.create_task_graph("verify-evidence", "x", tareas=[
+        {"id": "t1", "titulo": "construir"}], project_slug="demo")
+    chat_id = await db.create_chat(
+        project_slug="demo", source="grafo", author="synthetic", target="demo",
+        user_prompt="construir")
+    await db.finish_chat(chat_id, status="ok", progress_events=json.dumps(eventos))
+    await db.update_task("t1", estado=grafo.HECHO, chat_id=chat_id)
+    g = await db.get_task_graph("verify-evidence")
     await orquestador._verificar_al_cerrar(
-        _DB(), "g", g, {"estado": "hecho"}, falso_verificar)
+        db, "verify-evidence", g, {"estado": "hecho"}, falso_verificar)
 
     assert vistos, "no se llamo al verificador"
+    saved = await db.get_task_graph("verify-evidence")
+    assert json.loads(saved["verificacion_json"])["verdict"] == "complete"
     from relay.experts import Bitacora
     raw = vistos[0].get("bitacora_json") or ""
     assert "exit=0" in Bitacora.cargar(raw).evidencia(), (

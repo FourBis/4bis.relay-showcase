@@ -443,6 +443,15 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
             self.pedidos.append((slug, status))
             return self._facts
 
+        async def get_conversation_task(self, *_a, **_k):
+            return None
+
+        async def get_model(self, *_a, **_k):
+            return None
+
+        async def get_config(self, *_a, **_k):
+            return None
+
     def _project(self, tmp, **defaults):
         return {"slug": "demo", "repo_path": tmp, "system_prompt": "",
                 "mcp_servers": [], "native_tools": [],
@@ -492,6 +501,15 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
             async def list_facts(self, slug, limit=100):
                 raise RuntimeError("sqlite se cayó")
 
+            async def get_conversation_task(self, *_a, **_k):
+                return None
+
+            async def get_model(self, *_a, **_k):
+                return None
+
+            async def get_config(self, *_a, **_k):
+                return None
+
         with tempfile.TemporaryDirectory() as tmp:
             r = await run_expert(
                 self._project(tmp, facts_always_on=True), "hola",
@@ -500,7 +518,7 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
 
 
 class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
-    """Round-trip ADR-024/025/026: 202 → notify; conversación completa."""
+    """Round-trip: 202, cola durable y resultado consultable en Relay."""
 
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -513,11 +531,11 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
         config.set_runtime_config({"FOURBIS_MODEL": "test",
                                    "FOURBIS_COMPACTOR_MODEL": "test"})
 
-        db = Database()  # usa FOURBIS_DB_PATH
-        await db.init_schema()
-        await db.set_config("FOURBIS_MODEL", "test")
-        await db.set_config("FOURBIS_COMPACTOR_MODEL", "test")
-        await db.upsert_project({
+        self.db = Database()  # usa FOURBIS_DB_PATH
+        await self.db.init_schema()
+        await self.db.set_config("FOURBIS_MODEL", "test")
+        await self.db.set_config("FOURBIS_COMPACTOR_MODEL", "test")
+        await self.db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name,
             "defaults_json": {"model": "test"},
         })
@@ -540,7 +558,16 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.fail("timeout esperando condición async")
 
-    async def test_run_returns_202_and_notifies(self) -> None:
+    async def _wait_chat_finished(self, chat_id: str, timeout: float = 10.0):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            chat = await self.db.get_chat(chat_id)
+            if chat and chat["status"] not in {"queued", "running"}:
+                return chat
+            await asyncio.sleep(0.05)
+        self.fail("el chat quedó en cola o corriendo")
+
+    async def test_run_returns_202_and_keeps_result_in_relay(self) -> None:
         from relay.server import create_app
         notifications: list[dict] = []
 
@@ -560,21 +587,14 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status, 202)
                 body = await r.json()
                 chat_id = body["id"]
-                self.assertEqual(body["status"], "running")
-                self.assertIsNone(body["conversation_id"])
+                self.assertIn(body["status"], {"queued", "running"})
+                self.assertTrue(body["conversation_id"])
 
-                await self._wait(lambda: notifications)
-                n = notifications[0]
-                self.assertEqual(n["kind"], "response")
-                self.assertEqual(n["agent_id"], f"chat:{chat_id}")
-                self.assertEqual(n["metadata"]["chat_id"], chat_id)
-                self.assertEqual(n["metadata"]["target"], "demo")
-                self.assertIsNone(n["metadata"]["conversation_id"])
-
-                # el chat quedó ok en el índice
-                r = await client.get(f"/chats/{chat_id}")
-                chat = await r.json()
+                chat = await self._wait_chat_finished(chat_id)
                 self.assertEqual(chat["status"], "ok")
+                self.assertEqual(chat["project_slug"], "demo")
+                # No verified Discord audience is attached to this run.
+                self.assertEqual(notifications, [])
 
     async def test_conversation_flow_end_to_end(self) -> None:
         from relay.server import create_app
@@ -595,47 +615,36 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
 
                 # dos turnos en la misma conversación
                 for turno in ("turno uno", "turno dos"):
-                    n_before = len(notifications)
                     r = await client.post("/experts/run", json={
                         "target": "demo", "user": turno,
                         "conversation": conv_id,
                     })
                     self.assertEqual(r.status, 202)
-                    await self._wait(
-                        lambda: len(notifications) > n_before)
-
-                meta = notifications[-1]["metadata"]
-                self.assertEqual(meta["conversation_id"], conv_id)
-                self.assertEqual(meta["discord_thread_id"], "th-42")
+                    event = await r.json()
+                    await self._wait_chat_finished(event["id"])
 
                 # el historial creció
                 r = await client.get(f"/conversations/{conv_id}")
                 detail = await r.json()
                 self.assertGreater(detail["messages_len"], 0)
+                self.assertEqual(detail["discord_thread_id"], "th-42")
+                self.assertEqual(notifications, [])
 
                 # /cerrar → compactación (TestModel via FOURBIS_COMPACTOR_MODEL)
                 r = await client.post(f"/conversations/{conv_id}/close")
                 self.assertEqual(r.status, 200)
-                self.assertEqual((await r.json())["compaction"], "running")
+                self.assertEqual((await r.json())["compaction"], "skipped")
+                self.assertTrue(await self.db.get_conversation_task(conv_id))
 
-                async def _summary_set():
-                    r = await client.get(f"/conversations/{conv_id}")
-                    return (await r.json()).get("summary")
-                t0 = time.monotonic()
-                summary = None
-                while time.monotonic() - t0 < 10:
-                    summary = await _summary_set()
-                    if summary:
-                        break
-                    await asyncio.sleep(0.05)
-                self.assertTrue(summary, "la compactación no seteo summary")
-
-                # correr sobre conversación cerrada → 409
+                # La conversación administrada puede reabrirse: cerrar su
+                # vista no termina la tarea ni revoca su acceso.
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "tarde",
                     "conversation": conv_id,
                 })
-                self.assertEqual(r.status, 409)
+                self.assertEqual(r.status, 202)
+                event = await r.json()
+                await self._wait_chat_finished(event["id"])
 
     async def test_auto_attach_by_thread_id(self) -> None:
         """Fix 2026-07-12: /experts/run con discord_thread_id (sin
@@ -659,34 +668,32 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status, 202)
                 conv_id = (await r.json())["conversation_id"]
                 self.assertIsNotNone(conv_id)
-                await self._wait(lambda: notifications)
-                meta = notifications[-1]["metadata"]
-                self.assertEqual(meta["conversation_id"], conv_id)
-                self.assertEqual(meta["discord_thread_id"], "th-99")
+                await self._wait_chat_finished((await r.json())["id"])
+                detail = await (await client.get(f"/conversations/{conv_id}")).json()
+                self.assertEqual(detail["discord_thread_id"], "th-99")
 
                 # segundo mensaje del mismo hilo: reusa la conversación
-                n_before = len(notifications)
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "segundo mensaje",
                     "discord_thread_id": "th-99"})
                 self.assertEqual(r.status, 202)
-                self.assertEqual((await r.json())["conversation_id"], conv_id)
-                await self._wait(lambda: len(notifications) > n_before)
+                event = await r.json()
+                self.assertEqual(event["conversation_id"], conv_id)
+                await self._wait_chat_finished(event["id"])
 
                 # `conversation` explícita gana sobre el thread_id
-                n_before = len(notifications)
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "x",
                     "conversation": conv_id,
                     "discord_thread_id": "th-otro"})
                 self.assertEqual(r.status, 202)
-                self.assertEqual((await r.json())["conversation_id"], conv_id)
-                await self._wait(lambda: len(notifications) > n_before)
+                event = await r.json()
+                self.assertEqual(event["conversation_id"], conv_id)
+                await self._wait_chat_finished(event["id"])
 
                 # hilo que sigue tras /cerrar → conversación NUEVA
                 r = await client.post(f"/conversations/{conv_id}/close")
                 self.assertEqual(r.status, 200)
-                n_before = len(notifications)
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "post cierre",
                     "discord_thread_id": "th-99"})
@@ -694,7 +701,8 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
                 conv2 = (await r.json())["conversation_id"]
                 self.assertIsNotNone(conv2)
                 self.assertNotEqual(conv2, conv_id)
-                await self._wait(lambda: len(notifications) > n_before)
+                await self._wait_chat_finished((await r.json())["id"])
+                self.assertEqual(notifications, [])
 
                 # tipo inválido → 400
                 r = await client.post("/experts/run", json={
@@ -762,13 +770,16 @@ class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):
                              slow_compact):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
-                r = await client.post("/conversations", json={
-                    "project": "demo"})
-                conv_id = (await r.json())["id"]
+                # Legacy conversation exercises compaction. Managed tasks
+                # intentionally skip compaction when their view is closed.
+                conv_id = await self.db.create_conversation(
+                    project_slug="demo", requested_by="owner")
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "hola",
                     "conversation": conv_id})
                 self.assertEqual(r.status, 202)
+                event = await r.json()
+                await self._wait_chat_finished(event["id"])
                 # esperar a que el run persista el historial
                 async def _has_msgs():
                     resp = await client.get(f"/conversations/{conv_id}")

@@ -210,7 +210,7 @@ class TestCompactEndpoint(unittest.IsolatedAsyncioTestCase):
 
     async def test_compact_reemplaza_historial_sin_cerrar(self) -> None:
         from relay.server import create_app
-        conv_id = await self.db.create_conversation(project_slug="demo")
+        conv_id = await self.db.create_conversation(project_slug="demo", requested_by="owner")
         # historial gordo: es lo que el compactador tiene que achicar
         raw = json.dumps([_req("arregla el login " + "x" * 50_000),
                           _resp(120_000, "run-1")])
@@ -223,7 +223,7 @@ class TestCompactEndpoint(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await r.json())["context"]["base_tokens"], 120_000)
 
             r = await client.post(f"/conversations/{conv_id}/compact")
-            self.assertEqual(r.status, 200)
+            self.assertEqual(r.status, 200, await r.text())
             body = await r.json()
             self.assertEqual(body["status"], "open")
             self.assertEqual(body["context_before"]["base_tokens"], 120_000)

@@ -321,11 +321,11 @@ async def test_bang_desconocido_sigue_al_experto(env):
     cli = env
     db = cli.server.app[DB_KEY]
     await db.upsert_project(
-        {"slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
+        {"slug": "demo", "name": "Demo", "repo_path": tempfile.gettempdir(),
          "defaults_json": {"model": "test"}})
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "!ojo con esto", "source": "ui"})
-    assert r.status == 202                       # run normal
+    assert r.status == 202, await r.text()       # run normal
     assert "command" not in (await r.json())
 
 

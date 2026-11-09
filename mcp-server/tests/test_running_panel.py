@@ -19,11 +19,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay.db import Database
+from relay import experts
 from relay.notify import NotifyClient
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -38,6 +39,15 @@ def _tmp_env(tmp: Path) -> None:
 def _clear_env() -> None:
     for k in _ENV_KEYS:
         os.environ.pop(k, None)
+
+
+async def _wait_for_chat(db: Database, chat_id: str) -> dict:
+    for _ in range(200):
+        chat = await db.get_chat(chat_id)
+        if chat and chat["status"] in {"ok", "error"}:
+            return chat
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"el run {chat_id} no terminó")
 
 
 async def _wait(predicate, timeout: float = 10.0):
@@ -113,7 +123,7 @@ class TestChatsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_404_when_chat_missing(self) -> None:
-        from relay.server import create_app
+        from relay.server import DB_KEY, create_app
         async def fake_send(self_, agent_id, kind, message, metadata=None):
             return True
         with patch.object(NotifyClient, "send", fake_send):
@@ -143,17 +153,19 @@ class TestChatsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(body["is_running"])
 
     async def test_returns_live_progress_during_run(self) -> None:
-        """Mientras corre, /chats/{id}/status devuelve chat + snapshot vivo."""
-        from relay.server import create_app
-        notifications: list[dict] = []
+        """El endpoint muestra el resultado local y no envía a un bot."""
+        from relay.server import DB_KEY, create_app
+        send = AsyncMock()
+        started, release = asyncio.Event(), asyncio.Event()
+        original_runner = experts.run_expert_staged
 
-        async def fake_send(self_, agent_id, kind, message, metadata=None):
-            notifications.append({"agent_id": agent_id, "kind": kind,
-                                  "message": message,
-                                  "metadata": metadata or {}})
-            return True
+        async def gated_runner(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return await original_runner(*args, **kwargs)
 
-        with patch.object(NotifyClient, "send", fake_send):
+        with patch.object(NotifyClient, "send", send), \
+                patch.object(experts, "run_expert_staged", gated_runner):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
                 r = await client.post("/experts/run", json={
@@ -163,25 +175,28 @@ class TestChatsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status, 202)
                 chat_id = (await r.json())["id"]
 
-                # poll corto: durante el run, status detail trae snapshot
-                # TestModel es muy rápido, así que puede que ya haya
-                # terminado. Hacemos la verificación con o sin progress.
+                db: Database = app[DB_KEY]
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=2)
+                    r = await client.get(f"/chats/{chat_id}/status")
+                    self.assertEqual(r.status, 200)
+                    body = await r.json()
+                    self.assertEqual(body["chat"]["id"], chat_id)
+                    self.assertTrue(body["is_running"])
+                    self.assertTrue(body["has_progress"])
+                    self.assertIsInstance(body["progress"], dict)
+                finally:
+                    release.set()
+                chat = await _wait_for_chat(db, chat_id)
+                self.assertEqual(chat["status"], "ok")
+                self.assertTrue(chat["progress_events"])
+
                 r = await client.get(f"/chats/{chat_id}/status")
                 self.assertEqual(r.status, 200)
                 body = await r.json()
-                self.assertEqual(body["chat"]["id"], chat_id)
-                self.assertIn(body["is_running"], (True, False))
-                self.assertIsInstance(body["has_progress"], bool)
-
-                # esperar a que termine
-                await _wait(lambda: notifications
-                            and notifications[-1]["kind"] == "response")
-
-                # post-mortem: progress puede seguir o no (sigue si no
-                # se liberó el store — esto depende del cleanup).
-                # Lo importante: nunca explota.
-                r = await client.get(f"/chats/{chat_id}/status")
-                self.assertEqual(r.status, 200)
+                self.assertEqual(body["chat"]["status"], "ok")
+                self.assertFalse(body["is_running"])
+                send.assert_not_awaited()
 
 
 class TestHttpChatsFilter(unittest.IsolatedAsyncioTestCase):

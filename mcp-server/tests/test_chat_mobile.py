@@ -82,8 +82,8 @@ class TestAdjuntosComposer(unittest.TestCase):
         cuerpo = _JS[_JS.index("async function sendCurrentMessage"):]
         cuerpo = cuerpo[:cuerpo.index("\n}")]
         self.assertIn("attachments:", cuerpo)
-        # y la bandeja se vacía en el envío (si no, se cuelan en el próximo)
-        self.assertIn("pendingAttachments = []", cuerpo)
+        # La limpieza selectiva y la recuperación se prueban ejecutando
+        # chat-draft-project.test.mjs, sin exigir vaciar otros borradores.
 
     def test_las_miniaturas_usan_el_id_sin_extension(self) -> None:
         """El endpoint resuelve por id pelado: con `.png` da 404 y la

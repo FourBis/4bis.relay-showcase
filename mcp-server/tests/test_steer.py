@@ -30,7 +30,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -120,7 +121,8 @@ class TestSteer(unittest.IsolatedAsyncioTestCase):
                     patch.object(config, "expert_request_limit",
                                  lambda: 50):
                 r = await expert_runner.run_expert(
-                    _project(tmp), "arregla el bug de CORS", db=object(),
+                    _project(tmp), "arregla el bug de CORS",
+                    db=SimpleNamespace(get_model=AsyncMock(return_value=None)),
                     steer=steer, on_progress=on_progress)
 
         # Re-entró una vez con el texto del humano y terminó obedeciendo.
@@ -161,7 +163,8 @@ class TestSteer(unittest.IsolatedAsyncioTestCase):
                     patch.object(config, "expert_request_limit",
                                  lambda: 500):
                 task = asyncio.create_task(expert_runner.run_expert(
-                    _project(tmp), "itera", db=object(), rescue=rescue))
+                    _project(tmp), "itera",
+                    db=SimpleNamespace(get_model=AsyncMock(return_value=None)), rescue=rescue))
                 # Dejar que haga algunas vueltas y cancelar como el humano.
                 await asyncio.sleep(0.4)
                 task.cancel()
@@ -211,7 +214,8 @@ async def test_steer_counts_tools_before_and_after_reentry(tmp_path, cancelled):
             patch.object(expert_selection, "_catalog_toolsets", catalog), \
             patch.object(config, "expert_request_limit", return_value=50):
         task = asyncio.create_task(expert_runner.run_expert(
-            _project(str(tmp_path)), "haz la tarea", db=object(),
+            _project(str(tmp_path)), "haz la tarea",
+            db=SimpleNamespace(get_model=AsyncMock(return_value=None)),
             steer=steer, rescue=rescue))
         try:
             await asyncio.wait_for(final_request.wait(), timeout=5)

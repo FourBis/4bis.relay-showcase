@@ -63,7 +63,10 @@ async def test_event_without_actor_does_not_reuse_task_creator(monkeypatch):
         async def get_conversation_task(self, _cid):
             return {"state": "ready", "requested_by": "creator@example.test", "mode": "read"}
 
-        async def claim_conversation_event(self, _cid):
+        async def claim_conversation_event(
+                self, _cid, *, claimed, expected_event_id=None):
+            assert claimed == {}
+            assert expected_event_id is None
             return {"id": 7, "kind": "run", "payload": {"role": "member"}}
 
         async def finish_conversation_event(self, event_id, **kwargs):

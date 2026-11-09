@@ -5,6 +5,8 @@ Transporte HTTP y herramientas simulados: no usa red ni ejecuta comandos.
 """
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -80,7 +82,8 @@ async def test_batch_of_25_tools_runs_while_bot_is_stalled(tmp_path, monkeypatch
              "defaults_json": {"model": "fake", "timeout": 5,
                                "idle_timeout_s": 0.2, "native_shell": False,
                                "native_files": False}},
-            "comprobar", db=object(), on_progress=progress), timeout=3)
+            "comprobar", db=SimpleNamespace(get_model=AsyncMock(return_value=None)),
+            on_progress=progress), timeout=3)
         assert result["phase_at_end"] == "writing"
         assert sorted(executed) == list(range(25))
         assert result["tool_calls"] == store["batch"].tool_calls == 25

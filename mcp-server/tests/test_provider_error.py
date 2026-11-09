@@ -87,6 +87,12 @@ class _FakeDb:
     async def mcp_servers_for_project(self, *_a, **_k):
         return ([], [])
 
+    async def get_model(self, *_a, **_k):
+        return None
+
+    async def get_config(self, *_a, **_k):
+        return None
+
 
 class TestProviderError(unittest.IsolatedAsyncioTestCase):
     def _project(self, tmp: str) -> dict:

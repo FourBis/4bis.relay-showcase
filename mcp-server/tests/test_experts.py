@@ -170,6 +170,8 @@ def test_make_toolset_stdio_y_desconocido():
 @pytest.fixture
 async def env():
     with tempfile.TemporaryDirectory() as tmp:
+        repo_path = Path(tmp) / "demo-repo"
+        repo_path.mkdir()
         env_vars = {
             "STATE_DIR": str(Path(tmp) / "state"),
             "FOURBIS_DB_PATH": str(Path(tmp) / "relay.db"),
@@ -190,7 +192,7 @@ async def env():
             await db.set_config("FOURBIS_CHATS_DIR", str(Path(tmp) / "chats"))
             await db.set_config("FOURBIS_JSONL_DIR", str(Path(tmp) / "jsonl"))
             await db.upsert_project({
-                "slug": "demo", "name": "Demo", "repo_path": "C:/x/Demo",
+                "slug": "demo", "name": "Demo", "repo_path": str(repo_path),
                 "system_prompt": "eres el experto demo", "mcp_servers": [],
             })
             app = create_app()
@@ -216,7 +218,7 @@ async def test_experts_run_ok(env):
     assert r.status == 202
     body = await r.json()
     chat_id = body["id"]
-    assert body["status"] == "running"
+    assert body["status"] in {"queued", "running"}
 
     # Poll del chat hasta terminal (TestModel corre en ms).
     for _ in range(100):
@@ -246,9 +248,12 @@ async def test_experts_run_ok(env):
     text = md.read_text(encoding="utf-8")
     assert "hola" in text
 
-    # jsonl del target con user + assistant
+    # En esta ruta gestionada el prompt queda en el .md/historial de
+    # conversación; el JSONL conserva una sola copia de la respuesta.
     jsonl = Path(os.environ["FOURBIS_JSONL_DIR"]) / "demo.jsonl"
-    assert jsonl.read_text(encoding="utf-8").count("\n") == 2
+    entries = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines()]
+    assert sum(entry.get("chat") == chat_id and entry.get("role") == "assistant"
+               for entry in entries) == 1
 
 
 async def test_experts_run_proyecto_desconocido(env):

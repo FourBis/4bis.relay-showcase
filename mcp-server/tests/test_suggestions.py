@@ -14,7 +14,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from relay import server
 from relay.db import Database
@@ -121,6 +121,7 @@ class TestSuggestionsEndToEnd(unittest.IsolatedAsyncioTestCase):
         os.environ["FOURBIS_MODEL"] = "test"
         db = Database()
         await db.init_schema()
+        self.db = db
         await db.set_config("FOURBIS_MODEL", "test")
         await db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name,
@@ -142,34 +143,31 @@ class TestSuggestionsEndToEnd(unittest.IsolatedAsyncioTestCase):
         from relay.notify import NotifyClient
         from relay.server import create_app
 
-        notifications: list[dict] = []
-
-        async def fake_send(self_, agent_id, kind, message, metadata=None):
-            notifications.append({"kind": kind, "metadata": metadata or {}})
-            return True
+        send = AsyncMock()
 
         async def fake_suggest(**_kw):
             return ["Muestra el diff", "Ejecuta los tests"]
 
-        with patch.object(NotifyClient, "send", fake_send), \
+        with patch.object(NotifyClient, "send", send), \
                 patch("relay.experts.suggest_followups", fake_suggest):
             async with TestClient(TestServer(create_app())) as client:
                 r = await client.post("/experts/run", json={
                     "target": "demo", "user": "hola", "source": "test"})
+                self.assertEqual(r.status, 202)
                 chat_id = (await r.json())["id"]
                 for _ in range(200):
-                    if notifications:
+                    row = await self.db.get_chat(chat_id)
+                    if row and row["suggestions"]:
                         break
                     await asyncio.sleep(0.05)
-                self.assertTrue(notifications, "no llegó el notify")
-                self.assertEqual(
-                    notifications[0]["metadata"].get("suggestions"),
-                    ["Muestra el diff", "Ejecuta los tests"])
+                else:
+                    self.fail("las sugerencias no quedaron persistidas")
 
                 chat = await (await client.get(f"/chats/{chat_id}")).json()
                 self.assertEqual(
                     json.loads(chat["suggestions"]),
                     ["Muestra el diff", "Ejecuta los tests"])
+                send.assert_not_awaited()
 
 
 if __name__ == "__main__":
