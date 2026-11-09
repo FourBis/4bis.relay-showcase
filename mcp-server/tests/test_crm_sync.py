@@ -355,3 +355,17 @@ async def test_start_stack_larga_bun_dev_detached(monkeypatch, tmp_path):
     assert r["started"] and r["pid"] == 4242
     assert calls[0][0][:2] == ("docker", "start")
     assert "bun" in calls[1][0] and calls[1][1] == str(tmp_path)
+
+
+async def test_conexion_al_crm_es_read_only(monkeypatch):
+    seen = {}
+
+    async def fake_connect(dsn, **kwargs):
+        seen["dsn"] = dsn
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(crm_mod.asyncpg, "connect", fake_connect)
+    await crm_mod._connect("postgresql://synthetic@127.0.0.1:5434/crm?schema=public")
+    assert seen["server_settings"] == {"default_transaction_read_only": "on"}
+    assert "?" not in seen["dsn"]
