@@ -118,6 +118,7 @@ async def test_project_grant_revoked_during_github_io_aborts_without_mutation(
 
     async def revoke(*args, **kwargs):
         identity._project_grants[WHO] = []
+        await db.set_user_role(WHO, "member", project_slugs=[])
         if remote_fails:
             raise external_pr.TaskPRError("GitHub unavailable after grant revocation")
         return copy.deepcopy(remote)

@@ -316,6 +316,7 @@ MEMBER_ALLOWED = frozenset({
     ("POST", "/conversations/{id}/task"),
     ("POST", "/projects/{slug}/external-pr"),
     ("GET", "/projects/{slug}/external-pr"),
+    ("GET", "/projects/{slug}/external-pr/preview"),
     ("GET", "/admin/api/external-review/notifications"),
     ("POST", "/admin/api/external-review/notifications/{notification_id}/read"),
     ("POST", "/conversations/{id}/external-pr"),

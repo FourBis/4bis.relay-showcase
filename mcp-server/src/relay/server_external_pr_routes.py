@@ -8,6 +8,7 @@ from . import external_pr, external_pr_access, external_review, external_review_
 from .app_state import DB_KEY
 from .server_common import _require_auth
 from .task_pr import TaskPRError
+from .user_accounts import AccountError
 
 
 async def _project(request, slug):
@@ -51,6 +52,31 @@ async def listing(request):
             "external_pr": {key: pr.get(key) for key in ("repo", "number", "url", "title", "state", "head_sha", "base_sha")}})
     return web.json_response({"tasks": tasks, "can_register": True,
         "next_cursor": rows[49]["id"] if len(rows) > 50 else None}, headers={"Cache-Control": "no-store"})
+
+
+@_require_auth
+async def preview(request):
+    """GET only reads GitHub for the form; it never stores or enqueues work."""
+    project = await _project(request, request.match_info["slug"])
+    headers = {"Cache-Control": "no-store"}
+    try:
+        if set(request.query) != {"url"} or len(request.query.getall("url")) != 1:
+            raise ValueError("Usa únicamente url una vez por consulta")
+        result = await external_pr.preview(project, request.query["url"].strip())
+        # Recheck membership after reading GitHub, before exposing anything.
+        await _project(request, project["slug"])
+        # Only this project's register: never reveal records of other projects.
+        rows = await request.app[DB_KEY].run(
+            "SELECT 1 FROM conversations WHERE id=? AND project_slug=? COLLATE NOCASE LIMIT 1",
+            (result["registration_id"], project["slug"]))
+        result["registered"] = bool(rows)
+        return web.json_response(result, headers=headers)
+    except AccountError as exc:
+        return web.json_response({"error": str(exc), "code": "account_required"}, status=409, headers=headers)
+    except (TaskPRError, OSError) as exc:
+        return web.json_response({"error": str(exc)}, status=502, headers=headers)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=422, headers=headers)
 
 
 @_require_auth

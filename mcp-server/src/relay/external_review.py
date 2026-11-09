@@ -27,6 +27,10 @@ constituye aprobación humana, permiso de publicación o decisión de integraci�
 """
 
 
+_SYSTEM += ("\nCada archivo trae su patch completo. Si content_scope es 'excerpt', content contiene sólo tramos "
+            "alrededor de los cambios, encabezados con sus números de línea reales: no supongas lo que no ves.")
+
+
 def team_guidelines(project):
     """Only existing Admin-configured instructions are trusted team guidance."""
     content = project.get("system_prompt", "")
@@ -77,7 +81,8 @@ async def authorized(db, job, *, review_inputs_digest=None):
     # A saved PR is not permission to keep reading an old repository after remapping.
     with user_accounts.bind_actor(db, job["requested_by"]):
         mapped = await github.repo_slug(project.get("repo_path") or "", refresh=True)
-    if not isinstance(mapped, str) or mapped.casefold() != job["repo"].casefold():
+        same = await external_pr.resolves_to(mapped, job["repo_id"], job["repo"])
+    if not same:
         raise PermissionError("El repositorio vinculado cambió; no se revisó código del repositorio anterior")
     # One local snapshot after the external await closes the model/ACL/policy
     # revocation window without another await between these final checks.

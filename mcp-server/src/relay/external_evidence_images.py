@@ -175,9 +175,15 @@ async def _mapping_scope(db, project, cid, actor):
     _, current, _ = await _scope(db, project, cid, actor)
     origin = await github.repo_slug(current["repo_path"], refresh=True)
     who, current, task = await _scope(db, current, cid, actor)
-    expected = (task.get("external_pr") or {}).get("repo")
+    registered = task.get("external_pr") or {}
+    expected = registered.get("repo")
     if not isinstance(origin, str) or not isinstance(expected, str) or origin.casefold() != expected.casefold():
-        raise ValueError("El origin local cambió respecto al registro; se conserva cualquier temporal pendiente")
+        # Un repo renombrado o transferido conserva su id: se acepta solo si el origin apunta a él.
+        with user_accounts.bind_actor(db, who):
+            same = isinstance(expected, str) and await external_pr.resolves_to(origin, registered.get("repo_id"), expected)
+        if not same:
+            raise ValueError("El origin local cambió respecto al registro; se conserva cualquier temporal pendiente")
+        who, current, task = await _scope(db, current, cid, actor)
     return who, current, task
 
 

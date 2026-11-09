@@ -1,8 +1,6 @@
 // Registro de trabajo externo: GitHub verifica identidad/SHA; el formulario declara evidencia.
 import { api, apiRoot, escape } from "./api.js";
 import { modalLoad, closeModal, isModalOpen, field, formSection, emptyState, toast } from "./ui.js";
-import { issuePickerHtml, mountIssuePicker, optionalIssuePayload } from "./chat-issue.js";
-import { repositoryPickerHtml, mountRepositoryPicker } from "./chat-repository-picker.js";
 import { externalReviewHtml } from "./chat-external-review.js";
 
 const MODAL = "external-pr-modal";
@@ -112,70 +110,186 @@ function formError(message) {
   if (output) output.textContent = message;
 }
 
+// Registro rápido: el dev pega la URL o busca el PR; título, descripción y commits salen de GitHub.
+export function prQueryKind(value) {
+  const text = String(value || "").trim();
+  if (!text) return {kind:"empty"};
+  if (/^https?:\/\//i.test(text)) return {kind:"url", url:text.replace(/[?#].*$/,"").replace(/\/(files|commits|checks)(\/[^/]*)?\/?$/,"")};
+  const number = text.match(/^#?([1-9]\d{0,9})$/);
+  if (number) return {kind:"number", number:Number(number[1])};
+  return {kind:"text", query:text};
+}
+
+function shortDate(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("es-CL", {day:"2-digit", month:"short"});
+}
+
+export function externalPreviewHtml(pr) {
+  const commits = Array.isArray(pr?.commits) ? pr.commits : [];
+  const state = pr.draft ? ["warn","Borrador"] : ({OPEN:["ok","Abierto"],MERGED:["dim","Fusionado"],CLOSED:["dim","Cerrado"]})[pr.state] || ["dim",pr.state || "—"];
+  const numbers = [Number.isFinite(pr.additions) ? `<span class="xpr-add">+${pr.additions}</span>` : "",
+    Number.isFinite(pr.deletions) ? `<span class="xpr-del">−${pr.deletions}</span>` : "",
+    Number.isFinite(pr.changed_files) ? `${pr.changed_files} archivo${pr.changed_files === 1 ? "" : "s"}` : ""].filter(Boolean).join(" ");
+  const body = String(pr.body || "").trim();
+  const missing = Number(pr.commits_total) > commits.length;
+  return `<article class="xpr-card" aria-label="PR seleccionado">
+    <header class="xpr-card-head">
+      <div class="xpr-card-ref">${link(pr.url, `${pr.repo || ""} #${pr.number || ""}`)}
+        <span class="badge ${state[0]}">${escape(state[1])}</span>${pr.registered ? '<span class="badge dim">Ya registrado</span>' : ""}</div>
+      <h3 class="xpr-card-title">${escape(pr.title || "Sin título")}</h3>
+      <p class="xpr-card-meta">${escape(pr.author || "autor sin verificar")} · <code>${escape(pr.head_ref || "?")}</code> → <code>${escape(pr.base_ref || "?")}</code>${numbers ? ` · ${numbers}` : ""}</p>
+    </header>
+    <section class="xpr-block"><h4 class="xpr-block-title">Descripción</h4>
+      ${body ? `<div class="xpr-body">${escape(body)}</div>${pr.body_truncated ? '<p class="field-hint">Descripción recortada; el texto completo está en GitHub.</p>' : ""}`
+        : '<p class="xpr-warn">El PR no tiene descripción. Agrégala en GitHub: es el contexto que usa la revisión.</p>'}</section>
+    <section class="xpr-block"><h4 class="xpr-block-title">Commits <span class="xpr-count">${escape(String(pr.commits_total ?? commits.length))}</span></h4>
+      ${commits.length ? `<ol class="xpr-commits">${commits.map(commit => `<li>
+        <code class="xpr-sha">${escape(String(commit.sha || "").slice(0,7))}</code>
+        <span class="xpr-commit-msg">${escape(commit.headline || "(sin mensaje)")}</span>
+        <span class="xpr-commit-meta">${escape(commit.author || "")}${commit.date ? ` · ${escape(shortDate(commit.date))}` : ""}</span></li>`).join("")}</ol>`
+        : '<p class="field-hint">GitHub no devolvió commits para este PR.</p>'}
+      ${missing ? `<p class="field-hint">Se muestran los primeros ${commits.length}; el resto está en GitHub.</p>` : ""}</section>
+    <p class="field-hint">Al registrar, el bot revisa el diff completo del último commit (<code>${escape(String(pr.head_sha || "").slice(0,7))}</code>) contra <code>${escape(pr.base_ref || "la base")}</code>.</p>
+  </article>`;
+}
+
 export async function openExternalRegistration({ projectSlug = "", lockProject = false, onRegistered } = {}) {
   const session = ++modalSession;
-  let issuePicker, prPicker, autoTitle = "";
   await modalLoad({ id: MODAL, title: "Registrar PR", loader: async () => {
     const catalog = await api("projects?capability=external_pr");
     return lockProject ? {...catalog,projects:(catalog.projects || []).filter(project => project.slug === projectSlug)} : catalog;
   },
-    render: ({ projects = [] }) => projects.length ? `<form id="external-register-form">${formSection({
-      title: "Trabajo del equipo en este repositorio",
-      sub: "Registra un PR del mismo repositorio vinculado al proyecto, trabajado con tus propias herramientas. No necesitas iniciar un chat. GitHub verifica repositorio, autor y commit; tú quedas como responsable con tu identidad GitHub conectada. No se admiten ramas de forks.",
-      body: field({label:"Proyecto autorizado",id:"external-project",required:true,control:`<select id="external-project" name="project" class="select" required>${projects.map(p => `<option value="${attrEscape(p.slug)}" ${p.slug === projectSlug ? "selected" : ""}>${escape(p.slug)}</option>`).join("")}</select>`})
-        + field({label:"URL del PR GitHub",id:"external-url",required:true,control:'<input id="external-url" name="url" type="url" class="input" required placeholder="https://github.com/org/repo/pull/123">' + repositoryPickerHtml({id:"external-url",kind:"pulls"}),hint:"Elige un PR abierto o pega una URL del mismo repositorio, incluso de un PR cerrado o fusionado."})
-        + field({label:"Tarea / objetivo",id:"external-title",required:true,control:'<input id="external-title" name="title" class="input" maxlength="200" required>',hint:"Al elegir un PR se sugiere su título mientras no edites este objetivo."})
-        + field({label:"Riesgo",id:"external-risk",required:true,control:'<select id="external-risk" name="risk" class="select" required><option value="">Elige el riesgo</option><option value="low">Bajo</option><option value="medium">Medio</option><option value="high">Alto</option></select>',hint:"Se aplica la política configurada del proyecto para ese riesgo."})
-        + issuePickerHtml({id:"external-issue"})
-        + field({label:"Herramienta / bot utilizado (opcional)",id:"external-actor",control:'<input id="external-actor" name="actor_label" class="input" maxlength="200" placeholder="Ej. Codex, Claude, trabajo manual">',hint:"Es una declaración; el autor del PR se lee de GitHub."}),
-      actions:'<button class="btn btn-primary" type="submit">Registrar PR</button>',
-    })}</form>` : emptyState({title:"No hay proyectos elegibles",sub:lockProject ? "Este proyecto no está habilitado para registrar PR con tu cuenta. Se requiere acceso de escritura y un repositorio GitHub configurado." : "Se requiere acceso de escritura y un repositorio GitHub configurado para registrar un PR."}),
+    render: ({ projects = [] }) => {
+      if (!projects.length) return emptyState({title:"No hay proyectos elegibles",sub:lockProject ? "Este proyecto no está habilitado para registrar PR con tu cuenta. Se requiere acceso de escritura y un repositorio GitHub configurado." : "Se requiere acceso de escritura y un repositorio GitHub configurado para registrar un PR."});
+      const selected = projects.some(p => p.slug === projectSlug) ? projectSlug : projects[0].slug;
+      const projectControl = projects.length > 1
+        ? `<select id="external-project" name="project" class="select" aria-label="Proyecto">${projects.map(p => `<option value="${attrEscape(p.slug)}" ${p.slug === selected ? "selected" : ""}>${escape(p.slug)}</option>`).join("")}</select>`
+        : `<input type="hidden" id="external-project" name="project" value="${attrEscape(selected)}"><span class="xpr-project">${escape(selected)}</span>`;
+      return `<form id="external-register-form" class="xpr-form" autocomplete="off">
+        <p class="xpr-lead">Pega la URL del PR o búscalo. El título, la descripción y los commits se leen de GitHub; solo se aceptan PR del repositorio del proyecto.</p>
+        <div class="xpr-row">
+          <div class="xpr-project-box"><span class="field-label">Proyecto</span>${projectControl}</div>
+          <div class="xpr-combo">
+            <label class="field-label" for="external-url">PR de GitHub</label>
+            <input id="external-url" name="url" type="search" class="input" maxlength="500" spellcheck="false"
+              placeholder="https://github.com/org/repo/pull/123 · #123 · palabras del título"
+              role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="external-pr-options" aria-describedby="external-pr-status">
+            <ul id="external-pr-options" class="xpr-options" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <p id="external-pr-status" class="field-hint" role="status" aria-live="polite"></p>
+        <div id="external-pr-preview" class="xpr-preview"></div>
+        <div class="xpr-actions"><button class="btn btn-primary" type="submit" disabled>Registrar PR</button></div>
+      </form>`;
+    },
     after: () => {
       const form = document.getElementById("external-register-form");
       if (!form) return;
       const project = form.querySelector('[name="project"]');
-      const title = form.querySelector('[name="title"]');
-      const clearAutoTitle = () => {
-        if (autoTitle && title.value === autoTitle) title.value = "";
-        autoTitle = "";
+      const input = form.querySelector("#external-url");
+      const list = form.querySelector("#external-pr-options");
+      const status = form.querySelector("#external-pr-status");
+      const previewBox = form.querySelector("#external-pr-preview");
+      const button = form.querySelector('[type="submit"]');
+      let repo = "", items = [], active = -1, current = null, version = 0, timer = null, controller = null;
+      const alive = () => session === modalSession && isModalOpen(MODAL) && form.isConnected;
+      const setStatus = (text, error = false) => { status.textContent = text; status.classList.toggle("field-error", error); };
+      const closeList = () => { list.hidden = true; input.setAttribute("aria-expanded","false"); input.removeAttribute("aria-activedescendant"); active = -1; };
+      const reset = () => { current = null; previewBox.innerHTML = ""; button.disabled = true; button.textContent = "Registrar PR"; formError(""); };
+      const paint = () => {
+        list.innerHTML = items.map((item, index) => `<li id="external-pr-option-${index}" role="option" class="xpr-option" aria-selected="${index === active}" data-index="${index}">
+          <span class="xpr-option-num">#${item.number}</span><span class="xpr-option-title">${escape(item.title || "Sin título")}</span>${item.draft ? '<span class="badge warn">Borrador</span>' : ""}</li>`).join("");
+        list.hidden = !items.length;
+        input.setAttribute("aria-expanded", String(!list.hidden));
+        if (active >= 0) input.setAttribute("aria-activedescendant", `external-pr-option-${active}`);
       };
-      title.addEventListener("input", () => { autoTitle = ""; });
-      prPicker = mountRepositoryPicker(form,{id:"external-url",kind:"pulls",projectSlug:project.value,
-        onChange:(_value,{source}) => { if (source !== "selection") clearAutoTitle(); },
-        onSelect:item => {
-          clearAutoTitle();
-          if (!title.value.trim()) { title.value = String(item.title || "").slice(0,200); autoTitle = title.value; }
-        }});
-      issuePicker = mountIssuePicker(form, {id:"external-issue",projectSlug:project.value});
-      project.addEventListener("change", () => {
-        prPicker.setProject(project.value); issuePicker.setProject(project.value);
-      });
-      form.querySelector('[name="url"]').focus();
-      form.onsubmit = async (event) => {
-        event.preventDefault();
-        const button = form.querySelector('[type="submit"]');
-        if (button.disabled) return;
-        const values = new FormData(form);
-        const body = {url:String(values.get("url")).trim(),title:String(values.get("title")).trim(),risk:values.get("risk")};
-        if (values.get("actor_label")) body.actor_label = String(values.get("actor_label")).trim();
-        try { Object.assign(body, optionalIssuePayload(values.get("issue"))); }
-        catch (error) { formError(error.message); return; }
-        // Congelar sólo el POST de registro; consultar listas nunca bloquea la entrada manual.
-        const fields = [...form.elements].map(control => [control,control.disabled]);
-        prPicker.setBusy(true); issuePicker.setBusy?.(true);
-        fields.forEach(([control]) => { control.disabled = true; });
-        button.disabled = true; button.textContent = "Verificando en GitHub…"; formError("");
+      const request = () => { controller?.abort(); controller = new AbortController(); return {generation:++version, signal:controller.signal}; };
+      const search = async (query = "") => {
+        const {generation, signal} = request();
+        setStatus(query ? "Buscando PR abiertos…" : "Cargando PR abiertos…");
         try {
-          const result = await apiRoot(`/projects/${encodeURIComponent(values.get("project"))}/external-pr`, {method:"POST",body});
-          if (session !== modalSession || !isModalOpen(MODAL) || !form.isConnected) return;
-          prPicker.destroy(); issuePicker.destroy(); closeModal(MODAL); toast("PR del proyecto registrado", "ok");
+          const data = await apiRoot(`/projects/${encodeURIComponent(project.value)}/pulls?${new URLSearchParams({page:"1",q:query})}`, {signal,cache:"no-store"});
+          if (generation !== version || !alive()) return;
+          repo = data.repo || repo; items = (data.pulls || []).slice(0, 10); active = -1;
+          if (document.activeElement === input && !current) paint();
+          setStatus(items.length ? `${repo}: elige un PR abierto o pega su URL (también cerrados o fusionados).`
+            : `No hay PR abiertos${query ? " con esa búsqueda" : ""} en ${repo}. Pega la URL si está cerrado o fusionado.`);
+        } catch (error) {
+          if (generation !== version || signal.aborted || !alive()) return;
+          items = []; closeList();
+          setStatus(`No se pudo consultar la lista: ${error.message}. Puedes pegar la URL del PR.`, true);
+        }
+      };
+      const preview = async url => {
+        closeList(); reset();
+        const {generation, signal} = request();
+        setStatus("Leyendo el PR en GitHub…");
+        previewBox.innerHTML = '<div class="xpr-card xpr-loading" aria-hidden="true"><div class="skeleton h-4 w-1/3"></div><div class="skeleton h-5 w-2/3"></div><div class="skeleton h-16 w-full"></div></div>';
+        try {
+          const data = await apiRoot(`/projects/${encodeURIComponent(project.value)}/external-pr/preview?${new URLSearchParams({url})}`, {signal,cache:"no-store"});
+          if (generation !== version || !alive()) return;
+          current = data; repo = data.repo || repo;
+          if (input.value.trim() !== data.url) input.value = data.url;
+          previewBox.innerHTML = externalPreviewHtml(data);
+          button.disabled = false;
+          button.textContent = data.registered ? "Abrir registro" : "Registrar PR";
+          setStatus(data.registered ? "Este PR ya está registrado; se abrirá su ficha." : "");
+        } catch (error) {
+          if (generation !== version || signal.aborted || !alive()) return;
+          previewBox.innerHTML = "";
+          setStatus(error.message || "No se pudo leer el PR.", true);
+        }
+      };
+      const choose = item => { if (item) { input.value = item.url; preview(item.url); } };
+      const onInput = () => {
+        // Invalida al instante cualquier lectura en vuelo: una respuesta vieja no debe pisar lo nuevo.
+        clearTimeout(timer); controller?.abort(); ++version; reset();
+        const query = prQueryKind(input.value);
+        if (query.kind === "url") { timer = setTimeout(() => preview(query.url), 150); return; }
+        if (query.kind === "number" && repo) { timer = setTimeout(() => preview(`https://github.com/${repo}/pull/${query.number}`), 350); return; }
+        timer = setTimeout(() => search(query.kind === "text" ? query.query : query.kind === "number" ? `#${query.number}` : ""), 300);
+      };
+      input.addEventListener("input", onInput);
+      input.addEventListener("focus", () => { if (!current && items.length) paint(); });
+      input.addEventListener("blur", () => setTimeout(() => { if (alive() && !list.contains(document.activeElement)) closeList(); }, 150));
+      input.addEventListener("keydown", event => {
+        if (event.key === "Escape" && !list.hidden) { event.preventDefault(); event.stopPropagation(); closeList(); return; }
+        if (list.hidden || !items.length) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          active = (active + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length; paint();
+        } else if (event.key === "Enter" && active >= 0) { event.preventDefault(); choose(items[active]); }
+      });
+      list.addEventListener("mousedown", event => {
+        const option = event.target.closest("[data-index]");
+        if (option) { event.preventDefault(); choose(items[Number(option.dataset.index)]); }
+      });
+      project.addEventListener("change", () => { repo = ""; items = []; input.value = ""; reset(); closeList(); search(""); });
+      input.focus();
+      search("");
+      form.onsubmit = async event => {
+        event.preventDefault();
+        if (button.disabled || !current) return;
+        if (current.registered) {
+          // Ya existe: abrir su ficha sin re-registrar (puede ser de otra persona del equipo).
+          const task = {id:current.registration_id, project_slug:project.value, mode:"external_pr"};
+          closeModal(MODAL); await onRegistered?.(task); return;
+        }
+        const fields = [...form.elements].map(control => [control,control.disabled]);
+        fields.forEach(([control]) => { control.disabled = true; });
+        button.textContent = "Verificando en GitHub…"; formError("");
+        try {
+          const result = await apiRoot(`/projects/${encodeURIComponent(project.value)}/external-pr`, {method:"POST",body:{url:current.url}});
+          if (!alive()) return;
+          closeModal(MODAL); toast("PR registrado", "ok");
           await onRegistered?.(result);
         } catch (error) {
-          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) formError(`No se pudo registrar: ${error.message}. Conservamos los datos para reintentar.`);
+          if (alive()) formError(`No se pudo registrar: ${error.message}`);
         } finally {
-          if (session === modalSession && isModalOpen(MODAL) && form.isConnected) {
+          if (alive()) {
             fields.forEach(([control,disabled]) => { control.disabled = disabled; });
-            button.textContent = "Registrar PR"; prPicker.setBusy(false); issuePicker.setBusy?.(false);
+            button.textContent = "Registrar PR";
           }
         }
       };

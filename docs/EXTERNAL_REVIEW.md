@@ -11,14 +11,16 @@ en cada instalación; el repositorio no incluye conexiones activas.
 
 ## Registrar el trabajo
 
-En **Proyectos → PR**, abre el registro del proyecto y selecciona una PR abierta
-o ingresa su URL. Los selectores consultan sólo el repositorio vinculado al
-proyecto y tu conexión personal de GitHub. Puedes buscar por título o número,
-recorrer páginas o introducir la URL manualmente si GitHub no responde.
+En **Proyectos → PR**, abre el registro del proyecto y usa su único campo: pega
+la URL de la PR o búscala por `#número` o por palabras del título. La búsqueda
+consulta sólo el repositorio vinculado al proyecto con tu conexión personal de
+GitHub. Al elegir una PR, una vista previa de sólo lectura muestra título,
+descripción, ramas, totales y hasta 100 commits; no guarda ni encola nada.
 
-Declara el objetivo, el riesgo y, cuando corresponda, el issue vinculado. Ambas
-ramas de la PR deben pertenecer al repositorio del proyecto; los forks quedan
-fuera de este recorrido. El registro conserva repositorio, número, responsable,
+El registro toma el título de la PR y la política de riesgo `medium`; la API
+admite todavía objetivo, riesgo e issue explícitos. Si la PR ya está registrada
+en el proyecto, el botón abre su ficha. Ambas ramas de la PR deben pertenecer
+al repositorio del proyecto; los forks quedan fuera de este recorrido. El registro conserva repositorio, número, responsable,
 SHA de head, SHA de base, checks observados y revisión humana por separado.
 
 **Actualizar GitHub** comprueba de nuevo la identidad y el estado. Una respuesta
@@ -76,6 +78,19 @@ nunca de instrucciones añadidas por la propia PR. Si hay material potencialment
 sensible, archivos no textuales, límites excedidos o evidencia incompleta, la
 revisión se bloquea en vez de presentar un recorte como cobertura completa.
 
+El diff completo de cada archivo se envía siempre. Si además el contenido
+completo de los archivos supera los 200.000 caracteres, los archivos más grandes
+se reemplazan por tramos de 40 líneas alrededor de cada cambio, con sus números
+de línea reales (`content_scope: "excerpt"`); la cobertura del diff sigue
+completa. Si ni el diff con esos tramos cabe, la revisión se bloquea y requiere
+revisión manual.
+
+Un repositorio renombrado o transferido conserva su id numérico. Si el origin
+local del proyecto todavía usa el nombre anterior, Relay lo acepta sólo cuando
+GitHub confirma que ese nombre resuelve al mismo id y nombre canónico del
+registro. Cualquier otro repositorio sigue bloqueando la revisión, la evidencia
+PNG y la publicación.
+
 El objetivo, issue, evidencia y directrices quedan ligados al informe mediante
 huellas de contenido. Los resultados y publicaciones de otro contexto se
 conservan como historia. Una notificación no se convierte en un informe del
@@ -93,6 +108,15 @@ contexto. Una respuesta perdida se muestra como **sin confirmar**: Relay busca
 el comentario existente y no repite automáticamente el POST. Un rechazo HTTP
 definitivo admite un reintento explícito con nuevos controles. El informe del
 modelo se publica como comentario informativo, nunca como aprobación de GitHub.
+
+El informe siempre se identifica como de Relay: el resumen empieza con
+«🤖 Relay · revisión automática» y cada comentario inline con
+«🤖 Relay · revisión automática:». En modo `personal` el resumen aclara además
+que se publicó con la cuenta de @usuario sin que esa persona lo escribiera. Si
+el registro tiene un issue vinculado, el mismo informe se replica una vez en ese
+issue (`review_issue`), con los hallazgos por archivo y línea, bajo las mismas
+comprobaciones de head, base, contexto, política e identidad que la publicación
+en la PR.
 
 En este candidato local, la reserva del intento vuelve a comprobar permisos,
 política completa, PR, contexto, informe y conexión de GitHub en una sola
@@ -130,7 +154,8 @@ como sustituto de pruebas o revisión humana.
 |---|---|
 | `GET /projects/{slug}/pulls` y `GET /projects/{slug}/issues?q=&page=` | Selectores paginados de lectura con conexión personal. |
 | `GET /projects/{slug}/external-pr` | Registro local paginado; no consulta al modelo. |
-| `POST /projects/{slug}/external-pr` | Registrar una PR con objetivo, riesgo y alcance. |
+| `GET /projects/{slug}/external-pr/preview?url=` | Vista previa de sólo lectura: título, descripción, ramas, totales, hasta 100 commits y si ya está registrada en ese proyecto. Rechaza otros repositorios y forks. |
+| `POST /projects/{slug}/external-pr` | Registrar una PR; sólo `url` es obligatorio. Sin `title` usa el de la PR y sin `risk` usa `medium`. |
 | `POST /conversations/{id}/external-pr` | Actualizar, declarar evidencia o reintentar revisión. |
 | `GET/POST /conversations/{id}/external-pr/images` | Listar o preparar imágenes propias del registro. |
 | `GET /conversations/{id}/external-pr/images/{draft_id}` | Descargar una copia propia verificada. |
