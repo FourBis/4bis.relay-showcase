@@ -15,6 +15,7 @@ from . import coordination
 from . import orquestador
 from . import planificador
 from .server_questions import _question_graph
+from .graph_resume_access import _resume_access_denial
 from .server_graph_helpers import (
     _PLANIFICANDO, _cancelar_grafo, _grafo_en_curso, _grafo_publico, _grafo_sintetico, _largar_grafo,
     _finish_graph_cancel, _graph_control_lock, _stages_de,
@@ -24,11 +25,6 @@ from .server_graph_reads import (
     _graph_public_with_policy, _graph_read_response, _graph_verifier_enabled,
     conversation_plan, expert_questions_list, graphs_get, graphs_list,
 )
-
-
-
-
-
 
 
 @_require_auth
@@ -158,40 +154,6 @@ _ETAPA = {
     "tool_call": "ejecutando", "say": "ejecutando",
     "heartbeat": "ejecutando", "steer": "ejecutando",
 }
-
-
-
-
-
-
-
-
-
-async def _resume_access_denial(request, graph):
-    """Control permite detener; retomar vuelve a comprobar permisos de ejecución."""
-    cid = graph.get("conversation_id")
-    if not cid:
-        return None  # Los grafos históricos conservan su autorización existente.
-    from . import conversation_access
-    db, actor = request.app[DB_KEY], identity.requester(request)
-    def check(conn):
-        current = conn.execute("SELECT conversation_id,project_slug FROM task_graphs WHERE id=?",
-                               (graph["id"],)).fetchone()
-        if (not current or current["conversation_id"] != cid
-                or current["project_slug"] != graph.get("project_slug")):
-            raise PermissionError("El origen del grafo cambió")
-        access = conversation_access.require_tx(conn, cid, actor, "control")
-        if not conn.execute("SELECT 1 FROM projects WHERE slug=? COLLATE NOCASE",
-                            (current["project_slug"],)).fetchone():
-            return  # El handler conserva el conflicto de proyecto eliminado.
-        row = conn.execute("SELECT task_json FROM conversations WHERE id=?", (cid,)).fetchone()
-        state = json.loads(row["task_json"] or "{}")
-        if not access["can_send"] or state.get("mode") == "write" and not access["can_collaborate"]:
-            raise PermissionError("La ejecución ya no está autorizada")
-    try:
-        await conversation_access.transaction(db, check)
-    except PermissionError:
-        return web.json_response({"error": "No tienes permiso para reanudar este plan."}, status=403)
 
 
 @_require_auth
@@ -399,8 +361,6 @@ async def graphs_cancel(request: web.Request) -> web.Response:
     await _cancelar_grafo(request.app, graph_id)
     return web.json_response(
         _grafo_publico(await db.get_task_graph(graph_id)))
-
-
 
 
 def _question_actor_error(request, graph_id):
