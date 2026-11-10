@@ -341,6 +341,10 @@ async def preview(project, url):
     if (not isinstance(latest, dict) or (latest.get("head") or {}).get("sha") != head["sha"]
             or (latest.get("base") or {}).get("sha") != base.get("sha")):
         raise TaskPRError("El PR cambió mientras se leía; vuelve a intentar")
+    # El origen del proyecto pudo cambiar durante la lectura: no devolver datos de otro repositorio.
+    current_repo = await github.repo_slug(project.get("repo_path") or "", refresh=True)
+    if not isinstance(current_repo, str) or current_repo.casefold() != configured.casefold():
+        raise TaskPRError("El repositorio vinculado cambió durante la lectura; vuelve a intentar")
     commits = []
     for row in rows[:PREVIEW_COMMITS_LIMIT]:
         info = row.get("commit") if isinstance(row, dict) else None

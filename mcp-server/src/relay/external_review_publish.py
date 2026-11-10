@@ -66,6 +66,12 @@ def _text(value, label, maximum, *, content=False):
 # "review" va al PR (con comentarios inline); "review_issue" replica el informe en el issue vinculado.
 REVIEW_KINDS = {"review", "review_issue"}
 BOT_MARK = "🤖 Relay"
+INLINE_PREFIX = f"{BOT_MARK} · revisión automática: "
+
+
+def without_inline_prefix(body):
+    """Quita solo el prefijo exacto que agrega el servidor; el resto del texto queda intacto."""
+    return body[len(INLINE_PREFIX):] if isinstance(body, str) and body.startswith(INLINE_PREFIX) else body
 
 
 def _target(task, payload, kind):
@@ -98,9 +104,9 @@ def _comments(value, *, marked=False):
                 or row["side"] not in {"LEFT", "RIGHT"}):
             raise ValueError("Ubicación inline inválida")
         body = _text(row["body"], "comentario", 4000, content=True)
-        if marked and not body.startswith(BOT_MARK):
+        if marked and not body.startswith(INLINE_PREFIX):
             # Cada comentario inline se ve suelto en el diff: debe decir que lo escribió Relay.
-            body = f"{BOT_MARK} · revisión automática: {body}"
+            body = INLINE_PREFIX + body
         result.append({"path": path, "line": row["line"], "side": row["side"], "body": body})
     if len({digest(row) for row in result}) != len(result):
         raise ValueError("Comentarios inline duplicados")

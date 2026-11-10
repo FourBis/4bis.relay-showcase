@@ -519,3 +519,12 @@ async def test_stale_origin_of_a_renamed_repository_resolves_by_id(github_reader
     assert await external_pr.resolves_to("OldOwner/relay-demo", 7, "AuroraDemo/relay-demo") is False
     assert await external_pr.resolves_to(None, 42, "AuroraDemo/relay-demo") is False
     assert await external_pr.resolves_to("OldOwner/relay-demo", None, "AuroraDemo/relay-demo") is False
+
+
+async def test_preview_rejects_a_project_origin_that_changes_while_reading(github_reader, tmp_path, monkeypatch):
+    payloads, _ = github_reader
+    preview_payloads(payloads)
+    first = await github.repo_slug(str(tmp_path))
+    monkeypatch.setattr(github, "repo_slug", AsyncMock(side_effect=[first, "Other/private"]))
+    with pytest.raises(external_pr.TaskPRError, match="cambió durante la lectura"):
+        await external_pr.preview({"repo_path": str(tmp_path)}, URL)

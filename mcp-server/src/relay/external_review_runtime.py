@@ -89,7 +89,10 @@ async def _observe(db):
 
 async def _mirror_to_issue(db):
     """Replica en el issue vinculado cada informe ya encolado para el PR (una vez por informe)."""
-    rows = await db.run("SELECT e.* FROM external_review_effects e WHERE e.kind='review' AND NOT EXISTS("
+    # Solo informes cuyo registro tiene issue: los demás no deben ocupar el límite de cada ciclo.
+    rows = await db.run("SELECT e.* FROM external_review_effects e JOIN conversations c ON c.id=e.conversation_id "
+                        "WHERE e.kind='review' AND json_type(CASE WHEN json_valid(c.task_json) THEN c.task_json "
+                        "ELSE '{}' END,'$.issue_link.number')='integer' AND NOT EXISTS("
                         "SELECT 1 FROM external_review_effects i WHERE i.kind='review_issue' "
                         "AND i.conversation_id=e.conversation_id AND i.correlation_id=e.correlation_id "
                         "AND i.head_sha=e.head_sha AND i.actor=e.actor) ORDER BY e.created_at LIMIT 10")
@@ -100,7 +103,7 @@ async def _mirror_to_issue(db):
             if type(issue.get("number")) is not int:
                 continue
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
-            comments = [{**c, "body": c["body"].split(": ", 1)[1] if c["body"].startswith(external_review_publish.BOT_MARK) else c["body"]}
+            comments = [{**c, "body": external_review_publish.without_inline_prefix(c["body"])}
                         for c in payload.get("comments", [])]
             await external_review_publish.enqueue_effect(
                 db, row["conversation_id"], "review_issue", row["correlation_id"], row["head_sha"],

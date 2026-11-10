@@ -72,3 +72,32 @@ async def test_pr_report_is_copied_once_to_the_linked_issue_only(registration): 
     assert payload["target"] == {"kind": "issue", "number": 9}
     # La réplica conserva el hallazgo sin la marca inline: el encabezado ya identifica a Relay.
     assert payload["comments"][0]["body"] == COMMENT["body"]
+
+
+def test_only_the_exact_server_prefix_is_removed():
+    marked = publish.INLINE_PREFIX + "🤖 Relay sin separador"
+    assert publish.without_inline_prefix(marked) == "🤖 Relay sin separador"
+    assert publish.without_inline_prefix("🤖 Relay is great") == "🤖 Relay is great"
+    assert publish.without_inline_prefix("texto: con dos puntos") == "texto: con dos puntos"
+
+
+async def test_reviews_without_issue_never_starve_the_issue_mirror(registration):  # noqa: F811
+    """Los informes antiguos sin issue no deben ocupar el límite de cada ciclo."""
+    db, project, body, _remote = registration
+    task = await external_pr.register(db, project, body, WHO)
+    cid, head = task["id"], task["external_pr"]["head_sha"]
+    await publish.ensure_schema(db)
+    for n in range(12):
+        other = await db.create_conversation(project_slug=project["slug"], requested_by=WHO)
+        await db.run("INSERT INTO external_review_effects (id,conversation_id,kind,correlation_id,head_sha,actor,payload,"
+                     "payload_digest,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (f"old-{n}", other, "review", f"job-{n}", head, WHO, "{}", "d", "2026-01-01", "2026-01-01"))
+    await publish.enqueue_effect(db, cid, "review", "job-new", head,
+                                 {"summary": "Informe", "model": "m",
+                                  "comments": [{**COMMENT, "body": "🤖 Relay sin separador"}]}, WHO)
+    await db.update_conversation_task(cid, issue_link={
+        "repo": task["external_pr"]["repo"], "repo_id": task["external_pr"]["repo_id"], "number": 9, "node_id": "I_9"})
+    await runtime._mirror_to_issue(db)
+    rows = await db.run("SELECT payload FROM external_review_effects WHERE kind='review_issue'")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["payload"])["comments"][0]["body"] == "🤖 Relay sin separador"
