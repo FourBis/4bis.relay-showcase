@@ -10,6 +10,7 @@ import ipaddress
 from urllib.parse import urlsplit
 import json
 import logging
+import secrets
 import time
 from typing import Optional
 
@@ -57,7 +58,8 @@ def _check_auth(request: web.Request) -> bool:
     api_key = _get_api_key()
     if not api_key:
         return True
-    return request.headers.get("X-Relay-Key", "") == api_key
+    return secrets.compare_digest(request.headers.get("X-Relay-Key", "").encode("utf-8", "surrogatepass"),
+                                  api_key.encode("utf-8", "surrogatepass"))
 
 
 def _require_auth(handler):

@@ -63,6 +63,17 @@ def _text(value, label, maximum, *, content=False):
     return context.normalize_text(clean, maximum) if content else clean
 
 
+# "review" va al PR (con comentarios inline); "review_issue" replica el informe en el issue vinculado.
+REVIEW_KINDS = {"review", "review_issue"}
+BOT_MARK = "🤖 Relay"
+INLINE_PREFIX = f"{BOT_MARK} · revisión automática: "
+
+
+def without_inline_prefix(body):
+    """Quita solo el prefijo exacto que agrega el servidor; el resto del texto queda intacto."""
+    return body[len(INLINE_PREFIX):] if isinstance(body, str) and body.startswith(INLINE_PREFIX) else body
+
+
 def _target(task, payload, kind):
     pr = task["external_pr"]
     target = payload.get("target")
@@ -79,7 +90,7 @@ def _target(task, payload, kind):
     return copy.deepcopy(target)
 
 
-def _comments(value):
+def _comments(value, *, marked=False):
     if not isinstance(value, list) or len(value) > 50:
         raise ValueError("La revisión admite como máximo 50 comentarios inline")
     result = []
@@ -92,8 +103,11 @@ def _comments(value):
                 or type(row["line"]) is not int or not 1 <= row["line"] <= 2147483647
                 or row["side"] not in {"LEFT", "RIGHT"}):
             raise ValueError("Ubicación inline inválida")
-        result.append({"path": path, "line": row["line"], "side": row["side"],
-                       "body": _text(row["body"], "comentario", 4000, content=True)})
+        body = _text(row["body"], "comentario", 4000, content=True)
+        if marked and not body.startswith(INLINE_PREFIX):
+            # Cada comentario inline se ve suelto en el diff: debe decir que lo escribió Relay.
+            body = INLINE_PREFIX + body
+        result.append({"path": path, "line": row["line"], "side": row["side"], "body": body})
     if len({digest(row) for row in result}) != len(result):
         raise ValueError("Comentarios inline duplicados")
     return result
@@ -124,7 +138,7 @@ async def _authorized(db, cid, actor, *, expected=None, sha=None, additional_act
 
 def enqueue_in_transaction(conn, cid, kind, correlation_id, head_sha, payload, actor):
     """No network/commit: safe inside add_evidence's existing transaction."""
-    if kind not in {"review", "evidence"} or not isinstance(payload, dict):
+    if kind not in REVIEW_KINDS | {"evidence"} or not isinstance(payload, dict):
         raise ValueError("Tipo de publicación inválido")
     correlation_id = _text(correlation_id, "correlation_id", 128)
     if not isinstance(head_sha, str) or not _SHA.fullmatch(head_sha):
@@ -141,9 +155,11 @@ def enqueue_in_transaction(conn, cid, kind, correlation_id, head_sha, payload, a
     clean = {"summary": _text(payload.get("summary"), "summary", 12000, content=True),
              "target": _target(task, payload, kind),
              "pr": {key: task["external_pr"][key] for key in ("repo", "repo_id", "number", "url")},
-             "comments": _comments(payload.get("comments", [])) if kind == "review" else [],
-             "model": _text(payload.get("model"), "model", 200, content=True) if kind == "review" else ""}
-    if kind == "review":
+             "comments": _comments(payload.get("comments", []), marked=kind == "review") if kind in REVIEW_KINDS else [],
+             "model": _text(payload.get("model"), "model", 200, content=True) if kind in REVIEW_KINDS else ""}
+    if kind == "review_issue" and clean["target"].get("kind") != "issue":
+        raise ValueError("La réplica del informe sólo se publica en el issue vinculado")
+    if kind in REVIEW_KINDS:
         base = payload.get("base_sha", task["external_pr"].get("base_sha"))
         revision = payload.get("context_revision", (task.get("external_review") or {}).get("context_revision", 0))
         if not isinstance(base, str) or not _SHA.fullmatch(base) or type(revision) is not int or revision < 0:
@@ -170,7 +186,7 @@ def _policy(project, actor, kind):
     value = (project.get("defaults_json") or {}).get("external_pr_review_policy")
     if not isinstance(value, dict) or value.get("publication_mode") not in {"personal", "bot"}:
         raise PublicationError("Publicación bloqueada: configura modo explícito e identidad de publicación")
-    if kind == "review" and value.get("enabled") is not True:
+    if kind in REVIEW_KINDS and value.get("enabled") is not True:
         raise PublicationError("La revisión automática está desactivada; no se publica el resultado pendiente")
     expected = value.get("publisher_actor") or actor
     if not isinstance(expected, str) or expected.strip().lower() != actor:
@@ -194,17 +210,24 @@ async def _publisher(db, project, policy):
 
 def _body(event):
     payload, sha = event["payload"], event["head_sha"]
-    intro = (f"Revisión automática de Relay · modelo `{payload['model']}`.\n"
+    login = (event.get("publisher") or {}).get("login")
+    account = (f"Publicado automáticamente por Relay con la cuenta de @{login}; no lo escribió esa persona.\n"
+               if login and (event.get("publisher") or {}).get("mode") == "personal" else "")
+    intro = (f"## {BOT_MARK} · revisión automática\n{account}Modelo `{payload['model']}`. "
              "Análisis estático: Relay no ejecutó pruebas ni aprueba merge o despliegue.\n"
              "Comentario informativo: no constituye aprobación humana independiente."
-             if event["kind"] == "review" else "Evidencia declarada en Relay; no constituye una aprobación humana.")
+             if event["kind"] in REVIEW_KINDS else "Evidencia declarada en Relay; no constituye una aprobación humana.")
     base = f"\nBase: `{payload['base_sha']}`" if payload.get("base_sha") else ""
-    return (f"{intro}\n\nPR: {payload['pr']['url']}\nSHA: `{sha}`{base}\n\n{payload['summary']}\n\n"
+    findings = ""
+    if event["kind"] == "review_issue":
+        rows = [f"- `{row['path']}:{row['line']}` — {row['body']}" for row in payload.get("comments", [])]
+        findings = ("\n\n### Hallazgos en el PR\n" + "\n".join(rows)) if rows else "\n\nSin hallazgos en el diff revisado."
+    return (f"{intro}\n\nPR: {payload['pr']['url']}\nSHA: `{sha}`{base}\n\n{payload['summary']}{findings}\n\n"
             f"<!-- relay-external-effect:{event['id']} -->")
 
 
 def _review_context(task, event):
-    if event["kind"] != "review":
+    if event["kind"] not in REVIEW_KINDS:
         return
     projection = task.get("external_review") or {}
     current_base = task["external_pr"].get("base_sha")
@@ -220,7 +243,7 @@ def _review_context(task, event):
 
 
 def _review_inputs(project, task, event):
-    if event["kind"] != "review":
+    if event["kind"] not in REVIEW_KINDS:
         return
     projection = task.get("external_review") or {}
     job_id = projection.get("job_id", "")
@@ -230,7 +253,7 @@ def _review_inputs(project, task, event):
 
 
 async def _review_job(db, event):
-    if event["kind"] != "review" or not await reviews._exists(db):
+    if event["kind"] not in REVIEW_KINDS or not await reviews._exists(db):
         return
     rows = await db.run("SELECT * FROM external_review_jobs WHERE conversation_id=? AND head_sha=? AND requested_by=?",
                         (event["conversation_id"], event["head_sha"], event["actor"]))
@@ -267,7 +290,7 @@ def _admission_tx(db, conn, event, *, actor, project, publisher, policy, account
     _target(task, event["payload"], event["kind"])
     _review_context(task, event)
     _review_inputs(current, task, event)
-    if event["kind"] == "review" and conn.execute(
+    if event["kind"] in REVIEW_KINDS and conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_review_jobs'").fetchone():
         rows = conn.execute("SELECT * FROM external_review_jobs WHERE conversation_id=? AND head_sha=? AND requested_by=?",
                             (event["conversation_id"], event["head_sha"], event["actor"])).fetchall()
@@ -329,7 +352,8 @@ async def _guard_remote(db, project, task, event):
     pr, actor, sha = event["payload"]["pr"], event["actor"], event["head_sha"]
     with user_accounts.bind_actor(db, actor):
         configured = await github.repo_slug(project.get("repo_path") or "", refresh=True)
-    if not configured or configured.casefold() != pr["repo"].casefold():
+        same = await external_pr.resolves_to(configured, pr.get("repo_id"), pr["repo"])
+    if not same:
         raise PublicationError("Cambió el repositorio autorizado del proyecto")
     repo = await _api(db, actor, "GET", f"repos/{pr['repo']}")
     if not isinstance(repo, dict) or repo.get("id") != pr["repo_id"] or str(repo.get("full_name", "")).casefold() != pr["repo"].casefold():
@@ -342,7 +366,7 @@ async def _guard_remote(db, project, task, event):
         raise PublicationError("La PR cambió o está cerrada; no se publica para otro head")
     _review_context(task, event)
     _review_inputs(project, task, event)
-    if event["kind"] == "review":
+    if event["kind"] in REVIEW_KINDS:
         expected_base = event["payload"].get("base_sha") or (task.get("external_review") or {}).get("base_sha")
         if remote.get("base", {}).get("sha") != expected_base:
             raise StaleContext("GitHub cambió la base; no se publica la revisión del contexto anterior")

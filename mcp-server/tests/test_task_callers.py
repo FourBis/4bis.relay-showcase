@@ -28,6 +28,12 @@ async def _managed_db(tmp_path: Path) -> tuple[Database, str]:
     return db, cid
 
 
+async def _set_actor(db: Database, email: str, *, role="member", grants=(), enabled=True):
+    """Keep the test ACL cache and the SQLite ACL row in sync."""
+    await db.set_user_role(email, role, enabled=enabled, project_slugs=list(grants))
+    identity.load_roles(await db.list_users())
+
+
 @pytest.mark.parametrize("mode", ["read_only", "write"])
 @pytest.mark.parametrize("stop", [None, "paused", "cancelled"])
 async def test_pregunta_detiene_cierre_y_publicacion_de_tarea(tmp_path, monkeypatch, mode, stop):
@@ -144,14 +150,17 @@ async def test_cancel_pending_managed_event_pauses_without_model(tmp_path, monke
 
 async def test_member_cannot_pause_write_task_through_legacy_cancel(tmp_path, monkeypatch):
     db, cid = await _managed_db(tmp_path)
+    actor = "outsider@example.test"
+    await _set_actor(db, actor)
     event = await db.enqueue_conversation_event(
         cid, "request:owner", "run", {"user": "trabaja", "role": "owner"})
     client = await _event_client(db, monkeypatch)
-    monkeypatch.setattr(identity, "role_of", lambda _request: "member")
     try:
-        response = await client.post(f"/experts/cancel/{event['chat_id']}")
+        before = await db.get_conversation_task(cid)
+        response = await client.post(f"/experts/cancel/{event['chat_id']}",
+                                     headers={"X-Test-Actor": actor})
         assert response.status == 403
-        assert (await db.get_conversation_task(cid))["state"] == "ready"
+        assert await db.get_conversation_task(cid) == before
         assert (await db.conversation_event_for_chat(event["chat_id"]))["state"] == "pending"
     finally:
         await client.close()
@@ -172,11 +181,10 @@ async def test_read_only_managed_event_controls_follow_creator(
         project_slug="demo", requested_by="creator@example.test")
     await db.update_conversation_task(cid, mode="read_only", state="ready",
                                       requested_by="creator@example.test")
+    await _set_actor(db, "creator@example.test")
+    await _set_actor(db, "other@example.test")
     original = await db.enqueue_conversation_event(
         cid, "request:readonly", "run", {"user": "solo leer", "role": "member"})
-    monkeypatch.setattr(identity, "_roles", {
-        "creator@example.test": "member", "other@example.test": "member"})
-    monkeypatch.setattr(identity, "_project_grants", {})
     client = await _event_client(db, monkeypatch)
     try:
         before_events = await db.list_conversation_events(cid)
@@ -206,20 +214,22 @@ async def test_read_only_managed_event_controls_follow_creator(
         await client.close()
 
 
-async def test_assigned_writer_can_cancel_managed_write_event(tmp_path, monkeypatch):
+async def test_project_writer_cannot_control_another_members_managed_write_event(tmp_path, monkeypatch):
     db, cid = await _managed_db(tmp_path)
+    await _set_actor(db, "writer@example.test", grants=["demo"])
     event = await db.enqueue_conversation_event(
         cid, "request:writer", "run", {"user": "trabaja", "role": "owner"})
-    monkeypatch.setattr(identity, "_roles", {"writer@example.test": "member"})
-    monkeypatch.setattr(identity, "_project_grants", {"writer@example.test": ["demo"]})
     client = await _event_client(db, monkeypatch)
     try:
+        before_events = await db.list_conversation_events(cid)
+        before_task = await db.get_conversation_task(cid)
         response = await client.post(
             f"/experts/cancel/{event['chat_id']}",
             headers={"X-Test-Actor": "writer@example.test"})
-        assert response.status == 200
-        assert (await db.conversation_event_for_chat(event["chat_id"]))["state"] == "cancelled"
-        assert (await db.get_conversation_task(cid))["state"] == "paused"
+        assert response.status == 403
+        assert await db.list_conversation_events(cid) == before_events
+        assert await db.get_conversation_task(cid) == before_task
+        assert (await db.conversation_event_for_chat(event["chat_id"]))["state"] == "pending"
     finally:
         await client.close()
 
@@ -253,20 +263,19 @@ async def test_unrelated_member_cannot_cancel_standalone_chat(tmp_path, monkeypa
         await client.close()
 
 
-@pytest.mark.parametrize(("actor", "requested_by", "grants"), [
-    ("creator@example.test", "creator@example.test", {}),
-    ("writer@example.test", "owner@example.test", {"writer@example.test": ["demo"]}),
+@pytest.mark.parametrize(("actor", "requested_by", "grants", "expected"), [
+    ("creator@example.test", "creator@example.test", [], 200),
+    ("writer@example.test", "owner@example.test", ["demo"], 403),
 ])
-async def test_standalone_chat_cancel_allows_creator_or_project_writer(
-        tmp_path, monkeypatch, actor, requested_by, grants):
+async def test_standalone_chat_cancel_requires_its_creator_or_owner(
+        tmp_path, monkeypatch, actor, requested_by, grants, expected):
     db = Database(path=tmp_path / "relay.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
     chat_id = await db.create_chat(
         project_slug="demo", source="test", author="owner", target="demo",
         requested_by=requested_by)
-    monkeypatch.setattr(identity, "_roles", {actor: "member"})
-    monkeypatch.setattr(identity, "_project_grants", grants)
+    await _set_actor(db, actor, grants=grants)
     client = await _event_client(db, monkeypatch)
 
     async def wait_for_cancel():
@@ -280,9 +289,13 @@ async def test_standalone_chat_cancel_allows_creator_or_project_writer(
     try:
         response = await client.post(
             f"/experts/cancel/{chat_id}", headers={"X-Test-Actor": actor})
-        assert response.status == 200
-        assert (await db.get_chat(chat_id))["status"] == "cancelled"
-        assert not worker.done() or worker.cancelling()
+        assert response.status == expected
+        if expected == 200:
+            assert (await db.get_chat(chat_id))["status"] == "cancelled"
+            assert not worker.done() or worker.cancelling()
+        else:
+            assert (await db.get_chat(chat_id))["status"] == "running"
+            assert not worker.done() and not worker.cancelling()
     finally:
         if not worker.done():
             worker.cancel()
@@ -482,7 +495,7 @@ async def test_unrelated_member_cannot_cancel_standalone_zombie(tmp_path, monkey
                  id="mixed-prefix-unauthorized"),
     pytest.param(identity.OWNER, {}, {}, 409, id="owner"),
     pytest.param("writer@example.test", {"writer@example.test": "member"},
-                 {"writer@example.test": ["demo"]}, 409, id="project-writer"),
+                 {"writer@example.test": ["demo"]}, 403, id="mixed-project-writer"),
 ])
 async def test_ambiguous_cancel_prefix_never_mutates(
         tmp_path, monkeypatch, actor, roles, grants, expected):

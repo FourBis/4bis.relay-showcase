@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import re
+from collections import deque
 from pydantic_ai.messages import ToolReturnPart
 from typing import Any, Optional
 from . import expert_history

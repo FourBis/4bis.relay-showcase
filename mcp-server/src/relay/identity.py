@@ -215,11 +215,13 @@ def can_control_task(request: web.Request, project, state, conversation) -> bool
             and creator == requester(request)))
 
 
-async def can_control_graph(request: web.Request, db, graph: dict) -> bool:
+async def can_control_graph(request: web.Request, db, graph: dict, *, for_resume=False) -> bool:
     from . import conversation_access
     cid = graph.get("conversation_id")
     if cid:
-        return (await conversation_access.get_access(db, cid, requester(request)))["can_control"]
+        access = await conversation_access.get_access(db, cid, requester(request))
+        # El control histórico permite cancelar; reanudar exige proyecto activo.
+        return access["can_control"] and (not for_resume or access["can_send"])
     conversation = await db.get_conversation(cid) if cid else None
     state = await db.get_conversation_task(cid) if cid else {}
     project = await db.get_project(
@@ -316,6 +318,7 @@ MEMBER_ALLOWED = frozenset({
     ("POST", "/conversations/{id}/task"),
     ("POST", "/projects/{slug}/external-pr"),
     ("GET", "/projects/{slug}/external-pr"),
+    ("GET", "/projects/{slug}/external-pr/preview"),
     ("GET", "/admin/api/external-review/notifications"),
     ("POST", "/admin/api/external-review/notifications/{notification_id}/read"),
     ("POST", "/conversations/{id}/external-pr"),

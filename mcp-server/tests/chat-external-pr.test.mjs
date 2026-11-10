@@ -8,7 +8,7 @@ const reviewSource = readFileSync(new URL("../admin_static/static/chat-external-
 Object.assign(globalThis,await import("data:text/javascript,"+encodeURIComponent(reviewSource)));
 const source = readFileSync(new URL("../admin_static/static/chat-external-pr.js",import.meta.url),"utf8")
   .replace(/^import .*$/gm,"");
-const {externalStateLabel,externalPanelHtml,externalEvidencePayload,openExternalRegistration} = await import("data:text/javascript,"+encodeURIComponent(source));
+const {externalStateLabel,externalPanelHtml,externalEvidencePayload,openExternalRegistration,prQueryKind,externalPreviewHtml} = await import("data:text/javascript,"+encodeURIComponent(source));
 assert.equal(externalStateLabel("ready"),"Apto en Relay");
 assert.equal(externalStateLabel("missing_evidence"),"Falta evidencia");
 assert.equal(externalStateLabel("review_pending"),"Revisión pendiente");
@@ -84,6 +84,29 @@ globalThis.modalLoad = async ({loader,render}) => {
 await openExternalRegistration({projectSlug:'eligible'});
 assert.deepEqual(catalogCalls, ['projects?capability=external_pr']);
 console.log('ok - registration uses the server eligibility catalog without rebuilding grants');
+
+assert.deepEqual(prQueryKind(" https://github.com/team/repo/pull/12/files "),{kind:"url",url:"https://github.com/team/repo/pull/12"});
+assert.deepEqual(prQueryKind("https://github.com/team/repo/pull/12?x=1#c"),{kind:"url",url:"https://github.com/team/repo/pull/12"});
+assert.deepEqual(prQueryKind("https://github.com/team/repo/pull/12/files?diff=split#r1"),{kind:"url",url:"https://github.com/team/repo/pull/12"});
+assert.deepEqual(prQueryKind("https://github.com/team/repo/pull/12/commits/abc123"),{kind:"url",url:"https://github.com/team/repo/pull/12"});
+assert.deepEqual(prQueryKind("#42"),{kind:"number",number:42});
+assert.deepEqual(prQueryKind("42"),{kind:"number",number:42});
+assert.deepEqual(prQueryKind("arreglo login"),{kind:"text",query:"arreglo login"});
+assert.deepEqual(prQueryKind("  "),{kind:"empty"});
+const preview = {repo:"team/repo",number:12,url:"https://github.com/team/repo/pull/12",title:"<b>Login</b>",body:"Hace <script>x</script>",
+  state:"OPEN",draft:false,author:"dev",head_ref:"feature/login",base_ref:"develop",head_sha:"abcdef1234",additions:5,deletions:1,changed_files:2,
+  commits_total:3,commits:[{sha:"1111111aaaa",headline:"feat: <i>uno</i>",author:"dev",date:"2026-11-01T10:00:00Z"},{sha:"2222222bbbb",headline:"fix: dos",author:"dev"}]};
+let card = externalPreviewHtml(preview);
+assert.doesNotMatch(card,/<script>|<b>Login|<i>uno/);
+assert.match(card,/&lt;b&gt;Login&lt;\/b&gt;/);
+assert.match(card,/1111111/); assert.match(card,/fix: dos/);
+assert.match(card,/Se muestran los primeros 2/);
+assert.match(card,/href="https:\/\/github.com\/team\/repo\/pull\/12"/);
+assert.match(card,/diff completo del último commit/);
+card = externalPreviewHtml({...preview,body:"",draft:true,registered:true,commits_total:2,url:"javascript:alert(1)"});
+assert.match(card,/no tiene descripción/); assert.match(card,/Borrador/); assert.match(card,/Ya registrado/);
+assert.doesNotMatch(card,/javascript:|Se muestran los primeros/);
+console.log("ok - quick PR form parses pasted/searched input and renders an escaped GitHub preview with commits");
 
 const chatSource = readFileSync(new URL("../admin_static/static/tab-chats.js",import.meta.url),"utf8").replace(/^import .*$/gm,"");
 const {conversationTaskMode,externalConversationTitle} = await import("data:text/javascript,"+encodeURIComponent(chatSource));

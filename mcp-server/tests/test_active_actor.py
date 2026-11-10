@@ -65,7 +65,8 @@ async def test_graph_answer_checks_actor_before_persisting(monkeypatch, active_a
     monkeypatch.setattr(server_common, "_check_auth", lambda request: True)
     monkeypatch.setattr(identity, "requester", lambda request: "alex@example.test")
     monkeypatch.setattr(identity, "can_control_graph", AsyncMock(return_value=True))
-    request = SimpleNamespace(app={DB_KEY: db, GRAFOS_KEY: {"g1": SimpleNamespace(relay_actor=active_actor)}},
+    worker = SimpleNamespace(relay_actor=active_actor, done=lambda: False, cancelling=lambda: False)
+    request = SimpleNamespace(app={DB_KEY: db, GRAFOS_KEY: {"g1": worker}},
         match_info={"q_id": "q1"}, json=AsyncMock(return_value={"choice": "retry"}))
     response = await server_graph_routes.expert_question_answer(request)
     if active_actor == "alex@example.test":

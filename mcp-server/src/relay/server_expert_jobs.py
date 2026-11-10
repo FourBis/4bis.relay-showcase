@@ -10,9 +10,8 @@ from typing import Optional
 import httpx
 from aiohttp import web
 
-from .server_common import _bg_tasks, logger
+from .server_common import logger
 from . import attachments as attachments_mod
-from . import coordination
 from . import experts
 from . import finalization
 from . import logctx
@@ -26,20 +25,6 @@ from .notify import NotifyClient
 from .server_questions import _ATT_ID_RE
 from .server_night import _grafo_en_vez_de_proponer
 # ---------- expertos (ADR-012 + ADR-024: async, el resultado va por /notify) ----------
-
-# Tasks fire-and-forget (compactación, sweeper spawns): guardamos la
-# referencia para que el GC no las mate a mitad de camino.
-_bg_tasks: set[asyncio.Task] = set()
-
-
-def _spawn_bg(coro, *, hold_workspace: bool = True) -> asyncio.Task:
-    task = asyncio.create_task(coro)
-    if hold_workspace:
-        coordination.hold_current(task)
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
-    return task
-
 
 # Nota (2026-08-10): acá vivía `_maybe_plan_large_prompt` (Opción 4), un
 # segundo planificador que detectaba prompts grandes con un regex y

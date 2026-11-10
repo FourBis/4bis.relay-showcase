@@ -187,6 +187,7 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
     app.router.add_post("/conversations/{id}/task", task_action)
     app.router.add_post("/projects/{slug}/external-pr", server_external_pr_routes.register)
     app.router.add_get("/projects/{slug}/external-pr", server_external_pr_routes.listing)
+    app.router.add_get("/projects/{slug}/external-pr/preview", server_external_pr_routes.preview)
     app.router.add_post("/conversations/{id}/external-pr", server_external_pr_routes.action)
     from . import server_external_review_routes as external_reviews
     app.router.add_get("/conversations/{id}/external-pr/images", external_reviews.image_list)

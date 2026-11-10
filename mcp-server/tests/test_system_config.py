@@ -57,6 +57,22 @@ async def cli():
 # ---------- GET/PUT /admin/api/config ----------
 
 
+@pytest.mark.parametrize("configured, supplied, expected", [
+    ("", "", True),
+    ("synthetic-key", "", False),
+    ("synthetic-key", "synthetic-key", True),
+    ("synthetic-key", "wrong-key", False),
+    ("synthetic-key", "clave-ñ", False),
+    ("synthetic-key", "\udcff", False),
+    ("clave-ñ", "clave-ñ", True),
+])
+def test_api_key_comparison(monkeypatch, configured, supplied, expected):
+    from relay import server_common
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: configured)
+    request = mock.Mock(headers={"X-Relay-Key": supplied})
+    assert server_common._check_auth(request) is expected
+
+
 async def test_config_get_defaults(cli):
     r = await cli.get("/admin/api/config")
     assert r.status == 200

@@ -26,6 +26,8 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
@@ -181,7 +183,8 @@ class TestUnEventoPorToolCall(unittest.IsolatedAsyncioTestCase):
                                        "native_shell": False,
                                        "native_files": False},
                      "native_tools": []},
-                    "hacé las dos cosas", db=object(),
+                    "hacé las dos cosas",
+                    db=SimpleNamespace(get_model=AsyncMock(return_value=None)),
                     on_progress=_on_progress)
 
         pasos = [e for e in vistos if e.get("phase") == "tool_call"]

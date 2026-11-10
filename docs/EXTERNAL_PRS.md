@@ -9,8 +9,8 @@ Puedes registrar en **Chat → Registrar PR externo** un PR creado con otra herr
 ## Recorrido
 
 1. Conecta tu cuenta personal de GitHub en **Mi cuenta**. Necesitas permiso de escritura vigente sobre el proyecto.
-2. Elige un proyecto del catálogo autorizado, pega la URL canónica del PR y describe el objetivo. El título de la tarea es independiente del título de GitHub.
-3. Declara el riesgo y, opcionalmente, la herramienta utilizada y una issue del mismo repositorio. La herramienta es una declaración; el autor del PR se verifica en GitHub.
+2. Elige un proyecto del catálogo autorizado. El formulario tiene un solo campo: pega la URL del PR o búscalo por `#número` o por palabras del título. Al elegirlo ves una ficha leída de GitHub con título, descripción, ramas, totales y commits; no escribes nada a mano. Si el PR no tiene descripción, la ficha lo advierte, porque es el contexto de la revisión.
+3. Confirma con **Registrar PR**. El título del registro es el del PR y se aplica la política de riesgo `medium`. Si el PR ya está registrado en ese proyecto, el botón abre su ficha sin volver a registrarlo. La API sigue aceptando `title`, `risk`, `issue` y `actor_label` opcionales; la herramienta es una declaración y el autor del PR se verifica en GitHub.
 4. En **Declarar evidencia**, describe qué probaste y el resultado para el head SHA mostrado. La declaración conserva tu identidad y ese commit.
 5. Usa **Actualizar desde GitHub** para volver a verificar estado, head/base, checks y revisiones. El panel conserva las lecturas y declaraciones anteriores.
 
@@ -27,7 +27,7 @@ Si falla una solicitud, el formulario conserva sus datos. Reintentar la misma de
 
 Un head nuevo vuelve histórica la evidencia del commit anterior. Una revisión revocada, una política retirada o un fallo remoto también pueden retirar la aptitud. La vigencia técnica de la lectura es de cinco minutos. Registrar una PR por sí solo no habilita observación automática.
 
-Admin configura la política explícita por riesgo en `projects.defaults_json.external_pr_policy`, mediante la edición del proyecto documentada en la [API](API.md). Sin política válida no se presenta el registro como apto. Registrar no concede permisos de publicación, integración ni despliegue.
+Admin configura la política explícita por riesgo en `projects.defaults_json.external_pr_policy`, mediante la edición del proyecto documentada en la [API](API.md). Sin política válida no se presenta el registro como apto. Como el formulario rápido registra con el riesgo `medium`, esa es la entrada que conviene configurar primero. Registrar no concede permisos de publicación, integración ni despliegue.
 
 El registro externo no ejecuta cambios ni prepara un diff de workspace local.
 El código se modifica con la herramienta elegida y se revisa en GitHub. Un PR

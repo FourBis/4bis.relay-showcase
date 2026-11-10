@@ -166,6 +166,8 @@ async def test_agent_reads_durable_result_while_markdown_export_is_pending(
     monkeypatch.setattr("relay.server_conversation_routes.git_flow.is_git_repo",
                         AsyncMock(return_value=False))
     monkeypatch.setattr("relay.server_expert_routes._run_expert_bg", AsyncMock())
+    # Este caso inyecta el resultado durable; no competir con otra admisión.
+    monkeypatch.setattr(task_service, "start_pending", Mock())
 
     created = await client.post("/conversations", json={
         "project": "demo", "author": "spoof@example.test"})
@@ -190,6 +192,7 @@ async def test_agent_reads_durable_result_while_markdown_export_is_pending(
         db, result_ref["id"], artifact=artifact, status="ok",
         model="test", phase_at_end="finished")
 
+    assert (await db.get_chat(result_ref["id"]))["status"] == "ok"
     client.server.app[PROGRESS_KEY].clear()
     metadata = await (await client.get(f"/chats/{result_ref['id']}")).json()
     assert metadata["status"] == "ok" and not metadata.get("md_path")
@@ -269,6 +272,7 @@ async def test_agent_cannot_append_to_another_members_read_only_task(auth, monke
     start = Mock()
     monkeypatch.setattr(task_service, "start_pending", start)
     before = await db.get_conversation(cid)
+    before_task = await db.get_conversation_task(cid)
     body = {"target": "demo", "user": "nuevo trabajo", "request_id": "intruder"}
     if lookup == "explicit":
         body["conversation"] = cid
@@ -277,9 +281,11 @@ async def test_agent_cannot_append_to_another_members_read_only_task(auth, monke
     else:
         monkeypatch.setattr("relay.git_flow.is_git_repo", AsyncMock(return_value=True))
     response = await client.post("/experts/run", json=body)
-    assert response.status == 403, await response.text()
+    # Hide whether another user's conversation exists at this boundary.
+    assert response.status == 404, await response.text()
     start.assert_not_called()
     assert await db.get_conversation(cid) == before
+    assert await db.get_conversation_task(cid) == before_task
     assert await db.list_conversation_events(cid) == []
 
 

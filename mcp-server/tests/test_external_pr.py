@@ -45,7 +45,11 @@ async def registration(tmp_path, monkeypatch):
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path / "repo"),
                              "defaults_json": {"external_pr_policy": POLICY}})
+    await db.set_user_role(WHO, "member", project_slugs=["demo"])
     project = await db.get_project("demo")
+    monkeypatch.setattr(identity, "_roles", {WHO: "member"})
+    monkeypatch.setattr(identity, "_disabled", set())
+    monkeypatch.setattr(identity, "_project_grants", {WHO: ["demo"]})
     remote = remote_snapshot()
     monkeypatch.setattr(external_pr, "read_snapshot", AsyncMock(side_effect=lambda *_, **__: copy.deepcopy(remote)))
     monkeypatch.setattr(external_pr, "actor_identity", AsyncMock(side_effect=lambda who: {**ACTOR, "relay_actor": who}))
@@ -336,6 +340,8 @@ async def test_routes_enforce_project_permission_and_authenticated_attribution(
     monkeypatch.setattr(identity, "_roles", {WHO: role})
     monkeypatch.setattr(identity, "_disabled", set() if enabled else {WHO})
     monkeypatch.setattr(identity, "_project_grants", {WHO: ["demo"] if granted else []})
+    await db.set_user_role(WHO, role,
+                           project_slugs=["demo"] if granted and role != "finance" else [], enabled=enabled)
     monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
     @web.middleware
     async def test_identity(request, handler):
@@ -356,6 +362,7 @@ async def test_routes_enforce_project_permission_and_authenticated_attribution(
             assert result["requested_by"] == WHO
             cid = result["id"]
             monkeypatch.setattr(identity, "_project_grants", {WHO: []})
+            await db.set_user_role(WHO, role, project_slugs=[])
             denied = await client.post(f"/conversations/{cid}/external-pr", json={"action": "refresh"})
             assert denied.status == 403
         else:
@@ -387,6 +394,137 @@ async def test_task_get_is_local_and_denied_after_project_grant_revocation(regis
         assert response.status == 200
         assert (await response.json())["mode"] == "external_pr"
         monkeypatch.setattr(identity, "_project_grants", {WHO: []})
+        await db.set_user_role(WHO, "member", project_slugs=[])
         assert (await client.get(f"/conversations/{task['id']}/task")).status == 403
     finally:
         await client.close()
+
+
+async def test_quick_registration_takes_title_from_github_and_default_policy(registration):
+    """The quick form sends only the URL: title comes from the PR and risk uses DEFAULT_RISK."""
+    db, project, _, _ = registration
+    project = {**project, "defaults_json": {"external_pr_policy": {"medium": POLICY["low"]}}}
+    task = await external_pr.register(db, project, {"url": URL}, WHO)
+    assert task["title"] == "External change" and task["risk"] == external_pr.DEFAULT_RISK
+    assert task["policy"] == POLICY["low"]
+    again = await external_pr.register(db, project, {"url": URL}, WHO)
+    assert again["id"] == task["id"] and again["title"] == task["title"]
+    assert len(await db.run("SELECT id FROM conversations")) == 1
+
+
+async def test_quick_registration_keeps_existing_scope_when_fields_are_omitted(registration):
+    db, project, body, _ = registration
+    task = await register(registration)
+    again = await external_pr.register(db, project, {"url": URL, "actor_label": body["actor_label"]}, WHO)
+    assert again["id"] == task["id"] and again["risk"] == "low" and again["title"] == "External change"
+
+
+def preview_payloads(payloads):
+    payloads["repos/AuroraDemo/relay-demo/pulls/17"].update(body="Qué hace este cambio", additions=10, deletions=2,
+                                                   changed_files=3, commits=2)
+    payloads["repos/AuroraDemo/relay-demo/pulls/17/commits?per_page=100"] = [
+        {"sha": "1" * 40, "author": {"login": "author"},
+         "commit": {"message": "feat: primer paso\n\ndetalle", "author": {"name": "A", "date": "2026-11-01T10:00:00Z"}}},
+        {"sha": "2" * 40, "author": None,
+         "commit": {"message": "fix: segundo", "author": {"name": "Sin cuenta", "date": "2026-11-02T10:00:00Z"}}},
+    ]
+    return payloads
+
+
+async def test_preview_reads_description_and_commits_without_storing(github_reader, tmp_path):
+    payloads, calls = github_reader
+    preview_payloads(payloads)
+    result = await external_pr.preview({"repo_path": str(tmp_path)}, URL)
+    assert result["repo"] == "AuroraDemo/relay-demo" and result["title"] == payloads["repos/AuroraDemo/relay-demo/pulls/17"]["title"]
+    assert result["body"] == "Qué hace este cambio" and result["commits_total"] == 2
+    assert [c["headline"] for c in result["commits"]] == ["feat: primer paso", "fix: segundo"]
+    assert result["commits"][0]["author"] == "author" and result["commits"][1]["author"] == "Sin cuenta"
+    assert result["registration_id"] == external_pr.registration_id(42, 17)
+    assert all("check-runs" not in endpoint and "reviews" not in endpoint for endpoint in calls)
+
+
+@pytest.mark.parametrize("change", ["other_repo", "fork"])
+async def test_preview_respects_the_project_repository(github_reader, tmp_path, change):
+    payloads, calls = github_reader
+    preview_payloads(payloads)
+    url = URL
+    if change == "other_repo":
+        url = "https://github.com/Other/private/pull/17"
+    else:
+        payloads["repos/AuroraDemo/relay-demo/pulls/17"]["head"]["repo"] = {"id": 77, "full_name": "someone/demo"}
+    with pytest.raises(ValueError):
+        await external_pr.preview({"repo_path": str(tmp_path)}, url)
+    assert not any(endpoint.startswith("repos/Other/") for endpoint in calls)
+    assert "repos/AuroraDemo/relay-demo/pulls/17/commits?per_page=100" not in calls
+
+
+@pytest.mark.parametrize("granted,expected", [(True, 200), (False, 403)])
+async def test_preview_route_requires_project_access_and_never_stores(registration, monkeypatch, granted, expected):
+    from relay import server_common, server_external_pr_routes
+    db, _, _, _ = registration
+    monkeypatch.setattr(identity, "_project_grants", {WHO: ["demo"] if granted else []})
+    await db.set_user_role(WHO, "member", project_slugs=["demo"] if granted else [])
+    monkeypatch.setattr(server_common, "_get_api_key", lambda: "")
+    seen = {"id": 42, "number": 17}
+    monkeypatch.setattr(external_pr, "preview", AsyncMock(return_value={
+        "repo": "AuroraDemo/relay-demo", "number": 17, "url": URL, "title": "External change", "commits": [],
+        "registration_id": external_pr.registration_id(seen["id"], seen["number"])}))
+    @web.middleware
+    async def test_identity(request, handler):
+        request[identity.IDENTITY_KEY] = WHO
+        return await handler(request)
+    app = web.Application(middlewares=[test_identity, identity.require_role])
+    app[DB_KEY] = db
+    app.router.add_get("/projects/{slug}/external-pr/preview", server_external_pr_routes.preview)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.get("/projects/demo/external-pr/preview", params={"url": URL})
+        assert response.status == expected
+        if expected == 200:
+            data = await response.json()
+            assert data["registered"] is False and data["title"] == "External change"
+            assert (await client.get("/projects/demo/external-pr/preview", params={"url": URL, "x": "1"})).status == 422
+        else:
+            external_pr.preview.assert_not_called()
+        assert not await db.run("SELECT id FROM conversations")
+    finally:
+        await client.close()
+
+
+async def test_preview_rejects_a_head_that_moves_while_reading_commits(github_reader, tmp_path, monkeypatch):
+    payloads, _ = github_reader
+    preview_payloads(payloads)
+    read = github._gh
+    async def moving(*args, **kwargs):
+        result = await read(*args, **kwargs)
+        if args[-1].endswith("/commits?per_page=100"):
+            payloads["repos/AuroraDemo/relay-demo/pulls/17"] = {**payloads["repos/AuroraDemo/relay-demo/pulls/17"],
+                                                       "head": {**payloads["repos/AuroraDemo/relay-demo/pulls/17"]["head"], "sha": SHA_B}}
+        return result
+    monkeypatch.setattr(github, "_gh", moving)
+    with pytest.raises(external_pr.TaskPRError):
+        await external_pr.preview({"repo_path": str(tmp_path)}, URL)
+
+
+async def test_stale_origin_of_a_renamed_repository_resolves_by_id(github_reader):
+    """A transferred/renamed repo keeps its id; GitHub answers the old name with the canonical one."""
+    payloads, calls = github_reader
+    payloads["repos/OldOwner/relay-demo"] = {"id": 42, "full_name": "AuroraDemo/relay-demo"}
+    payloads["repos/Other/relay-demo"] = {"id": 99, "full_name": "Other/relay-demo"}
+    assert await external_pr.resolves_to("aurorademo/RELAY-DEMO", 42, "AuroraDemo/relay-demo") is True
+    assert calls == []
+    assert await external_pr.resolves_to("OldOwner/relay-demo", 42, "AuroraDemo/relay-demo") is True
+    assert await external_pr.resolves_to("Other/relay-demo", 42, "AuroraDemo/relay-demo") is False
+    assert await external_pr.resolves_to("OldOwner/relay-demo", 7, "AuroraDemo/relay-demo") is False
+    assert await external_pr.resolves_to(None, 42, "AuroraDemo/relay-demo") is False
+    assert await external_pr.resolves_to("OldOwner/relay-demo", None, "AuroraDemo/relay-demo") is False
+
+
+async def test_preview_rejects_a_project_origin_that_changes_while_reading(github_reader, tmp_path, monkeypatch):
+    payloads, _ = github_reader
+    preview_payloads(payloads)
+    first = await github.repo_slug(str(tmp_path))
+    monkeypatch.setattr(github, "repo_slug", AsyncMock(side_effect=[first, "Other/private"]))
+    with pytest.raises(external_pr.TaskPRError, match="cambió durante la lectura"):
+        await external_pr.preview({"repo_path": str(tmp_path)}, URL)

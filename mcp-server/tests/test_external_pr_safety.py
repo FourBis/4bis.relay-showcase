@@ -107,7 +107,12 @@ async def test_execution_routes_reject_external_before_any_workspace_or_bot_effe
         payload = {key: cid if value == "CID" else value for key, value in body.items()}
         response = await client.post(path.replace("CID", cid), json=payload)
         assert response.status == 409
-        assert (await response.json())["error"] == "external_pr_read_only"
+        error = await response.json()
+        if path.endswith("/set-discord-user"):
+            assert error["code"] == "discord_audience_unverified"
+            assert error["linked"] is False
+        else:
+            assert error["error"] == "external_pr_read_only"
         assert await db.get_conversation_task(cid) == state
         assert await db.list_conversation_events(cid) == []
         assert await db.run("SELECT id FROM chats WHERE conversation_id=?", (cid,)) == []
@@ -115,19 +120,25 @@ async def test_execution_routes_reject_external_before_any_workspace_or_bot_effe
         await client.close()
 
 
-@pytest.mark.parametrize("actor,role,grants,allowed", [
-    ("dev@example.test", "member", [], False),
-    ("peer@example.test", "member", ["demo"], True),
-    ("admin@example.test", "owner", [], True),
-    ("owner", "owner", [], True),
+@pytest.mark.parametrize("actor,role,grants,share,scope,listed_allowed,allowed", [
+    ("peer@example.test", "member", [], False, "mine", False, False),
+    ("peer@example.test", "member", ["demo"], True, "shared", True, True),
+    ("admin@example.test", "owner", [], False, "mine", False, True),
+    ("owner", "owner", [], False, "mine", False, True),
 ])
 async def test_external_read_surfaces_require_current_project_grant(
-        tmp_path, monkeypatch, actor, role, grants, allowed):
+        tmp_path, monkeypatch, actor, role, grants, share, scope, listed_allowed, allowed):
     db, cid, _state, _project = await external_task(tmp_path)
+    if actor != "owner":
+        await db.set_user_role(actor, role, project_slugs=grants)
+    if share:
+        await db.run(
+            "INSERT INTO conversation_shares(conversation_id,email,permission,created_by,created_at,updated_at) "
+            "VALUES(?,?, 'read', ?, datetime('now'), datetime('now'))",
+            (cid, actor, "dev@example.test"))
     for attr in ("_roles", "_disabled", "_names", "_project_grants"):
         monkeypatch.setattr(identity, attr, getattr(identity, attr).copy())
-    identity.load_roles([{"email": actor, "role": role, "enabled": True,
-                          "project_slugs": grants}])
+    identity.load_roles(await db.list_users())
     await db.set_conversation_summary(cid, "EXTERNAL_PRIVATE_SUMMARY")
 
     @web.middleware
@@ -148,9 +159,9 @@ async def test_external_read_surfaces_require_current_project_grant(
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
-        listed = await client.get("/conversations?project=demo")
+        listed = await client.get(f"/conversations?project=demo&scope={scope}")
         assert listed.status == 200
-        assert bool((await listed.json())["conversations"]) is allowed
+        assert bool((await listed.json())["conversations"]) is listed_allowed
         searched = await client.get(f"/admin/api/search?q={cid}")
         assert searched.status == 200
         assert bool((await searched.json())["conversations"]) is allowed

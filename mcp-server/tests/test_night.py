@@ -672,19 +672,36 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         account.start()
         self.addCleanup(account.stop)
         self._tmp = tempfile.TemporaryDirectory()
+        self._env_backup = os.environ.get("FOURBIS_DB_PATH")
+        os.environ["FOURBIS_DB_PATH"] = str(Path(self._tmp.name) / "relay.db")
         self.repo = _make_git_repo(Path(self._tmp.name))
         self.project = {"slug": "demo", "repo_path": self.repo,
                         "defaults_json": {"model": "test"}}
 
     async def asyncTearDown(self) -> None:
+        if self._env_backup is None:
+            os.environ.pop("FOURBIS_DB_PATH", None)
+        else:
+            os.environ["FOURBIS_DB_PATH"] = self._env_backup
         self._tmp.cleanup()
 
+    def _in_private_workspace(self, worker, work_fn):
+        async def run(task, prompt):
+            source_repo = self.repo
+            self.repo = worker.repo
+            try:
+                return await work_fn(task, prompt)
+            finally:
+                self.repo = source_repo
+        return run
+
     def _worker(self, work_fn, *, test_cmd=f'{PY} -c "exit(0)"',
-                max_diff=200) -> BranchWorker:
-        cfg = NightConfig(build_cmd=None, test_cmd=test_cmd,
-                          max_diff_lines=max_diff)
-        return BranchWorker(self.project, cfg, run_id="run_test",
-                            work_fn=work_fn)
+                max_diff=200, cfg=None) -> BranchWorker:
+        cfg = cfg or NightConfig(build_cmd=None, test_cmd=test_cmd,
+                                 max_diff_lines=max_diff)
+        worker = BranchWorker(self.project, cfg, run_id="run_test")
+        worker._work_fn = self._in_private_workspace(worker, work_fn)
+        return worker
 
     async def _ready_worker(self, work_fn, **kw) -> BranchWorker:
         """Worker con la rama ÚNICA ya creada (Iter 5.1) — work_one asume
@@ -747,14 +764,14 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         `git reset --hard HEAD~1`. Si la rama queda vacía (caso
         primera tarea falla), cae a reset contra base."""
         async def work(task, prompt):
-            (Path(self.repo) / "src" / "broken.py").write_text(
-                "broken", encoding="utf-8")
+            (Path(self.repo) / "src" / "main.py").write_text(
+                "broken = True\n", encoding="utf-8")
 
         task = NightTask("T-001", "Romper todo.", ["src/main.py"])
         worker = await self._ready_worker(
             work, test_cmd=f'{PY} -c "exit(1)"')
         res = await worker.work_one(task)
-        self.assertEqual(res.status, "rolled_back")
+        self.assertEqual(res.status, "rolled_back", res.error)
         self.assertIn("tests fallaron", res.error)
         # rama ÚNICA persiste (no se borra como antes)
         self.assertIn(worker.branch, _git(self.repo, "branch", "-a"))
@@ -764,7 +781,7 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
             "rollback de la única tarea debe dejar la rama sin commits")
         # tree limpio, archivo no quedó
         self.assertEqual(_git(self.repo, "status", "--porcelain").strip(), "")
-        self.assertFalse((Path(self.repo) / "src" / "broken.py").exists())
+        self.assertEqual((Path(self.repo) / "src" / "main.py").read_text(encoding="utf-8"), "x = 1\n")
 
     async def test_rollback_preserves_good_commits(self) -> None:
         """Si la tarea N falla, las N-1 anteriores (commits buenos)
@@ -775,13 +792,12 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
                           max_diff_lines=200)
 
         async def good_work(task, prompt):
-            (Path(self.repo) / "src" / "good.py").write_text("g", encoding="utf-8")
+            (Path(self.repo) / "src" / "main.py").write_text("good = True\n", encoding="utf-8")
 
         async def bad_work(task, prompt):
-            (Path(self.repo) / "src" / "bad.py").write_text("b", encoding="utf-8")
+            (Path(self.repo) / "src" / "main.py").write_text("bad = True\n", encoding="utf-8")
 
-        worker = BranchWorker(self.project, cfg, run_id="run_test",
-                              work_fn=good_work)
+        worker = self._worker(good_work, cfg=cfg)
         err = await worker.ensure_branch()
         self.assertIsNone(err)
 
@@ -790,7 +806,7 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         r1 = await worker.work_one(t1)
         self.assertEqual(r1.status, "done", r1.error)
         # T-002 falla en el gate: rotamos work_fn + cambiamos el test_cmd
-        worker._work_fn = bad_work
+        worker._work_fn = self._in_private_workspace(worker, bad_work)
         worker.cfg.test_cmd = f'{PY} -c "exit(1)"'
         t2 = NightTask("T-002", "Tarea rota.", ["src/main.py"])
         r2 = await worker.work_one(t2)
@@ -803,16 +819,15 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tarea buena.", log)
         self.assertNotIn("Tarea rota.", log)
         # good.py quedó en la rama; bad.py NO
-        good_in_tree = _git(self.repo, "ls-tree", "-r", worker.branch,
-                            "--name-only")
-        self.assertIn("src/good.py", good_in_tree)
-        self.assertNotIn("src/bad.py", good_in_tree)
-        # Al volver a main: bad.py tampoco quedó (reset limpio)
-        self.assertFalse((Path(self.repo) / "src" / "bad.py").exists())
+        good_content = _git(self.repo, "show", f"{worker.branch}:src/main.py")
+        self.assertEqual(good_content, "good = True\n")
+        self.assertNotIn("bad = True", good_content)
+        # Al volver a main, el checkout fuente permanece intacto.
+        self.assertEqual((Path(self.repo) / "src" / "main.py").read_text(encoding="utf-8"), "x = 1\n")
 
     async def test_tdd_strict_no_test_cmd_no_commit(self) -> None:
         async def work(task, prompt):
-            (Path(self.repo) / "src" / "fix.py").write_text("x", encoding="utf-8")
+            (Path(self.repo) / "src" / "main.py").write_text("x = 2\n", encoding="utf-8")
 
         worker = await self._ready_worker(work, test_cmd=None)
         res = await worker.work_one(
@@ -822,7 +837,7 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
 
     async def test_diff_cap(self) -> None:
         async def work(task, prompt):
-            (Path(self.repo) / "src" / "big.py").write_text(
+            (Path(self.repo) / "src" / "main.py").write_text(
                 "\n".join(f"line{i} = {i}" for i in range(100)),
                 encoding="utf-8")
 
@@ -878,8 +893,7 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
             build_cmd=f'{PY} -c "print({fake_build!r}); import sys; sys.exit(1)"',
             test_cmd=f'{PY} -c "exit(0)"',
             max_diff_lines=200)
-        worker = BranchWorker(self.project, cfg, run_id="run_test",
-                              work_fn=work_capture)
+        worker = self._worker(work_capture, cfg=cfg)
         err = await worker.ensure_branch()
         self.assertIsNone(err)
         await worker.work_one(
@@ -887,6 +901,10 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pre-flight build falló", captured.get("prompt", ""))
 
     async def test_forbidden_paths(self) -> None:
+        (Path(self.repo) / ".env").write_text("BASELINE=1\n", encoding="utf-8")
+        _git(self.repo, "add", ".env")
+        _git(self.repo, "commit", "-m", "fixture: tracked forbidden path")
+
         async def work(task, prompt):
             (Path(self.repo) / ".env").write_text("SECRET=1", encoding="utf-8")
 
@@ -895,7 +913,7 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
             NightTask("T-001", "Tocar secrets.", ["src/main.py"]))
         self.assertEqual(res.status, "rolled_back")
         self.assertIn("prohibidos", res.error)
-        self.assertFalse((Path(self.repo) / ".env").exists())
+        self.assertEqual((Path(self.repo) / ".env").read_text(encoding="utf-8"), "BASELINE=1\n")
 
     async def test_no_changes_rolls_back(self) -> None:
         async def work(task, prompt):
@@ -908,14 +926,12 @@ class TestBranchWorker(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no produjo cambios", res.error)
 
     async def test_dirty_tree_skips(self) -> None:
-        (Path(self.repo) / "dirty.txt").write_text("x", encoding="utf-8")
-
         async def work(task, prompt):
             self.fail("no debería llegar a trabajar")
 
-        # dirty tree es chequeado ANTES de ensure_branch — el worker
-        # lo detecta en work_one (no llega a la rama).
         worker = self._worker(work)
+        self.assertIsNone(await worker.ensure_branch())
+        (Path(worker.repo) / "dirty.txt").write_text("x", encoding="utf-8")
         res = await worker.work_one(
             NightTask("T-001", "Con tree sucio.", ["src/main.py"]))
         self.assertEqual(res.status, "failed")

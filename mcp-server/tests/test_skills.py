@@ -234,7 +234,7 @@ def test_overwrite_skill_rechaza_path_traversal(tmp_path: Path) -> None:
 
     victima = tmp_path.parent / "victima.md"
     victima.write_text("intacto", encoding="utf-8")
-    for raro in ("../victima", "..", "sub/dir", "a\b"):
+    for raro in ("../victima", "..", "sub/dir", r"a\b", "a\b", "a\0", "a:b", "a?b"):
         assert overwrite_skill_sync(tmp_path, raro, "pwned") is None
     assert victima.read_text(encoding="utf-8") == "intacto"
 

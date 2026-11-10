@@ -248,7 +248,7 @@ async def test_sqlite_respects_file_veto_even_when_connection_can_write(db, tmp_
     with patch.object(expert_models, "build_model", return_value=FunctionModel(model)):
         result = await expert_runner.run_expert(project, "query", db=db, model_override="function")
     output = result["content"]
-    assert "vedadas" in output
+    assert "no está disponible con los permisos de este run" in output
     assert "confidential" not in output
 
 
@@ -362,7 +362,7 @@ async def test_conversation_uses_durable_output_and_exposes_outcome(app, db, tmp
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_generated_images_are_persisted_and_notified_without_llm_citation(db, monkeypatch, cancelled):
+async def test_generated_images_are_persisted_without_unverified_discord_push(db, monkeypatch, cancelled):
     from relay import attachments
     aid, path, _ = attachments.store(b"image-fixture", mimetype="image/png")
     cid = await db.create_chat(project_slug="demo", source="test", author="", target="demo")
@@ -378,10 +378,7 @@ async def test_generated_images_are_persisted_and_notified_without_llm_citation(
     await server._run_expert_bg(db=db, notify=notify, running={}, progress={}, chat_id=cid,
         project=await db.get_project("demo"), user="capturar", skills_block="", system_extra="",
         model_override="test", target="demo", source="test", author="", conversation=None)
-    sent = notify.send.call_args.kwargs
-    assert sent["metadata"]["attachments"] == [aid]
-    assert sent["metadata"]["resultado"] == ("sin_verificar" if cancelled else "aprobado")
-    assert f"/attachments/{aid}" in sent["message"]
+    notify.send.assert_not_awaited()
     row = await db.get_chat(cid)
     from pathlib import Path
     assert f"/attachments/{aid}" in Path(row["md_path"]).read_text(encoding="utf-8")
@@ -453,27 +450,33 @@ def request(app, body, path="/experts/run", id=None):
     return req
 
 
-async def test_concurrent_conversation_creation_has_one_winner(app, db):
+async def test_concurrent_idempotent_conversation_creation_has_one_winner(app, db):
     results = await asyncio.gather(*(
-        server.conversations_create(request(app, {"project": "demo"}, "/conversations"))
+        server.conversations_create(request(app, {"project": "demo", "request_id": "same-create"}, "/conversations"))
         for _ in range(2)))
-    assert sorted(r.status for r in results) == [201, 409]
+    assert sorted(r.status for r in results) == [200, 201]
+    assert len({json.loads(r.text)["id"] for r in results}) == 1
     assert len(await db.run("SELECT id FROM conversations WHERE status='open'")) == 1
 
 
-async def test_two_project_aliases_cannot_open_two_branches(app, db):
+async def test_two_project_aliases_keep_distinct_conversation_identities(app, db):
     project = await db.get_project("demo")
     await db.upsert_project({"slug": "alias", "name": "Alias", "repo_path": project["repo_path"]})
-    first = await server.conversations_create(request(app, {"project": "demo"}))
-    second = await server.conversations_create(request(app, {"project": "alias"}))
+    first = await server.conversations_create(request(app, {"project": "demo", "request_id": "same-create"}))
+    second = await server.conversations_create(request(app, {"project": "alias", "request_id": "same-create"}))
     assert first.status == 201
-    assert second.status == 409
+    assert second.status == 201
+    first_id, second_id = json.loads(first.text)["id"], json.loads(second.text)["id"]
+    assert first_id != second_id
+    assert (await db.get_conversation(first_id))["project_slug"] == "demo"
+    assert (await db.get_conversation(second_id))["project_slug"] == "alias"
 
 
 async def test_active_turn_blocks_another_turn_and_close_until_background_finishes(app, db, monkeypatch):
     conv = await db.create_conversation(project_slug="demo")
     done = asyncio.Event()
     monkeypatch.setattr(server_expert_routes, "_run_expert_bg", lambda **kw: done.wait())
+    monkeypatch.setattr(server.git_flow, "is_git_repo", AsyncMock(return_value=True))
     body = {"target": "demo", "user": "revisar", "conversation": conv}
     first = await server.experts_run(request(app, body))
     assert first.status == 202

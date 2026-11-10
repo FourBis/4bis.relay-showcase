@@ -49,6 +49,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay.db import Database
+from relay.identity import OWNER
 from relay.notify import NotifyClient
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -104,7 +105,8 @@ class TestMessagesLen(unittest.IsolatedAsyncioTestCase):
         await self.db.init_schema()
         await self.db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
-        self.conv_id = await self.db.create_conversation(project_slug="demo")
+        self.conv_id = await self.db.create_conversation(
+            project_slug="demo", requested_by=OWNER)
 
     async def asyncTearDown(self) -> None:
         _clear_env()

@@ -256,9 +256,14 @@ class CappedToolset(WrapperToolset):
             else:
                 result = await super().call_tool(name, tool_args, ctx, tool)
         except ModelRetry as e:
-            # The SDK also translates MCP ToolError directly into ModelRetry.
-            # Keep its retry semantics while sanitizing the model-visible copy.
-            raise ModelRetry(redact_text(e.message)) from e
+            # The SDK can translate MCP errors before they reach this wrapper.
+            # Keep the same retry instance/type and synchronize str(e) only if
+            # its diagnostic message contains a recognized credential pattern.
+            safe_message = redact_text(e.message)
+            if safe_message != e.message:
+                e.message = safe_message
+                e.args = (safe_message,)
+            raise e from None
         except McpError as e:
             # Un MCP que contesta con error JSON-RPC MATABA el run entero
             # (2026-08-26). pydantic-ai convierte a ModelRetry el
@@ -273,14 +278,14 @@ class CappedToolset(WrapperToolset):
             # entidad y hay que escribirlo `#35;`). Es un typo, y un typo
             # no puede costar un run de dos millones de tokens.
             #
-            # El texto del server va COMPLETO y sin traducir: ahí está el
-            # número de línea y el token que falló, que es exactamente lo
-            # que el modelo necesita para corregir.
+            # El diagnóstico conserva el texto no sensible, incluida su línea
+            # y token de error. Los patrones de credenciales se ocultan antes
+            # de devolver el mensaje al modelo.
             raise ModelRetry(
                 f"La tool `{name}` falló del lado del MCP: {redact_text(str(e))} "
                 "El error viene del server, no del relay — la tool sigue "
                 "disponible. Corrige los argumentos según ese mensaje y "
-                "vuelve a llamarla, o resuelve el paso de otra forma.") from e
+                "vuelve a llamarla, o resuelve el paso de otra forma.") from None
         finally:
             self.inflight.pop(_marca, None)
         try:
