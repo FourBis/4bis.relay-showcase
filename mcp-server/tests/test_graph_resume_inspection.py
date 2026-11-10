@@ -85,7 +85,8 @@ async def test_disabled_between_http_gate_and_resolver_never_inspects(resume_env
     assert await db.get_conversation_task(cid) == before
     assert await db.get_task_graph("g") == graph_before
     assert not app[server_common.GRAFOS_KEY]
-    repair.assert_not_awaited()
+    # La reparación SQLite ocurrió autorizada; tras deshabilitar no se conceden intentos.
+    orchestrator_recovery.prepare_graph_resume.assert_not_awaited()
     launch.assert_not_called()
 
 
@@ -123,7 +124,9 @@ async def test_revocation_during_inspection_does_not_write_or_repair(resume_env,
         assert await db.get_task_graph("g") == graph_before
         assert not app[server_common.GRAFOS_KEY]
         unguarded.assert_not_awaited()
-        repair.assert_not_awaited()
+        # Sanar sólo reconcilia SQLite bajo los locks (ya autorizado); lo que no
+        # debe ocurrir tras la revocación es conceder intentos ni lanzar.
+        orchestrator_recovery.prepare_graph_resume.assert_not_awaited()
         launch.assert_not_called()
     finally:
         release.set()
@@ -170,7 +173,9 @@ async def test_changed_observation_preserves_the_concurrent_writer(resume_env, m
         assert await db.get_task_graph("g") == graph_expected
         assert not app[server_common.GRAFOS_KEY]
         unguarded.assert_not_awaited()
-        repair.assert_not_awaited()
+        # Sanar sólo reconcilia SQLite bajo los locks (ya autorizado); lo que no
+        # debe ocurrir tras la revocación es conceder intentos ni lanzar.
+        orchestrator_recovery.prepare_graph_resume.assert_not_awaited()
         launch.assert_not_called()
     finally:
         release.set()
