@@ -8,6 +8,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from relay import admin_diagrams, admin_indexing, admin_workspace, identity
 from relay.app_state import DB_KEY
+from relay.db import Database
 
 
 class _Db:
@@ -69,3 +70,31 @@ async def test_cross_project_conversation_is_rejected(monkeypatch):
     response = await admin_diagrams.api_project_architecture(request)
     assert response.status == 400
     authorize.assert_awaited_once_with(request.app[DB_KEY], "conv-1", identity.OWNER, "read")
+
+
+async def test_cross_project_conversation_is_rejected_end_to_end(tmp_path, monkeypatch):
+    db = Database(tmp_path / "relay.db")
+    await db.init_schema()
+    await db.upsert_project({"slug": "demo", "name": "Demo", "enabled": True,
+                             "repo_path": str(tmp_path / "demo")})
+    await db.upsert_project({"slug": "other", "name": "Other", "enabled": True,
+                             "repo_path": str(tmp_path / "other")})
+    actor = "dev@example.test"
+    await db.set_user_role(actor, "member", project_slugs=["demo"])
+    conversation = await db.create_conversation(
+        project_slug="demo", requested_by=actor)
+    calls = []
+
+    async def should_not_run(*args):
+        calls.append(args)
+
+    monkeypatch.setattr(admin_diagrams, "_cbm_cli_text", should_not_run)
+    request = make_mocked_request(
+        "GET", f"/admin/api/projects/other/architecture?conversation={conversation}",
+        app={DB_KEY: db}, match_info={"slug": "other"})
+    request[identity.IDENTITY_KEY] = actor
+
+    response = await admin_diagrams.api_project_architecture(request)
+    assert response.status == 400
+    assert "pertenece a otro proyecto" in response.text
+    assert calls == []

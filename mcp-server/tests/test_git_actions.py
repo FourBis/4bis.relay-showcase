@@ -315,6 +315,16 @@ class TestAccionesGit(unittest.IsolatedAsyncioTestCase):
                                       "--abbrev-ref", "HEAD")
         self.assertEqual(head.strip(), "develop")
 
+    async def test_selected_staged_deletion_needs_no_existing_path(self) -> None:
+        _git(self.repo, "rm", "viejo.py")
+        (self.repo / "README.md").write_text("unselected edit\n", encoding="utf-8")
+        result = await git_actions.commit_paths(str(self.repo), self.branch,
+            message="delete staged selection", paths=["viejo.py"])
+        self.assertTrue(result["committed"], result)
+        _, names, _ = await git_process._git_out(str(self.repo), "show", "--format=", "--name-only", "-z", "HEAD")
+        self.assertEqual(names, "viejo.py\0")
+        self.assertEqual(result["files"], 1)
+
     async def test_commit_con_path_fuera_del_repo(self) -> None:
         out = await git_actions.commit_paths(str(self.repo), self.branch,
                                           message="x",

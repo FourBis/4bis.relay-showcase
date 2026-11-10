@@ -9,8 +9,8 @@ In **Chat → Registrar PR externo**, register a PR created with another tool or
 ## Workflow
 
 1. Connect your personal GitHub account in **My account**. You need current write access to the project.
-2. Choose an authorized project, enter the canonical PR URL and describe the goal. The task title is separate from the GitHub title.
-3. Declare the risk and optionally the tool used and an issue in the same repository. The tool label is a declaration; GitHub verifies the PR author.
+2. Choose an authorized project. The form has a single field: paste the PR URL or search by `#number` or title words. Selecting a PR shows a card read from GitHub with its title, description, branches, totals and commits; nothing is typed by hand. A missing description is flagged, because it is the review context.
+3. Confirm with **Registrar PR**. The record takes the PR title and the `medium` risk policy. If the PR is already registered in that project, the button opens its record instead of registering it again. The API still accepts optional `title`, `risk`, `issue` and `actor_label`; the tool label is a declaration and GitHub verifies the PR author.
 4. Use **Declarar evidencia** to describe your checks and their results for the displayed head SHA. The declaration records your identity and that commit.
 5. Use **Actualizar desde GitHub** to recheck state, head/base, checks and reviews. Previous observations and declarations remain in history.
 
@@ -27,7 +27,7 @@ Failed requests preserve the form. Retrying the same evidence declaration keeps 
 
 A new head makes previous evidence historical. A dismissed review, withdrawn policy or remote error can also remove eligibility. Observations have a five-minute technical validity window. Registration alone does not enable automatic monitoring.
 
-Admin explicitly configures `projects.defaults_json.external_pr_policy` by risk through project editing in the [API](API.md). Without a valid policy, the task cannot become eligible. Registration grants no publication, merge or deployment permission.
+Admin explicitly configures `projects.defaults_json.external_pr_policy` by risk through project editing in the [API](API.md). Without a valid policy, the task cannot become eligible. Because the quick form registers with the `medium` risk, configure that entry first. Registration grants no publication, merge or deployment permission.
 
 External registration does not execute code changes or prepare a local workspace
 diff. Change the code with your chosen tool and review it in GitHub. Merged and

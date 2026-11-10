@@ -322,6 +322,8 @@ async def _apply_task_action(request):
     except AccountError as exc:
         return web.json_response({"error": str(exc), "connect_url": "/admin/#/account",
                                   "conversation_id": cid}, status=409)
+    except PermissionError:
+        return web.json_response({"error": "No tienes permiso para esta acción de la tarea."}, status=403)
     except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
         message = str(exc) if identity.role_of(request) == identity.OWNER_ROLE else (
             "No se pudo completar la acción. Revisa los permisos y el estado de la tarea.")

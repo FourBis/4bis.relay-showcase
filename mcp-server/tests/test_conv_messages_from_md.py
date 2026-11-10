@@ -288,9 +288,11 @@ class TestMessagesFromMd(unittest.IsolatedAsyncioTestCase):
                 body = await self._call(client, max_turns="4")
         self.assertEqual(len(body["messages"]), 4)
         self.assertTrue(body["truncated"])
-        # Ordenados por started_at creciente.
-        self.assertEqual(body["messages"][0]["content"], "pregunta 0")
-        self.assertEqual(body["messages"][2]["content"], "pregunta 1")
+        # La ventana conserva los turnos más recientes en orden cronológico.
+        self.assertEqual(
+            [message["content"] for message in body["messages"]],
+            ["pregunta 8", "respuesta 8", "pregunta 9", "respuesta 9"],
+        )
 
     async def test_ignores_compacted_messages_json(self) -> None:
         """El summary del compact NO aparece: la UI ve los .md."""

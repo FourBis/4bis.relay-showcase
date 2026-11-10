@@ -14,6 +14,8 @@ from .expert_steps import _redactar
 MAX_FILES = 50
 MAX_BLOB_BYTES = 100_000
 MAX_CONTEXT_CHARS = 200_000
+# Si los archivos completos no caben, se envían tramos de este radio alrededor de cada hunk.
+EXCERPT_RADIUS_LINES = 40
 MAX_GUIDELINE_FILES = 20
 MAX_GUIDELINE_BYTES = 32_000
 MAX_GUIDELINE_CHARS = 60_000
@@ -183,17 +185,56 @@ async def read(job):
             raise ReviewContextError("El contenido no coincide con el blob declarado")
         if redact_text(content) != content:
             raise ReviewContextError("Se detectó material potencialmente sensible; no se envió al modelo")
-        size += len(content) + len(patch)
-        if size > MAX_CONTEXT_CHARS:
-            raise ReviewContextError("Contexto excesivo: no se recortó ni se afirmó una revisión completa")
         files.append({"path": path, "status": status, "blob_sha": sha, "patch": _redactar(patch),
                       "content": _redactar(content), "content_at": "base" if status == "removed" else "head",
                       "changed_lines": lines})
+    _fit_context(files)
     await check_head(job)
     return {"repo": job["repo"], "repo_id": job["repo_id"], "pr_number": job["pr_number"],
             "head_sha": job["head_sha"], "base_sha": job["base_sha"], "files": files,
             "coverage": "complete", "tests_executed": False}
 
+
+
+def hunk_ranges(patch, side):
+    """(start, count) of each hunk on the side whose content was read ('head' = new, 'base' = old)."""
+    ranges = []
+    for line in patch.splitlines():
+        match = _HUNK.match(line)
+        if match:
+            start, count = (match[3], match[4]) if side == "head" else (match[1], match[2])
+            ranges.append((int(start), int(count or 1)))
+    return ranges
+
+
+def excerpt(content, ranges, radius=None):
+    """Lines around each hunk, each block headed by its real line numbers; nothing invented."""
+    radius = EXCERPT_RADIUS_LINES if radius is None else radius
+    lines = content.splitlines()
+    spans = []
+    for start, count in sorted(ranges):
+        low, high = max(1, start - radius), min(len(lines), start + max(count, 1) - 1 + radius)
+        if spans and low <= spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], high))
+        elif low <= high:
+            spans.append((low, high))
+    return "".join(f"@@ líneas {low}-{high} de {len(lines)} @@\n" + "\n".join(lines[low - 1:high]) + "\n"
+                   for low, high in spans)
+
+
+def _fit_context(files):
+    """The whole diff always goes; full files shrink to excerpts (largest first) until it fits."""
+    for row in files:
+        row["content_scope"] = "full"
+    def total():
+        return sum(len(row["patch"]) + len(row["content"]) for row in files)
+    for row in sorted(files, key=lambda item: len(item["content"]), reverse=True):
+        if total() <= MAX_CONTEXT_CHARS:
+            return
+        row["content"] = excerpt(row["content"], hunk_ranges(row["patch"], row["content_at"]))
+        row["content_scope"] = "excerpt"
+    if total() > MAX_CONTEXT_CHARS:
+        raise ReviewContextError("Contexto excesivo: ni el diff con tramos de contexto cabe; requiere revisión manual")
 
 async def assert_guideline_base(job):
     """Only the configured repo's develop or default branch authorizes guidance."""

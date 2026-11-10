@@ -1,4 +1,4 @@
-"""Progreso del experto, callbacks explícitos y lectura autorizada en Relay.
+"""Tests de Fase 1: liveness on-demand (A) + progreso SSE al bot (B).
 
 Cubre:
   - run_expert: messages_json persiste igual (contrato ADR-025)
@@ -6,9 +6,10 @@ Cubre:
   - run_expert: on_progress se invoca con (thinking, tool_call)
   - server: GET /experts/status/{chat_id} devuelve snapshot durante run
   - server: GET /experts/status/{chat_id} devuelve 404 si no existe
-  - server: conserva progreso y resultado durable sin enviar el hilo a
-    una audiencia externa no verificada.
-  - callback: un NotifyClient pasado explícitamente mantiene su contrato.
+  - server: notify recibe kind=progress durante tool_call (TestModel
+    con custom_tool no llama tools reales; usamos un Tool nativo propio
+    que se ejecuta via TestModel.call_tools=[...] — ver `build_agent`
+    helper más abajo)
   - db: finish_chat persiste phase_at_end y last_tool
 
 Cómo correr:
@@ -16,7 +17,7 @@ Cómo correr:
     python -m pytest tests/test_progress.py -q
 """
 from __future__ import annotations
-from relay import cbm_runtime, expert_models, expert_runner, progress
+from relay import expert_models, expert_runner, progress
 
 import asyncio
 import json
@@ -24,7 +25,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -60,6 +61,15 @@ async def _wait(predicate, timeout: float = 10.0):
             return value
         await asyncio.sleep(0.05)
     raise AssertionError("timeout esperando condición async")
+
+
+async def _wait_for_chat(db: Database, chat_id: str) -> dict:
+    for _ in range(200):
+        chat = await db.get_chat(chat_id)
+        if chat and chat["status"] in {"ok", "error"} and chat.get("md_path"):
+            return chat
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"el run {chat_id} no terminó")
 
 
 # ---------- run_expert directo ----------
@@ -304,7 +314,7 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
         await db.set_config("FOURBIS_MODEL", "test")
         await db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name,
-            "defaults_json": {"model": "test", "three_stage": False},
+            "defaults_json": {"model": "test"},
         })
 
     async def asyncTearDown(self) -> None:
@@ -312,7 +322,7 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_404_when_no_run(self) -> None:
-        from relay.server import create_app
+        from relay.server import DB_KEY, create_app
         async def fake_send(self_, agent_id, kind, message, metadata=None):
             return True
         with patch.object(NotifyClient, "send", fake_send):
@@ -341,101 +351,116 @@ class TestExpertsStatusEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(body.get("lost_on_restart_possible"))
 
     async def test_snapshot_during_run(self) -> None:
-        """Mientras el run corre, /status devuelve snapshot vivo.
-        Después de terminar, /status devuelve finished=true."""
-        from relay.server import create_app, PROGRESS_KEY, DB_KEY
-        from pydantic_ai.messages import ModelResponse, TextPart
-        from pydantic_ai.models.function import FunctionModel
+        """El snapshot HTTP refleja progreso vivo y luego su cierre durable."""
+        from relay.server import DB_KEY, create_app
+
+        send = AsyncMock()
         started, release = asyncio.Event(), asyncio.Event()
-        notifications: list[dict] = []
+        original_runner = experts.run_expert_staged
 
-        async def fake_send(self_, agent_id, kind, message, metadata=None):
-            notifications.append({"agent_id": agent_id, "kind": kind,
-                                  "message": message,
-                                  "metadata": metadata or {}})
-            return True
-
-        async def answer(messages, info):
+        async def gated_runner(*args, **kwargs):
             started.set()
             await release.wait()
-            return ModelResponse(parts=[TextPart("Respuesta de prueba.")])
+            return await original_runner(*args, **kwargs)
 
-        with patch.object(NotifyClient, "send", fake_send), \
-             patch.object(expert_models, "build_model", lambda _: FunctionModel(answer)):
-            app = create_app()
-            async with TestClient(TestServer(app)) as client:
-                try:
-                    r = await client.post("/experts/run", json={
-                        "target": "demo", "user": "hola",
-                        "source": "test", "author": "pytest",
-                    })
-                    self.assertEqual(r.status, 202)
-                    chat_id = (await r.json())["id"]
-                    # Admission is queued now. Wait for the actual model,
-                    # rather than assuming its progress store precedes 202.
-                    await asyncio.wait_for(started.wait(), timeout=10)
-                    r = await client.get(f"/experts/status/{chat_id[:8]}")
-                    self.assertEqual(r.status, 200)
-                    snap = await r.json()
-                    self.assertEqual(snap["target"], "demo")
-                    self.assertIn(snap["phase"], ("thinking", "tool_call", "writing"))
-                    self.assertFalse(snap["finished"])
-                finally:
-                    release.set()
-                await _wait(lambda: app[PROGRESS_KEY][chat_id].finished)
-                r = await client.get(f"/experts/status/{chat_id}")
-                self.assertEqual(r.status, 200)
-                self.assertTrue((await r.json())["finished"])
-                row = await app[DB_KEY].get_chat(chat_id)
-                self.assertEqual(row["status"], "ok")
-                self.assertTrue(Path(row["md_path"]).is_file())
-                self.assertEqual(notifications, [])
-
-    async def test_run_keeps_tool_progress_and_durable_response_in_relay(self) -> None:
-        """A real queued run keeps tool progress and its durable response.
-
-        The HTTP caller supplies no verified Discord audience. Passing a
-        NotifyClient to the background worker must not publish the thread.
-        Explicit notification callbacks retain their separate positive tests.
-        """
-        from relay.server import create_app, PROGRESS_KEY, DB_KEY
-        from pydantic_ai.models.test import TestModel
-
-        notifications: list[dict] = []
-
-        async def fake_send(self_, agent_id, kind, message, metadata=None):
-            notifications.append({"agent_id": agent_id, "kind": kind})
-            return True
-
-        async def fake_cbm(tool, args, *, timeout=30.0):
-            return '{"results": []}'
-
-        with patch.object(NotifyClient, "send", fake_send), \
-             patch.object(cbm_runtime, "cbm_binary_path", lambda: "cbm"), \
-             patch.object(cbm_runtime, "cbm_call", fake_cbm), \
-             patch.object(expert_models, "build_model",
-                          lambda spec: TestModel(call_tools=["cbm_query"])):
+        with patch.object(NotifyClient, "send", send), \
+                patch.object(experts, "run_expert_staged", gated_runner):
             app = create_app()
             async with TestClient(TestServer(app)) as client:
                 r = await client.post("/experts/run", json={
-                    "target": "demo", "user": "busca el timeout",
+                    "target": "demo", "user": "hola",
                     "source": "test", "author": "pytest",
                 })
                 self.assertEqual(r.status, 202)
                 chat_id = (await r.json())["id"]
-                await _wait(lambda: chat_id in app[PROGRESS_KEY]
-                            and app[PROGRESS_KEY][chat_id].finished)
+                db: Database = app[DB_KEY]
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=2)
+                    r = await client.get(f"/experts/status/{chat_id}")
+                    self.assertEqual(r.status, 200)
+                    snap = await r.json()
+                    self.assertEqual(snap["target"], "demo")
+                    self.assertIn(snap["phase"], ("thinking", "tool_call", "writing",
+                                                   "planner", "verifier", "documenter"))
+                    self.assertFalse(snap["finished"])
+                finally:
+                    release.set()
+                chat = await _wait_for_chat(db, chat_id)
+                self.assertEqual(chat["status"], "ok")
+                self.assertTrue(json.loads(chat["progress_events"]))
                 r = await client.get(f"/experts/status/{chat_id}")
                 self.assertEqual(r.status, 200)
-                snap = await r.json()
-                self.assertTrue(snap["finished"])
-                self.assertGreater(snap["tool_calls"], 0)
-                self.assertEqual(snap["last_tool"], "cbm_query")
-                row = await app[DB_KEY].get_chat(chat_id)
-                self.assertEqual(row["status"], "ok")
-                self.assertGreater(row["tool_calls"], 0)
-                self.assertTrue(Path(row["md_path"]).is_file())
-                self.assertEqual(notifications, [])
+                self.assertTrue((await r.json())["finished"])
+                send.assert_not_awaited()
+
+    async def test_run_emits_progress_then_response_e2e(self) -> None:
+        """Una lectura autorizada deja progreso y retorno ordenados en SQLite."""
+        from relay.server import DB_KEY, create_app
+        from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+        from pydantic_ai.models.function import FunctionModel
+
+        send = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = Path(tmp) / "skills"
+            skill = skills_dir / "probe" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                "---\nname: probe\ndescription: test\n---\ntexto local",
+                encoding="utf-8")
+
+            def model(messages, _info):
+                if any(isinstance(part, ToolReturnPart)
+                       for message in messages for part in message.parts):
+                    return ModelResponse(parts=[TextPart("Leí texto local.")])
+                return ModelResponse(parts=[ToolCallPart(
+                    "read_skill", {"name": "probe"}, tool_call_id="skill-1")])
+
+            with patch.dict(os.environ, {"FOURBIS_SKILLS_DIR": str(skills_dir)}), \
+                    patch.object(NotifyClient, "send", send), \
+                    patch.object(expert_models, "build_model",
+                                 lambda spec: FunctionModel(model)):
+                app = create_app()
+                async with TestClient(TestServer(app)) as client:
+                    db: Database = app[DB_KEY]
+                    await db.run("UPDATE projects SET defaults_json=? WHERE slug=?",
+                                 (json.dumps({"three_stage": False}), "demo"))
+                    await db.set_config("suggestions_enabled", "0")
+                    conversation_id = await db.create_conversation(
+                        project_slug="demo", requested_by="owner")
+                    r = await client.post("/experts/run", json={
+                        "target": "demo", "user": "lee la skill probe",
+                        "source": "test", "author": "pytest",
+                        "conversation": conversation_id,
+                    })
+                    self.assertEqual(r.status, 202, await r.text())
+                    chat_id = (await r.json())["id"]
+                    chat = await _wait_for_chat(db, chat_id)
+                    history = await db.run(
+                        "SELECT messages_json FROM conversations WHERE id=?",
+                        (conversation_id,))
+                    result = await client.get(f"/chats/{chat_id}")
+                    self.assertEqual(result.status, 200)
+                    http_chat = await result.json()
+                    self.assertEqual(http_chat["status"], "ok")
+                    self.assertIn("Leí texto local", Path(
+                        http_chat["md_path"]).read_text(encoding="utf-8"))
+
+        events = json.loads(chat["progress_events"])
+        self.assertTrue(any(e.get("phase") == "tool_call"
+                            and e.get("tool") == "read_skill" for e in events),
+                        f"sin evento de progreso read_skill: {events}")
+        messages = json.loads(history[0]["messages_json"])
+        parts = [part for message in messages for part in message.get("parts", [])]
+        call = next(i for i, part in enumerate(parts)
+                    if part.get("part_kind") == "tool-call"
+                    and part.get("tool_name") == "read_skill")
+        result = next(i for i, part in enumerate(parts)
+                      if part.get("part_kind") == "tool-return"
+                      and part.get("tool_name") == "read_skill")
+        self.assertLess(call, result, "el retorno no sigue a la tool_call")
+        self.assertIn("texto local", parts[result]["content"])
+        self.assertEqual(chat["status"], "ok")
+        send.assert_not_awaited()
 
 
 # ---------- db: fase_at_end + last_tool persiste ----------

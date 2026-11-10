@@ -39,50 +39,60 @@ def user_tx(conn, actor):
     return user
 
 
-def access_tx(conn, conversation_id, actor):
-    actor = str(actor or "").strip().lower()
-    denied = dict(can_read=False, can_collaborate=False, can_control=False, can_send=False,
-                  can_share=False, is_creator=False, relation=None, share_mode=None, project_assigned=False)
-    user = user_tx(conn, actor)
-    row = conn.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
-    if not row or not user:
-        return denied
-    conv = dict(row)
-    project = conn.execute("SELECT * FROM projects WHERE slug=? COLLATE NOCASE", (conv["project_slug"],)).fetchone()
-    project = dict(project) if project else {}
+_DENIED = dict(can_read=False, can_collaborate=False, can_control=False, can_send=False,
+               can_share=False, is_creator=False, relation=None, share_mode=None, project_assigned=False)
+
+
+def _access(conn, user, actor, requested_by, slug, task_json, enabled, defaults_json, share_permission):
+    """Pure ACL rules over already-read columns; the listing reuses them per row in SQL."""
     try:
-        task = json.loads(conv.get("task_json") or "{}")
-        defaults = json.loads(project.get("defaults_json") or "{}")
+        task = json.loads(task_json or "{}")
+        defaults = json.loads(defaults_json or "{}")
     except (ValueError, TypeError):
-        return denied
+        return _DENIED.copy()
     if not isinstance(task, dict) or not isinstance(defaults, dict):
-        return denied
-    creator = str(conv.get("requested_by") or "").strip().lower() == actor
+        return _DENIED.copy()
+    creator = str(requested_by or "").strip().lower() == actor
     admin = user["role"] == "owner"
-    assigned = bool(project.get("enabled") and identity.user_can_write_project(user, conv["project_slug"]))
-    share = conn.execute("SELECT permission FROM conversation_shares WHERE conversation_id=? "
-                         "AND email=? COLLATE NOCASE AND revoked_at IS NULL", (conversation_id, actor)).fetchone()
-    mode = share["permission"] if share and assigned else None
+    assigned = bool(enabled and identity.user_can_write_project(user, slug))
+    mode = share_permission if assigned else None
     read = creator or admin or mode in {"read", "collaborate"}
     if task.get("mode") == "external_pr" and (task.get("mcp_private") or not assigned or defaults.get("read_only")):
         # External registrations require current project access even for
         # creators: list/search must match the register's detail boundary.
-        return denied
+        return _DENIED.copy()
     if task.get("mcp_private"):
-        # The trusted local adapter is not a personally authenticated MCP user.
+        # El adaptador local no representa a una persona autenticada por MCP.
         from .private_mcp_access import allowed_project_tx
         read = bool(actor != identity.OWNER and assigned and (creator or admin)
-                    and allowed_project_tx(conn, user, {**project, "defaults_json": defaults}))
-        mode = None  # Private MCP conversations cannot be shared.
+                    and allowed_project_tx(conn, user, {"slug": slug, "enabled": enabled, "defaults_json": defaults}))
+        mode = None  # Las conversaciones MCP privadas no se comparten.
     writable = bool(assigned and not defaults.get("read_only") and not task.get("read_only")
                     and task.get("mode") != "read_only" and not task.get("mcp_private"))
     collaborate = bool(read and writable and (creator or admin or mode == "collaborate"))
     control = bool(read and (creator or admin))
     return dict(can_read=bool(read), can_collaborate=collaborate, can_control=control,
-                can_send=bool(project.get("enabled") and (control or collaborate)),
+                can_send=bool(enabled and (control or collaborate)),
                 can_share=bool(read and (admin or creator and assigned) and not task.get("mcp_private")),
                 is_creator=creator, relation="owner" if creator else "admin" if admin else "shared" if mode else None,
                 share_mode=mode, project_assigned=assigned)
+
+
+def access_tx(conn, conversation_id, actor):
+    actor = str(actor or "").strip().lower()
+    user = user_tx(conn, actor)
+    conv = conn.execute("SELECT requested_by,project_slug,task_json FROM conversations WHERE id=?",
+                        (conversation_id,)).fetchone()
+    if not conv or not user:
+        return _DENIED.copy()
+    requested_by, slug, task_json = conv
+    project = conn.execute("SELECT enabled,defaults_json FROM projects WHERE slug=? COLLATE NOCASE "
+                           "ORDER BY id LIMIT 1", (slug,)).fetchone()
+    share = conn.execute("SELECT permission FROM conversation_shares WHERE conversation_id=? "
+                         "AND email=? COLLATE NOCASE AND revoked_at IS NULL", (conversation_id, actor)).fetchone()
+    enabled, defaults_json = project if project else (None, None)
+    return _access(conn, user, actor, requested_by, slug, task_json, enabled, defaults_json,
+                   share["permission"] if share else None)
 
 
 def require_tx(conn, conversation_id, actor, permission="read"):
@@ -216,16 +226,37 @@ async def listing(db, actor, *, scope="mine", project=None, status=None, limit=1
                 "CASE WHEN json_valid(c.messages_json) THEN json_array_length(c.messages_json) ELSE 0 END AS messages_len,"
                 "COALESCE(u.display_name,'') AS owner_display_name,"
                 "(SELECT substr(h.user_prompt,1,160) FROM chats h WHERE h.conversation_id=c.id ORDER BY h.started_at,h.id LIMIT 1) AS preview")
-        rows = conn.execute("SELECT " + cols + " FROM conversations c LEFT JOIN users u ON u.email=c.requested_by COLLATE NOCASE "
-                            + ("WHERE " + " AND ".join(where) if where else "") + " ORDER BY c.last_activity_at DESC,c.id", params)
+        acl_actor = str(actor or "").strip().lower()
+
+        def access(requested_by, slug, task_json, enabled, defaults_json, permission):
+            return _access(conn, user, acl_actor, requested_by, slug, task_json, enabled, defaults_json, permission)
+
+        # El permiso se filtra antes del límite con las mismas reglas Python,
+        # incluidos JSON históricos y la distinción entre dueño local y personal.
+        conn.create_function("relay_can_read", 6, lambda *fields: access(*fields)["can_read"])
+        where.append("relay_can_read(c.requested_by,c.project_slug,c.task_json,p.enabled,p.defaults_json,s.permission)")
+        # MIN conserva el primer proyecto por id cuando hay slugs que solo
+        # difieren en mayúsculas, sin duplicar las filas de la conversación.
+        rows = conn.execute(
+            "WITH project_acl AS (SELECT slug,enabled,defaults_json,MIN(id) FROM projects GROUP BY slug COLLATE NOCASE) "
+            "SELECT " + cols + ",p.enabled AS _enabled,p.defaults_json AS _defaults,s.permission AS _permission "
+            "FROM conversations c LEFT JOIN users u ON u.email=c.requested_by COLLATE NOCASE "
+            "LEFT JOIN project_acl p ON p.slug=c.project_slug COLLATE NOCASE "
+            "LEFT JOIN conversation_shares s ON s.conversation_id=c.id AND s.email=? COLLATE NOCASE AND s.revoked_at IS NULL "
+            "WHERE " + " AND ".join(where) + " ORDER BY c.last_activity_at DESC,c.id LIMIT ?",
+            [acl_actor, *params, max(1, limit)],
+        )
+        from .task_service import visible_task
+        owner = user.get("role") == "owner"
         result = []
         for row in rows:
-            access = access_tx(conn, row["id"], actor)
-            if access["can_read"]:
-                result.append({**project_conversation_tx(conn, row, actor),
-                               "owner_email": row["requested_by"]})
-                if len(result) >= limit:
-                    break
+            item = dict(row)
+            permissions = access(item["requested_by"], item["project_slug"], item["task_json"],
+                                 item.pop("_enabled"), item.pop("_defaults"), item.pop("_permission"))
+            # Misma proyección que project_conversation_tx, sin releer la ACL por fila.
+            if "task_json" in item:
+                item["task_json"] = json.dumps(visible_task(item["task_json"], owner=owner), ensure_ascii=False)
+            result.append({**item, "owner_email": item["requested_by"], "access": permissions})
         return result
     return await transaction(db, work)
 

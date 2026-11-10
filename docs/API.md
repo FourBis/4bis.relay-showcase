@@ -214,7 +214,8 @@ crea un worktree ni concede publicación, merge o despliegue.
 | Método | Ruta | Contrato |
 |---|---|---|
 | GET | `/admin/api/projects?capability=external_pr` | Catálogo mínimo de proyectos elegibles: `slug` y `name`. |
-| POST | `/projects/{slug}/external-pr` | `{url,title,risk,actor_label?,issue?}`; `risk` es `low`, `medium` o `high`. |
+| GET | `/projects/{slug}/external-pr/preview?url=` | Vista previa de sólo lectura de una PR del repositorio del proyecto (título, descripción, ramas, totales, hasta 100 commits, `registered`); no guarda ni encola. |
+| POST | `/projects/{slug}/external-pr` | `{url,title?,risk?,actor_label?,issue?}`; `risk` es `low`, `medium` o `high`. Sin `title` se usa el de la PR y sin `risk`, `medium`; repetir el registro sin esos campos conserva los existentes. |
 | POST | `/conversations/{id}/external-pr` | `{action:"refresh"}` o `{action:"evidence",request_id,head_sha,summary}`. |
 | GET | `/projects/{slug}/issues` | Lista de issues canónicos del repositorio autorizado. |
 | POST | `/conversations/{id}/issue` | `{issue,resolution_complete?}`; número entero o URL canónica de issue. |

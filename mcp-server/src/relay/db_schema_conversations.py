@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS chat_outputs (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status, last_activity_at);
 CREATE INDEX IF NOT EXISTS idx_conv_project ON conversations(project_slug);
+CREATE INDEX IF NOT EXISTS idx_conv_listing ON conversations(last_activity_at DESC, id);
 CREATE TABLE IF NOT EXISTS conversation_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

@@ -328,7 +328,7 @@ async def test_bang_desconocido_sigue_al_experto(env, monkeypatch):
          "defaults_json": {"model": "test"}})
     r = await cli.post("/experts/run", json={
         "target": "demo", "user": "!ojo con esto", "source": "ui"})
-    assert r.status == 202                       # run normal
+    assert r.status == 202, await r.text()       # run normal
     assert "command" not in (await r.json())
 
 

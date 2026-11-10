@@ -81,7 +81,22 @@ async def commit_paths(repo: str, branch: str, *, message: str,
             out["error"] = "hay archivos staged fuera de la selección; consérvalos y revisa la selección antes de commitear"
             return out
     if rels:
-        rc, txt = await git_process._git(repo, "add", "--", *(f":(literal){rel}" for rel in rels))
+        rc, txt, _ = await git_process._git_out(repo, "ls-files", "--cached", "--others",
+                                             "--exclude-standard", "-z", "--",
+                                             *(f":(literal){rel}" for rel in rels))
+        if rc != 0:
+            out["error"] = "no pude verificar los paths antes de stagear"
+            return out
+        live_paths = [path for path in txt.split("\0") if path]
+        # Un origen ya stageado por git mv no existe en el índice; sigue
+        # incluido en los guards y en commit --only, pero git add lo rechaza.
+        # ponytail: hasta 500 selecciones; indexar prefijos si este scan pesa.
+        stage_rels = [rel for rel in rels if any(
+            path == rel or path.startswith(rel.rstrip("/") + "/") for path in live_paths)]
+        rc, txt = 0, ""
+        if stage_rels:
+            rc, txt = await git_process._git(repo, "add", "-A", "--",
+                                           *(f":(literal){rel}" for rel in stage_rels))
     else:
         rc, txt = await git_process._git(repo, "add", "-A")
     if rc != 0:

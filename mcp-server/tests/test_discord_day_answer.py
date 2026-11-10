@@ -20,7 +20,9 @@ import unittest
 from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
+from unittest.mock import AsyncMock, patch
 
+from relay import identity
 from relay.db import Database
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -35,6 +37,7 @@ class DiscordDayAnswerTests(unittest.IsolatedAsyncioTestCase):
         os.environ["FOURBIS_JSONL_DIR"] = str(base / "jsonl")
         self.db = Database()
         await self.db.init_schema()
+        await self.db.set_user_role("admin@example.test", "owner")
         # FK target para night_questions.
         await self.db.run(
             "INSERT INTO night_runs (id, project_slug, started_at, "
@@ -46,6 +49,10 @@ class DiscordDayAnswerTests(unittest.IsolatedAsyncioTestCase):
             json.dumps({"title": "Fase 1 falló", "options": []}))
 
         from relay.server import create_app
+        self._identity_patch = patch.object(
+            identity, "resolve", AsyncMock(return_value="admin@example.test"))
+        self._identity_patch.start()
+        self.addCleanup(self._identity_patch.stop)
         self.app = create_app()
         self.client = TestClient(TestServer(self.app))
         await self.client.start_server()
@@ -131,7 +138,7 @@ class DiscordDayAnswerTests(unittest.IsolatedAsyncioTestCase):
             "free_text": None,
         })
         self.assertEqual(status, 404)
-        self.assertIn("desconocida", body["error"])
+        self.assertIn("no disponible", body["error"])
 
     async def test_409_already_answered(self) -> None:
         # Primera respuesta gana.

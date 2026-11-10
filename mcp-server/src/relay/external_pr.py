@@ -14,6 +14,10 @@ from .user_accounts import AccountError
 _URL = re.compile(r"https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)/?", re.ASCII)
 _SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{40}")
+# The quick form no longer asks for risk: every registration uses this policy key.
+DEFAULT_RISK = "medium"
+PREVIEW_BODY_LIMIT = 20000
+PREVIEW_COMMITS_LIMIT = 100
 
 
 class ObservationConflict(ValueError):
@@ -25,6 +29,27 @@ def parse_url(url):
     if not match or match[2] in {".", ".."} or len(match[3]) > 10:
         raise ValueError("Usa una URL HTTPS de PR github.com/owner/repo/pull/numero, sin query ni fragmento")
     return f"{match[1]}/{match[2]}", int(match[3])
+
+
+async def resolves_to(slug, repo_id, canonical):
+    """True when the project's own origin `slug` names the repository `repo_id`/`canonical`.
+
+    Only for the locally configured origin, never for a user-supplied URL.
+
+    A renamed or transferred repo keeps its numeric id and GitHub redirects the old
+    name, so a stale local origin still maps to it. Any other repo is rejected.
+    """
+    if not isinstance(slug, str) or not _SLUG.fullmatch(slug) or type(repo_id) is not int:
+        return False
+    if slug.casefold() == canonical.casefold():
+        return True
+    try:
+        repo = await _api(f"repos/{slug}")
+    except (TaskPRError, AccountError, OSError, ValueError):
+        # Sin confirmación de GitHub no hay identidad: se trata como otro repositorio.
+        return False
+    return (isinstance(repo, dict) and repo.get("id") == repo_id
+            and str(repo.get("full_name", "")).casefold() == canonical.casefold())
 
 
 def same_repository(ref, repo_id, canonical):
@@ -277,12 +302,81 @@ async def _failed_read(db, initial, actor):
     await _transaction(db, fail)
 
 
+def registration_id(repo_id, number):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"relay:external-pr:{repo_id}:{number}"))
+
+
+async def preview(project, url):
+    """Read-only view of a PR of the project's repository: title, description and commits.
+
+    It never stores, enqueues or writes to GitHub. Registration re-verifies everything.
+    """
+    requested, number = parse_url(url)
+    configured = await github.repo_slug(project.get("repo_path") or "", refresh=True)
+    if not configured or not _SLUG.fullmatch(configured):
+        raise ValueError("El proyecto no tiene un repositorio GitHub autorizado")
+    repo = await _api(f"repos/{configured}")
+    canonical = repo.get("full_name", "") if isinstance(repo, dict) else ""
+    if not _SLUG.fullmatch(canonical) or type(repo.get("id")) is not int:
+        raise TaskPRError("GitHub no confirmó la identidad del repositorio del proyecto")
+    if requested.casefold() != canonical.casefold():
+        raise ValueError(f"Ese PR es de {requested}; este proyecto solo admite PR de {canonical}")
+    pr = await _api(f"repos/{canonical}/pulls/{number}")
+    try:
+        base, head = pr["base"], pr["head"]
+        valid = (type(pr["number"]) is int and pr["number"] == number
+                 and pr["html_url"].casefold() == f"https://github.com/{canonical}/pull/{number}".casefold()
+                 and _SHA.fullmatch(head["sha"]) and pr["state"] in {"open", "closed"})
+    except (TypeError, KeyError, AttributeError):
+        valid = False
+    if not valid:
+        raise TaskPRError("GitHub devolvió datos incompletos del PR; vuelve a intentar")
+    if not (same_repository(base, repo["id"], canonical) and same_repository(head, repo["id"], canonical)):
+        raise ValueError(f"La rama de este PR viene de un fork; solo se admiten ramas de {canonical}")
+    rows = await _api(f"repos/{canonical}/pulls/{number}/commits?per_page={PREVIEW_COMMITS_LIMIT}")
+    if not isinstance(rows, list):
+        raise TaskPRError("GitHub devolvió una lista de commits inválida")
+    # A push between both reads would mix an old head/description with newer commits.
+    latest = await _api(f"repos/{canonical}/pulls/{number}")
+    if (not isinstance(latest, dict) or (latest.get("head") or {}).get("sha") != head["sha"]
+            or (latest.get("base") or {}).get("sha") != base.get("sha")):
+        raise TaskPRError("El PR cambió mientras se leía; vuelve a intentar")
+    # El origen del proyecto pudo cambiar durante la lectura: no devolver datos de otro repositorio.
+    current_repo = await github.repo_slug(project.get("repo_path") or "", refresh=True)
+    if not isinstance(current_repo, str) or current_repo.casefold() != configured.casefold():
+        raise TaskPRError("El repositorio vinculado cambió durante la lectura; vuelve a intentar")
+    commits = []
+    for row in rows[:PREVIEW_COMMITS_LIMIT]:
+        info = row.get("commit") if isinstance(row, dict) else None
+        if not isinstance(info, dict) or not isinstance(row.get("sha"), str) or not _SHA.fullmatch(row["sha"]):
+            continue
+        message = str(info.get("message") or "")
+        headline, _, rest = message.partition("\n")
+        author = info.get("author") if isinstance(info.get("author"), dict) else {}
+        login = (row.get("author") or {}).get("login") if isinstance(row.get("author"), dict) else None
+        commits.append({"sha": row["sha"], "headline": headline.strip()[:300], "body": rest.strip()[:2000],
+                        "author": login or str(author.get("name") or "")[:100], "date": author.get("date")})
+    body = pr.get("body") if isinstance(pr.get("body"), str) else ""
+    user = pr.get("user") if isinstance(pr.get("user"), dict) else {}
+    return {"repo": canonical, "repo_id": repo["id"], "number": number,
+            "url": f"https://github.com/{canonical}/pull/{number}",
+            "title": str(pr.get("title") or ""), "body": body[:PREVIEW_BODY_LIMIT],
+            "body_truncated": len(body) > PREVIEW_BODY_LIMIT,
+            "state": "MERGED" if pr.get("merged_at") else pr["state"].upper(), "draft": bool(pr.get("draft")),
+            "author": str(user.get("login") or ""), "head_ref": head.get("ref"), "base_ref": base.get("ref"),
+            "head_sha": head["sha"], "additions": pr.get("additions"), "deletions": pr.get("deletions"),
+            "changed_files": pr.get("changed_files"),
+            "commits_total": pr.get("commits") if type(pr.get("commits")) is int else len(commits),
+            "commits": commits, "registration_id": registration_id(repo["id"], number)}
+
+
 async def register(db, project, body, who, *, authorize=None):
     url = body.get("url")
     requested_repo, requested_number = parse_url(url)
-    title, label = _text(body, "title", 300, True), _text(body, "actor_label", 200)
+    # Title and risk are optional: the quick form takes the title from the PR and uses DEFAULT_RISK.
+    title, label = _text(body, "title", 300), _text(body, "actor_label", 200)
     risk, issue = body.get("risk"), body.get("issue", body.get("issue_number"))
-    if risk not in {"low", "medium", "high"}:
+    if risk is not None and risk not in {"low", "medium", "high"}:
         raise ValueError("risk debe ser low, medium o high")
     issue_number = issue_links.reference(issue)[1] if issue is not None else None
     if body.get("issue") is not None and body.get("issue_number") is not None:
@@ -312,8 +406,10 @@ async def register(db, project, body, who, *, authorize=None):
         raise
     project = await _authorize(project, authorize)
     await external_review_store.ensure_schema(db)
-    cid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"relay:external-pr:{pr['repo_id']}:{pr['number']}"))
+    cid = registration_id(pr["repo_id"], pr["number"])
+    explicit_title, explicit_risk = bool(title), risk is not None
     def work(conn):
+        nonlocal title, risk
         linked = conn.execute("SELECT id FROM conversations WHERE lower(rtrim(pr_url,'/'))=lower(?) AND id<>? LIMIT 1",
                               (pr["url"], cid)).fetchone()
         if linked:
@@ -321,6 +417,9 @@ async def register(db, project, body, who, *, authorize=None):
         existing = conn.execute("SELECT project_slug,task_json FROM conversations WHERE id=?", (cid,)).fetchone()
         if existing:
             task = json.loads(existing["task_json"])
+            # Omitted fields keep what the record already has; repeating the quick form is idempotent.
+            title = title if explicit_title else task["title"]
+            risk = risk if explicit_risk else task["risk"]
             if (existing["project_slug"].casefold() != project["slug"].casefold()
                     or task["requested_by"] != who or task["title"] != title
                     or task["risk"] != risk or task.get("issue_number") != issue_number or task.get("actor_label", "") != label
@@ -333,6 +432,8 @@ async def register(db, project, body, who, *, authorize=None):
             if linked_issue:
                 issue_links.apply(task, linked_issue, actor, completion)
             return _save(conn, task, project)
+        title = title or str(pr.get("title") or "").strip()[:300] or f"PR #{pr['number']}"
+        risk = risk if explicit_risk else DEFAULT_RISK
         stamp = now()
         task = {"id": cid, "mode": "external_pr", "state": "registered", "title": title,
                 "risk": risk, "issue_number": issue_number, "actor_label": label, "requested_by": who,

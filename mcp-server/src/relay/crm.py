@@ -79,9 +79,16 @@ def _clean(dsn: str) -> str:
     return dsn.split("?", 1)[0]
 
 
+# Relay nunca escribe en el CRM. Además de no tener ningún INSERT/UPDATE,
+# la sesión se abre con `default_transaction_read_only`: si algún día se
+# cuela una escritura, la rechaza el propio Postgres.
+_READ_ONLY_SETTINGS = {"default_transaction_read_only": "on"}
+
+
 async def _connect(dsn: Optional[str] = None) -> asyncpg.Connection:
     try:
-        return await asyncpg.connect(_clean(crm_dsn(dsn)), timeout=10)
+        return await asyncpg.connect(_clean(crm_dsn(dsn)), timeout=10,
+                                     server_settings=_READ_ONLY_SETTINGS)
     except Exception as e:  # noqa: BLE001
         raise CrmError(
             f"no se pudo conectar al Postgres del CRM: {type(e).__name__}: {e}"

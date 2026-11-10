@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -86,6 +87,35 @@ async def _observe(db):
             logger.warning("External PR observation unavailable; retained previous observation")
 
 
+async def _mirror_to_issue(db):
+    """Replica en el issue vinculado cada informe ya encolado para el PR (una vez por informe)."""
+    # Solo informes cuyo registro tiene issue: los demás no deben ocupar el límite de cada ciclo.
+    rows = await db.run("SELECT e.* FROM external_review_effects e JOIN conversations c ON c.id=e.conversation_id "
+                        "WHERE e.kind='review' AND json_type(CASE WHEN json_valid(c.task_json) THEN c.task_json "
+                        "ELSE '{}' END,'$.issue_link.number')='integer' AND NOT EXISTS("
+                        "SELECT 1 FROM external_review_effects i WHERE i.kind='review_issue' "
+                        "AND i.conversation_id=e.conversation_id AND i.correlation_id=e.correlation_id "
+                        "AND i.head_sha=e.head_sha AND i.actor=e.actor) ORDER BY e.created_at LIMIT 10")
+    for row in rows:
+        try:
+            task = await db.get_conversation_task(row["conversation_id"])
+            issue = (task or {}).get("issue_link") or {}
+            if type(issue.get("number")) is not int:
+                continue
+            payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+            comments = [{**c, "body": external_review_publish.without_inline_prefix(c["body"])}
+                        for c in payload.get("comments", [])]
+            await external_review_publish.enqueue_effect(
+                db, row["conversation_id"], "review_issue", row["correlation_id"], row["head_sha"],
+                {"summary": payload["summary"], "comments": comments, "model": payload["model"],
+                 "base_sha": payload.get("base_sha"), "context_revision": payload.get("context_revision", 0),
+                 "target": {"kind": "issue", "number": issue["number"]}}, row["actor"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("External review issue mirror rejected; the PR publication is unaffected")
+
+
 async def _publish(db):
     for job in await external_review.publication_jobs(db, limit=10):
         try:
@@ -99,6 +129,7 @@ async def _publish(db):
         except Exception:
             await jobs.block_ready(db, job, "La revisión no produjo una publicación válida; requiere revisión o reintento explícito")
             logger.warning("External review publication intent rejected; other jobs remain eligible")
+    await _mirror_to_issue(db)
     # Evidence is enqueued atomically with its declaration, not reconstructed
     # from legacy declarations and not sent once per UI refresh.
     rows = await db.run("SELECT e.conversation_id,c.project_slug,e.actor FROM external_review_effects e "

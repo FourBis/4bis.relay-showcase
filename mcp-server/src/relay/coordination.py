@@ -228,6 +228,7 @@ def guard_workspace(db_key, *, source="body", enqueue=False, checkout_only=False
                          "Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.",
                          "conversation_id": conv_id}, status=409)
             if checkout_only:
+                # El modo que prohíbe ejecutar se valida antes de este bypass.
                 # Disabled/missing paths remain the handler's authorization or
                 # validation error. A directory without Git has no checkout to
                 # reserve, even when a different private chat uses the project.

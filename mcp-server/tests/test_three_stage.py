@@ -1157,13 +1157,16 @@ def test_render_tool_calls_empty():
 @pytest.fixture
 async def env():
     with tempfile.TemporaryDirectory() as tmp:
-        repo_path = Path(tmp) / "repo"
+        repo_path = Path(tmp) / "demo-repo"
         repo_path.mkdir()
+        skills_dir = Path(tmp) / "skills"
+        skills_dir.mkdir()
         env_vars = {
             "STATE_DIR": str(Path(tmp) / "state"),
             "FOURBIS_DB_PATH": str(Path(tmp) / "relay.db"),
             "FOURBIS_CHATS_DIR": str(Path(tmp) / "chats"),
             "FOURBIS_JSONL_DIR": str(Path(tmp) / "jsonl"),
+            "FOURBIS_SKILLS_DIR": str(skills_dir),
             "FOURBIS_MODEL": "test",
             "LOG_LEVEL": "WARNING",
         }
