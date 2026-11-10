@@ -1,5 +1,18 @@
 # Validación de la versión de portafolio
 
+## Seguimiento de CI del 2 de noviembre de 2026
+
+Los PR [#41](https://github.com/FourBis/4bis.relay-showcase/pull/41) y
+[#42](https://github.com/FourBis/4bis.relay-showcase/pull/42) figuran integrados
+en `develop` en `7e55b75f1fb3be56370923a4ce2b82999c5c9fbb`. El CI de ese commit
+falló: 75 casos fallidos, 1.051 aprobados y 8 errores en la primera tanda;
+las etapas siguientes quedaron omitidas. El despliegue automático de la demo
+terminó, pero no valida el backend. El [seguimiento](qa/ci-followup-2026-11-02.md)
+describe la corrección preparada y la evidencia pendiente.
+
+Las cifras y límites de las secciones históricas de abajo pertenecen a sus
+respectivas versiones; no son una afirmación de CI verde para esta rama.
+
 ## Candidato de paridad del 1 de noviembre de 2026
 
 El [recibo de paridad](qa/parity-2026-11-01.md) describe la segunda tanda local:

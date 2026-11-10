@@ -8,9 +8,13 @@ const pollStart = source.indexOf("async function pollChat");
 const pollEnd = source.indexOf("\n\nfunction appendOptimisticUser", pollStart);
 const pollSource = source.slice(pollStart, pollEnd);
 const selectionSource = source.match(/function selectionIsCurrent\([^]*?\n}/)[0];
-const terminalStart = source.indexOf('const TERMINAL_CHAT_STATUSES');
-const terminalEnd = source.indexOf('function showPollReconnect', terminalStart);
-const terminalSource = source.slice(terminalStart, terminalEnd);
+const terminalConstant = source.match(/const TERMINAL_CHAT_STATUSES = new Set\([^]*?\);/);
+assert(terminalConstant, "el polling conserva su catálogo de estados terminales");
+const terminalSource = [terminalConstant[0], ...["isTerminalChatStatus", "isTerminalRunSnapshot"].map(name => {
+  const definition = source.match(new RegExp(`function ${name}\\([^]*?\\n}`));
+  assert(definition, `falta el helper de polling ${name}`);
+  return definition[0];
+})].join("\n");
 
 function error(message, status) {
   return Object.assign(new Error(message), status === undefined ? {} : { status });

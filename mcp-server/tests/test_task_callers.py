@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from pydantic_ai.usage import RunUsage
 
-from relay import expert_iteration, file_tools, github_credentials, identity, planificador, server, server_expert_routes, task_service
+from relay import conversation_access, expert_iteration, file_tools, github_credentials, identity, planificador, server, server_expert_routes, task_service
 from relay.app_state import DB_KEY, GRAFOS_KEY, PROGRESS_KEY, RUNNING_KEY
 from relay.db import Database
 from relay.execution_policy import ExecutionPolicy
@@ -22,7 +22,7 @@ async def _managed_db(tmp_path: Path) -> tuple[Database, str]:
     db = Database(path=tmp_path / "relay.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
-    cid = await db.create_conversation(project_slug="demo")
+    cid = await db.create_conversation(project_slug="demo", requested_by=identity.OWNER)
     await db.update_conversation_task(cid, mode="write", state="ready",
                                       tracking={"enabled": False})
     return db, cid
@@ -154,6 +154,10 @@ async def test_member_cannot_pause_write_task_through_legacy_cancel(tmp_path, mo
     await _set_actor(db, actor)
     event = await db.enqueue_conversation_event(
         cid, "request:owner", "run", {"user": "trabaja", "role": "owner"})
+    member = "member@example.test"
+    await db.set_user_role(member, "member", project_slugs=[])
+    monkeypatch.setattr(identity, "_roles", {member: "member"})
+    monkeypatch.setattr(identity, "_project_grants", {})
     client = await _event_client(db, monkeypatch)
     try:
         before = await db.get_conversation_task(cid)
@@ -272,6 +276,7 @@ async def test_standalone_chat_cancel_requires_its_creator_or_owner(
     db = Database(path=tmp_path / "relay.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    await db.set_user_role(actor, "member", project_slugs=grants)
     chat_id = await db.create_chat(
         project_slug="demo", source="test", author="owner", target="demo",
         requested_by=requested_by)

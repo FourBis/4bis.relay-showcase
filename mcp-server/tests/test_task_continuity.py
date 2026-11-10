@@ -58,24 +58,20 @@ def make_repo(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_event_without_actor_does_not_reuse_task_creator(monkeypatch):
-    class DB:
-        async def get_conversation_task(self, _cid):
-            return {"state": "ready", "requested_by": "creator@example.test", "mode": "read"}
-
-        async def claim_conversation_event(
-                self, _cid, *, claimed, expected_event_id=None):
-            assert claimed == {}
-            assert expected_event_id is None
-            return {"id": 7, "kind": "run", "payload": {"role": "member"}}
-
-        async def finish_conversation_event(self, event_id, **kwargs):
-            self.finished = (event_id, kwargs)
-
-        async def update_conversation_task(self, _cid, **kwargs):
-            self.blocked = kwargs
-
-    db = DB()
+async def test_event_without_actor_does_not_reuse_task_creator(tmp_path, monkeypatch):
+    from relay import conversation_access
+    db = Database(path=tmp_path / "actor.db")
+    await db.init_schema()
+    await db.upsert_project({"slug": "demo", "name": "Demo", "repo_path": str(tmp_path)})
+    creator = "creator@example.test"
+    await db.set_user_role(creator, "member", project_slugs=["demo"])
+    cid = await db.create_conversation(project_slug="demo", requested_by=creator)
+    await db.update_conversation_task(cid, state="ready", requested_by=creator,
+        mode="read_only", read_only=True, no_checkout=True)
+    # The creator really can send. A missing event actor must not inherit this grant.
+    assert (await conversation_access.require(db, cid, creator, "send"))["can_send"]
+    event = await db.enqueue_conversation_event(cid, "missing-actor", "run",
+                                               {"user": "consulta", "role": "member"})
     called = False
 
     async def should_not_run(*_args):
@@ -84,10 +80,13 @@ async def test_event_without_actor_does_not_reuse_task_creator(monkeypatch):
 
     monkeypatch.setattr(task_service, "_run_event", should_not_run)
     role_before = task_service.execution_policy.request_role.get()
-    await task_service._consume({DB_KEY: db}, {}, "conv")
+    await task_service._consume({DB_KEY: db}, await db.get_project("demo"), cid)
     assert not called
-    assert db.finished[1]["state"] == "uncertain"
-    assert db.blocked["state"] == "blocked"
+    saved = next(row for row in await db.list_conversation_events(cid) if row["id"] == event["id"])
+    assert saved["state"] == "uncertain"
+    assert "Conversación no disponible" in saved["error"]
+    assert (await db.get_chat(event["chat_id"]))["requested_by"] is None
+    assert (await db.get_conversation_task(cid))["state"] == "blocked"
     assert task_service.execution_policy.request_role.get() == role_before
 
 

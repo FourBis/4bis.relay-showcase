@@ -117,13 +117,16 @@ async def test_project_grant_revoked_during_github_io_aborts_without_mutation(
     before = await db.get_conversation_task(task["id"]) if task else None
 
     async def revoke(*args, **kwargs):
-        identity._project_grants[WHO] = []
+        # Revoke the authoritative grant during I/O. Keep the request cache
+        # stale so a cached assignment cannot authorize the post-I/O write.
         await db.set_user_role(WHO, "member", project_slugs=[])
+        assert identity._project_grants[WHO] == ["demo"]
         if remote_fails:
             raise external_pr.TaskPRError("GitHub unavailable after grant revocation")
         return copy.deepcopy(remote)
 
-    monkeypatch.setattr(external_pr, "read_snapshot", revoke)
+    observed = AsyncMock(side_effect=revoke)
+    monkeypatch.setattr(external_pr, "read_snapshot", observed)
     client = await client_for(db, monkeypatch)
     try:
         path = "/projects/demo/external-pr" if action == "register" else f"/conversations/{task['id']}/external-pr"
@@ -132,6 +135,8 @@ async def test_project_grant_revoked_during_github_io_aborts_without_mutation(
             payload.update(request_id="new-after-revocation", head_sha=SHA_A, summary="Must not be accepted")
         response = await client.post(path, json=payload)
         assert response.status == 403
+        observed.assert_awaited_once()
+        assert identity._project_grants[WHO] == ["demo"]
         if task:
             assert await db.get_conversation_task(task["id"]) == before
         else:

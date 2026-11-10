@@ -6,9 +6,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from relay import (execution_policy, identity, server_conversation_actions,
+from relay import (conversation_access, execution_policy, identity, server_conversation_actions,
                    server_task_routes, task_workspace, user_accounts)
 from relay.app_state import DB_KEY
+from relay.db import Database
 from tests.test_task_continuity import create_task, make_client
 
 
@@ -22,6 +23,14 @@ class UsersDb:
 
     async def list_users(self):
         return self.users
+
+
+async def _persist_roles(db, users):
+    for user in users:
+        await db.set_user_role(user["email"], user["role"],
+                               enabled=user.get("enabled", True),
+                               project_slugs=user.get("project_slugs", []))
+    identity.load_roles(await db.list_users())
 
 
 @pytest.fixture(autouse=True)
@@ -140,26 +149,30 @@ async def test_owner_policy_stays_unrestricted_and_project_read_only_stays_stric
 
 
 @pytest.mark.asyncio
-async def test_member_task_actions_are_project_scoped_and_never_publish(monkeypatch):
-    db = AsyncMock(_task_cancellations={})
-    db.get_conversation.return_value = {"project_slug": "aurora-demo"}
-    db.get_project.return_value = PROJECT_A
-    monkeypatch.setattr(server_task_routes.task_service, "snapshot",
-                        AsyncMock(return_value={"mode": "write", "state": "ready",
-                                                "workspace_path": "PRIVATE_WORKSPACE",
-                                                "origin_url": "PRIVATE_REPO",
-                                                "issue_link": {"number": 7, "title": "Synthetic issue",
-                                                               "url": "https://github.com/AuroraDemo/demo/issues/7",
-                                                               "private_diagnostic": "PRIVATE_ISSUE"},
-                                                "resolution_complete": False,
-                                                "error": "PRIVATE_ERROR"}))
-    request = make_mocked_request("GET", "/tasks/task-a")
-    request[identity.IDENTITY_KEY] = "sam@example.test"
-    identity.load_roles([{"email": "sam@example.test", "role": "member",
-                          "enabled": True, "project_slugs": ["aurora-demo"]}])
+async def test_member_task_actions_are_project_scoped_and_never_publish(tmp_path, monkeypatch):
+    db = Database(path=tmp_path / "task-actions.db")
+    await db.init_schema()
+    for project in (PROJECT_A, PROJECT_B):
+        await db.upsert_project({**project, "name": project["slug"], "repo_path": str(tmp_path)})
+    member = "sam@example.test"
+    await _persist_roles(db, [{"email": member, "role": "member",
+                               "project_slugs": ["aurora-demo"]}])
+    cid = await db.create_conversation(project_slug="aurora-demo", requested_by=identity.OWNER)
+    await db.update_conversation_task(cid, mode="write", state="ready")
+    await conversation_access.set_share(db, cid, identity.OWNER, member, "read")
+    snapshot = AsyncMock(return_value={"mode": "write", "state": "ready",
+        "workspace_path": "PRIVATE_WORKSPACE", "origin_url": "PRIVATE_REPO",
+        "issue_link": {"number": 7, "title": "Synthetic issue",
+                       "url": "https://github.com/AuroraDemo/demo/issues/7",
+                       "private_diagnostic": "PRIVATE_ISSUE"},
+        "resolution_complete": False, "error": "PRIVATE_ERROR"})
+    monkeypatch.setattr(server_task_routes.task_service, "snapshot", snapshot)
+    request = make_mocked_request("GET", f"/conversations/{cid}/task")
+    request[identity.IDENTITY_KEY] = member
 
-    allowed = await server_task_routes._task_snapshot(request, db, "conversation-a")
-    assert allowed["allowed_actions"] == ["continue", "pause", "cancel", "link_issue", "issue_sync"]
+    allowed = await server_task_routes._task_snapshot(request, db, cid)
+    # Compartir lectura y asignar el proyecto no conceden control de la tarea.
+    assert allowed["allowed_actions"] == []
     assert "publish" not in allowed["allowed_actions"]
     assert allowed["can_control"] is False
     assert "workspace_path" not in allowed and "origin_url" not in allowed
@@ -168,32 +181,26 @@ async def test_member_task_actions_are_project_scoped_and_never_publish(monkeypa
     assert allowed["resolution_complete"] is False
     assert allowed["error"] == "La tarea requiere revisión del propietario."
 
-    db.get_project.return_value = PROJECT_B
-    denied = await server_task_routes._task_snapshot(request, db, "conversation-b")
-    assert denied["allowed_actions"] == []
+    other = await db.create_conversation(project_slug="demo-sandbox", requested_by=identity.OWNER)
+    with pytest.raises(PermissionError):
+        await server_task_routes._task_snapshot(request, db, other)
+    snapshot.assert_awaited_once_with(db, cid)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("creator_role", "task_fallback"), [
-    ("member", False), ("subadmin", True),
-])
+@pytest.mark.parametrize("creator_role", ["member", "subadmin"])
 async def test_read_only_creator_can_control_own_task_without_write_rights(
-        tmp_path, monkeypatch, creator_role, task_fallback):
+        tmp_path, monkeypatch, creator_role):
     client, db, _source, _app = await make_client(tmp_path, monkeypatch)
     creator = "creator@example.test"
     actor = {"email": creator}
     monkeypatch.setattr(identity, "requester", lambda _request: actor["email"])
-    identity.load_roles([
-        {"email": creator, "role": creator_role, "enabled": True,
-         "project_slugs": []},
-        {"email": "other@example.test", "role": "member", "enabled": True,
-         "project_slugs": []},
-        {"email": "disabled@example.test", "role": "member", "enabled": False,
-         "project_slugs": []},
-        {"email": "finance@example.test", "role": "finance", "enabled": True,
-         "project_slugs": []},
-        {"email": "granted@example.test", "role": "member", "enabled": True,
-         "project_slugs": ["demo"]},
+    await _persist_roles(db, [
+        {"email": creator, "role": creator_role, "enabled": True, "project_slugs": []},
+        {"email": "other@example.test", "role": "member", "enabled": True, "project_slugs": []},
+        {"email": "disabled@example.test", "role": "member", "enabled": False, "project_slugs": []},
+        {"email": "finance@example.test", "role": "finance", "enabled": True, "project_slugs": []},
+        {"email": "granted@example.test", "role": "member", "enabled": True, "project_slugs": ["demo"]},
     ])
     try:
         cid = await create_task(client)
@@ -201,76 +208,70 @@ async def test_read_only_creator_can_control_own_task_without_write_rights(
         assert task["mode"] == "read_only"
         request = make_mocked_request("GET", f"/conversations/{cid}/task")
 
-        no_creator = await db.create_conversation(
-            project_slug="demo", requested_by=None)
-        await db.update_conversation_task(
-            no_creator, mode="read_only", state="ready")
-        actor["email"] = creator
-        denied = await server_task_routes._task_snapshot(request, db, no_creator)
-        assert denied["allowed_actions"] == []
+        no_creator = await db.create_conversation(project_slug="demo", requested_by=None)
+        await db.update_conversation_task(no_creator, mode="read_only", state="ready", requested_by=creator)
+        # El requested_by del JSON no sustituye al creador durable de la fila.
+        with pytest.raises(PermissionError):
+            await server_task_routes._task_snapshot(request, db, no_creator)
 
-        mismatched = await db.create_conversation(
-            project_slug="demo", requested_by="other@example.test")
-        await db.update_conversation_task(
-            mismatched, mode="read_only", state="ready", requested_by=creator)
-        denied = await server_task_routes._task_snapshot(request, db, mismatched)
-        assert denied["allowed_actions"] == []
+        mismatched = await db.create_conversation(project_slug="demo", requested_by="other@example.test")
+        await db.update_conversation_task(mismatched, mode="read_only", state="ready", requested_by=creator)
+        with pytest.raises(PermissionError):
+            await server_task_routes._task_snapshot(request, db, mismatched)
         actor["email"] = "other@example.test"
         allowed = await server_task_routes._task_snapshot(request, db, mismatched)
         assert allowed["allowed_actions"] == ["continue", "pause", "cancel"]
         actor["email"] = creator
 
-        if task_fallback:
-            # Simula una fila obtenida de una BD antigua sin la columna.
-            get_conversation = db.get_conversation
-
-            async def legacy_conversation(conv_id):
-                row = await get_conversation(conv_id)
-                row.pop("requested_by", None)
-                return row
-
-            monkeypatch.setattr(db, "get_conversation", legacy_conversation)
-
         own = await server_task_routes._task_snapshot(request, db, cid)
         assert own["allowed_actions"] == ["continue", "pause", "cancel"]
         assert not {"enable_write", "publish", "track"} & set(own["allowed_actions"])
 
-        # Los permisos previos por rol/grant no dependen de haber creado la tarea.
         actor["email"] = "granted@example.test"
-        granted = await server_task_routes._task_snapshot(request, db, cid)
-        assert {"continue", "pause", "cancel", "enable_write"} <= set(
-            granted["allowed_actions"])
+        with pytest.raises(PermissionError):
+            await server_task_routes._task_snapshot(request, db, cid)
+        await conversation_access.set_share(db, cid, identity.OWNER, actor["email"], "read")
+        shared = await server_task_routes._task_snapshot(request, db, cid)
+        assert shared["allowed_actions"] == [] and shared["can_control"] is False
+        denied_control = await client.post(f"/conversations/{cid}/task", json={"action": "pause"})
+        assert denied_control.status == 403
+        assert (await db.get_conversation_task(cid))["state"] == "ready"
+
         actor["email"] = identity.OWNER
         owner = await server_task_routes._task_snapshot(request, db, cid)
-        assert {"continue", "pause", "cancel", "publish", "track"} <= set(
-            owner["allowed_actions"])
+        assert {"continue", "pause", "cancel", "publish", "track"} <= set(owner["allowed_actions"])
 
         actor["email"] = creator
-        historical = await db.create_conversation(
-            project_slug="demo", requested_by=creator)
+        historical = await db.create_conversation(project_slug="demo", requested_by=creator)
         legacy = await server_task_routes._task_snapshot(request, db, historical)
-        assert legacy["allowed_actions"] == []
+        # La proyección materializa el hilo y conserva el control de su creador.
+        # No concede asignación, escritura ni publicación.
+        assert legacy["allowed_actions"] == ["continue", "pause", "cancel"]
+        assert legacy["can_control"] is True
+        assert legacy["access"]["is_creator"] is True
+        assert legacy["access"]["project_assigned"] is False
+        assert not {"enable_write", "publish", "track"} & set(legacy["allowed_actions"])
+        actor["email"] = "granted@example.test"
+        with pytest.raises(PermissionError):
+            await server_task_routes._task_snapshot(request, db, historical)
 
-        for email in ("other@example.test", "disabled@example.test",
-                      "finance@example.test", "unregistered@example.test"):
+        for email in ("other@example.test", "disabled@example.test", "finance@example.test", "unregistered@example.test"):
             actor["email"] = email
-            denied = await server_task_routes._task_snapshot(request, db, cid)
-            assert denied["allowed_actions"] == [], email
+            with pytest.raises(PermissionError):
+                await server_task_routes._task_snapshot(request, db, cid)
 
         actor["email"] = "other@example.test"
         for action in ("pause", "cancel"):
-            denied = await client.post(f"/conversations/{cid}/task",
-                                       json={"action": action})
-            assert denied.status == 403, action
+            denied = await client.post(f"/conversations/{cid}/task", json={"action": action})
+            assert denied.status == 404, action
+            assert "PRIVATE_" not in await denied.text()
         assert (await db.get_conversation_task(cid))["state"] == "ready"
 
         actor["email"] = creator
-        paused = await client.post(f"/conversations/{cid}/task",
-                                   json={"action": "pause"})
+        paused = await client.post(f"/conversations/{cid}/task", json={"action": "pause"})
         assert paused.status == 200
         assert (await paused.json())["state"] == "paused"
-        cancelled = await client.post(f"/conversations/{cid}/task",
-                                      json={"action": "cancel"})
+        cancelled = await client.post(f"/conversations/{cid}/task", json={"action": "cancel"})
         assert cancelled.status == 200
         assert (await cancelled.json())["state"] == "cancelled"
     finally:
@@ -283,8 +284,8 @@ async def test_http_enable_write_requires_grant_and_member_cannot_publish_or_tra
     client, db, _source, _app = await make_client(tmp_path, monkeypatch)
     email = "sam@example.test"
     monkeypatch.setattr(identity, "requester", lambda _request: email)
-    identity.load_roles([{"email": email, "role": "member", "enabled": True,
-                          "project_slugs": []}])
+    await _persist_roles(db, [{"email": email, "role": "member", "enabled": True,
+                               "project_slugs": []}])
     try:
         cid = await create_task(client)
         state = await db.get_conversation_task(cid)
@@ -297,8 +298,8 @@ async def test_http_enable_write_requires_grant_and_member_cannot_publish_or_tra
         assert denied.status == 403
         initialize.assert_not_awaited()
 
-        identity.load_roles([{"email": email, "role": "member", "enabled": True,
-                              "project_slugs": ["demo"]}])
+        await _persist_roles(db, [{"email": email, "role": "member", "enabled": True,
+                                   "project_slugs": ["demo"]}])
         enabled = await client.post(f"/conversations/{cid}/task", json={
             "action": "enable_write"})
         assert enabled.status == 200

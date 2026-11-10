@@ -28,6 +28,37 @@ def verdict(pending="Comprobar la vista", done=()):
                 "remove_step_ids": [], "add_step_ids": []}}}
 
 
+def _graph_identity(graph):
+    return {key: graph[key] for key in ("id", "objetivo", "project_slug", "conversation_id")}
+
+
+def _assert_pending_check(graph):
+    from relay.orchestrator_verification import verification_pending, verification_signature
+
+    record = json.loads(graph["verificacion_json"])
+    # Un intento pendiente no inventa veredicto, corrección ni consumo confirmado.
+    assert set(record) == {"verification_version", "pending", "input_signature", "started_at"}
+    assert type(record["verification_version"]) is int and record["verification_version"] == 1
+    assert record["pending"] is True
+    assert record["input_signature"] == verification_signature(graph)
+    assert len(record["input_signature"]) == 64
+    assert isinstance(record["started_at"], str) and record["started_at"]
+    assert verification_pending(graph) is True
+
+
+def _assert_confirmed_check(graph):
+    from relay.orchestrator_verification import verification_pending, verification_signature
+
+    record = json.loads(graph["verificacion_json"])
+    assert type(record["verification_version"]) is int and record["verification_version"] == 1
+    assert record["pending"] is False
+    assert record["input_signature"] == verification_signature(graph)
+    assert record["input_attempts"] == {task["id"]: task["intentos"] for task in graph["tasks"]}
+    assert record["verdict"] == "complete" and record["error"] == ""
+    assert "tokens_in" not in record and "tokens_out" not in record
+    assert verification_pending(graph) is False
+
+
 async def test_corrige_y_verifica_sin_repetir_el_nodo_original(db):
     runs = []
     checks = iter([verdict(), {"verdict": "complete"}])
@@ -237,24 +268,42 @@ async def test_correccion_no_reabre_cancelaciones_preguntas_ni_errores(
 
 
 async def test_sin_veredicto_persistido_no_inicia_correccion(db, monkeypatch):
-    runs = []
+    runs, checks = [], []
 
     async def execute(task):
         runs.append(task["id"])
         return {"ok": True}
 
     async def verify(**_):
-        return verdict()
+        checks.append(len(runs))
+        return verdict() if len(runs) == 1 else {"verdict": "complete"}
 
     async def unavailable(*_):
         raise OSError("disk failure")
 
-    monkeypatch.setattr(db, "run_tx", unavailable)
-    await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "run_tx", unavailable)
+        await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
     assert runs == ["original"]
+    assert checks == [1]
     graph = await db.get_task_graph("g")
-    assert graph["verificacion_json"] is None
+    _assert_pending_check(graph)
+    assert graph["estado"] == "activo"
     assert len(graph["tasks"]) == 1
+    original = graph["tasks"][0]
+    assert original["estado"] == grafo.HECHO
+    assert original["intentos"] == 1
+    identity = _graph_identity(graph)
+
+    result = await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    recovered = await db.get_task_graph("g")
+    assert result["estado"] == recovered["estado"] == "hecho"
+    assert _graph_identity(recovered) == identity
+    assert recovered["tasks"][0] == original
+    assert runs.count("original") == 1 and len(runs) == 2
+    assert checks == [1, 1, 2]
+    assert [task["intentos"] for task in recovered["tasks"]] == [1, 1]
+    _assert_confirmed_check(recovered)
 
 
 @pytest.mark.parametrize("stopped", ["paused", "blocked", "cancelled", "finished", "cleaned"])
@@ -371,26 +420,47 @@ async def test_pausa_espera_inicio_bajo_lock_y_no_lanza_el_siguiente_nodo(db, mo
 
 async def test_interrupcion_no_persiste_veredicto_sin_su_correccion(db, monkeypatch):
     import relay.orchestrator_recovery as recovery
+    import relay.orchestrator_core as core
+
+    runs, checks = [], []
 
     async def execute(task):
+        runs.append(task["id"])
         return {"ok": True}
 
     async def verify(**_):
-        return verdict()
+        checks.append(len(runs))
+        return verdict() if len(runs) == 1 else {"verdict": "complete"}
 
-    # Simula la caída antes de entrar a la transacción que materializa la corrección.
+    # Interrumpir antes de confirmar juntos el veredicto y su corrección.
     async def interrupted(*_, **__):
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(recovery, "continue_verification", interrupted)
-    import relay.orchestrator_core as core
-    if hasattr(core, "continue_verification"):
-        monkeypatch.setattr(core, "continue_verification", interrupted)
-    with pytest.raises(asyncio.CancelledError):
-        await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery, "continue_verification", interrupted)
+        if hasattr(core, "continue_verification"):
+            patch.setattr(core, "continue_verification", interrupted)
+        with pytest.raises(asyncio.CancelledError):
+            await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
     persisted = await db.get_task_graph("g")
-    assert persisted["verificacion_json"] is None
+    _assert_pending_check(persisted)
+    assert persisted["estado"] == "activo"
     assert len(persisted["tasks"]) == 1
+    original = persisted["tasks"][0]
+    assert original["estado"] == grafo.HECHO
+    assert original["intentos"] == 1
+    assert runs == ["original"] and checks == [1]
+    identity = _graph_identity(persisted)
+
+    result = await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    recovered = await db.get_task_graph("g")
+    assert result["estado"] == recovered["estado"] == "hecho"
+    assert _graph_identity(recovered) == identity
+    assert recovered["tasks"][0] == original
+    assert runs.count("original") == 1 and len(runs) == 2
+    assert checks == [1, 1, 2]
+    assert [task["intentos"] for task in recovered["tasks"]] == [1, 1]
+    _assert_confirmed_check(recovered)
 
 
 async def test_interrupcion_del_verificador_conserva_el_grafo_recuperable(db):
@@ -412,13 +482,23 @@ async def test_interrupcion_del_verificador_conserva_el_grafo_recuperable(db):
         await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
     persisted = await db.get_task_graph("g")
     assert persisted["estado"] == "activo"
-    assert persisted["verificacion_json"] is None
-    assert persisted["tasks"][0]["estado"] == grafo.HECHO
+    _assert_pending_check(persisted)
+    assert len(persisted["tasks"]) == 1
+    original = persisted["tasks"][0]
+    assert original["estado"] == grafo.HECHO
+    assert original["intentos"] == 1
+    assert runs == ["original"] and checks == 1
+    identity = _graph_identity(persisted)
 
     result = await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
-    assert result["estado"] == (await db.get_task_graph("g"))["estado"] == "hecho"
-    assert runs.count("original") == 1
-    assert len(runs) == 2
+    recovered = await db.get_task_graph("g")
+    assert result["estado"] == recovered["estado"] == "hecho"
+    assert _graph_identity(recovered) == identity
+    assert recovered["tasks"][0] == original
+    assert runs.count("original") == 1 and len(runs) == 2
+    assert checks == 3
+    assert [task["intentos"] for task in recovered["tasks"]] == [1, 1]
+    _assert_confirmed_check(recovered)
 
 
 @pytest.mark.parametrize("response", [
@@ -467,13 +547,35 @@ async def test_veredicto_y_estado_final_se_confirman_juntos(db):
     await db.run("CREATE TRIGGER reject_terminal BEFORE UPDATE OF estado ON task_graphs "
                  "WHEN NEW.estado='hecho' BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
     before = await db.get_task_graph("g")
+    checks = 0
+    replayed = []
 
     async def verify(**_):
+        nonlocal checks
+        checks += 1
         return {"verdict": "complete", "feedback": "Comprobado"}
+
+    async def execute(task):
+        replayed.append(task["id"])
+        raise AssertionError("El nodo terminado no se debe repetir")
 
     assert not await orquestador._verificar_al_cerrar(
         db, "g", before, {"estado": "hecho"}, verify)
-    assert await db.get_task_graph("g") == before
+    pending = await db.get_task_graph("g")
+    _assert_pending_check(pending)
+    assert checks == 1
+    # El fallo revierte resultado final y estado; conserva la intención previa.
+    assert {key: value for key, value in pending.items() if key != "verificacion_json"} == {
+        key: value for key, value in before.items() if key != "verificacion_json"}
+
+    await db.run("DROP TRIGGER reject_terminal")
+    result = await orquestador.correr_grafo(db, "g", ejecutar=execute, verificar=verify)
+    recovered = await db.get_task_graph("g")
+    assert result["estado"] == recovered["estado"] == "hecho"
+    assert _graph_identity(recovered) == _graph_identity(before)
+    assert recovered["tasks"] == before["tasks"]
+    assert replayed == [] and checks == 2
+    _assert_confirmed_check(recovered)
 
 
 async def test_resume_http_repite_verificacion_interrumpida_sin_repetir_nodos(monkeypatch):

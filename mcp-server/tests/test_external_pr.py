@@ -335,6 +335,8 @@ async def test_routes_enforce_project_permission_and_authenticated_attribution(
         registration, monkeypatch, role, granted, enabled, read_only, expected):
     from relay import server_common, server_external_pr_routes
     db, project, body, _ = registration
+    db_grants = ["demo"] if granted and role in {"member", "subadmin"} else []
+    await db.set_user_role(WHO, role, enabled=enabled, project_slugs=db_grants)
     if read_only:
         await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True}})
     monkeypatch.setattr(identity, "_roles", {WHO: role})

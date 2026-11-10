@@ -217,6 +217,11 @@ async def test_finance_project_catalog_has_no_paths_or_tools():
 
 
 async def test_finance_metrics_do_not_expose_raw_errors(monkeypatch):
+    from relay import reporting
+    def unavailable_zone(name):
+        raise reporting.ZoneInfoNotFoundError(name)
+    # El contrato por defecto sigue funcionando sin la base IANA del sistema.
+    monkeypatch.setattr(reporting, "ZoneInfo", unavailable_zone)
     db = AsyncMock()
     db.metrics_summary.return_value = {"totals": {"cost_usd": 3},
                                        "error_breakdown": [{"error_type": "secret-path"}]}
@@ -224,8 +229,28 @@ async def test_finance_metrics_do_not_expose_raw_errors(monkeypatch):
     app[DB_KEY] = db
     req = make_mocked_request("GET", "/admin/api/metrics/summary", app=app)
     monkeypatch.setattr(identity, "role_of", lambda _: "finance")
-    data = json.loads((await admin_observability.api_metrics_summary(req)).text)
+    response = await admin_observability.api_metrics_summary(req)
+    assert response.status == 200, response.text
+    data = json.loads(response.text)
     assert data["error_breakdown"] == [] and data["totals"]["cost_usd"] == 3
+    assert "secret-path" not in response.text
+    db.metrics_summary.assert_awaited_once_with(
+        7, from_date="", to_date="", tz="UTC", project="", status="", provider="", role="")
+
+
+async def test_metrics_reject_unavailable_timezone_without_falling_back(monkeypatch):
+    from relay import reporting
+    def unavailable_zone(name):
+        raise reporting.ZoneInfoNotFoundError(name)
+    monkeypatch.setattr(reporting, "ZoneInfo", unavailable_zone)
+    db = AsyncMock()
+    app = web.Application()
+    app[DB_KEY] = db
+    req = make_mocked_request("GET", "/admin/api/metrics/summary?tz=Example/Unavailable", app=app)
+    response = await admin_observability.api_metrics_summary(req)
+    assert response.status == 400
+    assert json.loads(response.text) == {"ok": False, "error": "tz debe ser una zona IANA válida"}
+    db.metrics_summary.assert_not_awaited()
 
 
 def test_finance_crm_exposes_only_commercial_fields():

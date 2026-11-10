@@ -7,7 +7,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import coordination, external_pr_access, identity, task_service, task_workspace
+from relay import (
+    conversation_access, coordination, external_pr_access, identity,
+    private_mcp_access, task_service, task_workspace,
+)
 from relay.admin_observability import api_search
 from relay.app_state import DB_KEY
 from relay.db import Database
@@ -21,6 +24,7 @@ from relay.server_conversation_routes import (
     conversations_get, conversations_get_messages, conversations_list,
 )
 from relay.server_task_routes import task_get
+from relay.server_conversation_sharing import admin_listing
 
 
 async def external_task(tmp_path):
@@ -107,12 +111,15 @@ async def test_execution_routes_reject_external_before_any_workspace_or_bot_effe
         payload = {key: cid if value == "CID" else value for key, value in body.items()}
         response = await client.post(path.replace("CID", cid), json=payload)
         assert response.status == 409
-        error = await response.json()
+        denied = await response.json()
         if path.endswith("/set-discord-user"):
-            assert error["code"] == "discord_audience_unverified"
-            assert error["linked"] is False
+            # Private audience is rejected before any attempted Discord link,
+            # independently of the registration's read-only workspace policy.
+            assert denied["code"] == "discord_audience_unverified"
+            assert denied["linked"] is False
+            assert "audiencia" in denied["error"]
         else:
-            assert error["error"] == "external_pr_read_only"
+            assert denied["error"] == "external_pr_read_only"
         assert await db.get_conversation_task(cid) == state
         assert await db.list_conversation_events(cid) == []
         assert await db.run("SELECT id FROM chats WHERE conversation_id=?", (cid,)) == []
@@ -120,22 +127,27 @@ async def test_execution_routes_reject_external_before_any_workspace_or_bot_effe
         await client.close()
 
 
-@pytest.mark.parametrize("actor,role,grants,share,scope,listed_allowed,allowed", [
-    ("peer@example.test", "member", [], False, "mine", False, False),
-    ("peer@example.test", "member", ["demo"], True, "shared", True, True),
-    ("admin@example.test", "owner", [], False, "mine", False, True),
-    ("owner", "owner", [], False, "mine", False, True),
+@pytest.mark.parametrize("actor,role,grants,shared,read_only,register_allowed,chat_allowed", [
+    ("dev@example.test", "member", [], False, False, False, False),
+    ("dev@example.test", "member", ["demo"], False, False, True, True),
+    ("dev@example.test", "member", ["demo"], False, True, False, False),
+    ("peer@example.test", "member", ["demo"], False, False, True, False),
+    ("peer@example.test", "member", ["demo"], True, False, True, True),
+    ("admin@example.test", "owner", [], False, False, True, True),
+    ("owner", "owner", [], False, False, True, True),
 ])
-async def test_external_read_surfaces_require_current_project_grant(
-        tmp_path, monkeypatch, actor, role, grants, share, scope, listed_allowed, allowed):
+async def test_external_read_surfaces_require_current_project_grant_and_chat_access(
+        tmp_path, monkeypatch, actor, role, grants, shared, read_only, register_allowed, chat_allowed):
     db, cid, _state, _project = await external_task(tmp_path)
-    if actor != "owner":
+    # Authorization snapshots read current durable accounts, not only the
+    # process role cache. A project grant alone never shares a conversation.
+    await db.set_user_role("dev@example.test", "member", project_slugs=["demo"])
+    if actor != identity.OWNER:
         await db.set_user_role(actor, role, project_slugs=grants)
-    if share:
-        await db.run(
-            "INSERT INTO conversation_shares(conversation_id,email,permission,created_by,created_at,updated_at) "
-            "VALUES(?,?, 'read', ?, datetime('now'), datetime('now'))",
-            (cid, actor, "dev@example.test"))
+    if shared:
+        await conversation_access.set_share(db, cid, "dev@example.test", actor, "read")
+    if read_only:
+        await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True}})
     for attr in ("_roles", "_disabled", "_names", "_project_grants"):
         monkeypatch.setattr(identity, attr, getattr(identity, attr).copy())
     identity.load_roles(await db.list_users())
@@ -146,9 +158,12 @@ async def test_external_read_surfaces_require_current_project_grant(
         request[identity.IDENTITY_KEY] = actor
         return await handler(request)
 
-    app = web.Application(middlewares=[test_actor, identity.require_role, external_pr_access.guard])
+    app = web.Application(middlewares=[
+        test_actor, identity.require_role, private_mcp_access.guard, external_pr_access.guard,
+    ])
     app[DB_KEY] = db
     app.router.add_get("/conversations", conversations_list)
+    app.router.add_get("/admin/api/conversations", admin_listing)
     app.router.add_get("/conversations/{id}", conversations_get)
     app.router.add_get("/conversations/{id}/messages", conversations_get_messages)
     app.router.add_get("/conversations/{id}/task", task_get)
@@ -159,20 +174,83 @@ async def test_external_read_surfaces_require_current_project_grant(
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
-        listed = await client.get(f"/conversations?project=demo&scope={scope}")
+        # Owner administration is a separate list. The public list defaults
+        # to mine; a recipient must deliberately select shared.
+        list_path = ("/admin/api/conversations?project=demo" if role == "owner" else
+                     "/conversations?project=demo&scope="
+                     + ("mine" if actor == "dev@example.test" else "shared"))
+        listed = await client.get(list_path)
         assert listed.status == 200
-        assert bool((await listed.json())["conversations"]) is listed_allowed
+        assert bool((await listed.json())["conversations"]) is chat_allowed
+        if not chat_allowed:
+            assert "EXTERNAL_PRIVATE_SUMMARY" not in await listed.text()
+            assert "Declared tests" not in await listed.text()
         searched = await client.get(f"/admin/api/search?q={cid}")
         assert searched.status == 200
-        assert bool((await searched.json())["conversations"]) is allowed
+        assert bool((await searched.json())["conversations"]) is chat_allowed
+        if not chat_allowed:
+            assert "EXTERNAL_PRIVATE_SUMMARY" not in await searched.text()
+            assert "Declared tests" not in await searched.text()
         for suffix in ("", "/messages", "/task", "/pr", "/branch", "/diff"):
             detail = await client.get(f"/conversations/{cid}{suffix}")
+            # The register task is available through current project access;
+            # ordinary chat surfaces additionally require their own live ACL.
+            allowed = register_allowed and (suffix == "/task" or chat_allowed)
             if allowed:
                 assert detail.status == (422 if suffix == "/diff" else 200), await detail.text()
             else:
                 assert detail.status == 404, await detail.text()
                 assert "Declared tests" not in await detail.text()
+                assert "EXTERNAL_PRIVATE_SUMMARY" not in await detail.text()
         assert (await db.get_conversation_task(cid))["mode"] == "external_pr"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_ordinary_creator_reads_survive_project_grant_revocation(
+        tmp_path, monkeypatch, read_only):
+    db, external, _state, _project = await external_task(tmp_path)
+    actor = "dev@example.test"
+    await db.set_user_role(actor, "member", project_slugs=["demo"])
+    ordinary = await db.create_conversation(project_slug="demo", requested_by=actor)
+    await db.set_conversation_summary(ordinary, "ORDINARY_PRIVATE_SUMMARY")
+    await db.set_conversation_summary(external, "EXTERNAL_PRIVATE_SUMMARY")
+    await db.set_user_role(actor, "member", project_slugs=[])
+    if read_only:
+        await db.upsert_project({"slug": "demo", "defaults_json": {"read_only": True}})
+    for attr in ("_roles", "_disabled", "_names", "_project_grants"):
+        monkeypatch.setattr(identity, attr, getattr(identity, attr).copy())
+    identity.load_roles(await db.list_users())
+
+    @web.middleware
+    async def test_actor(request, handler):
+        request[identity.IDENTITY_KEY] = actor
+        return await handler(request)
+
+    app = web.Application(middlewares=[
+        test_actor, identity.require_role, private_mcp_access.guard, external_pr_access.guard,
+    ])
+    app[DB_KEY] = db
+    app.router.add_get("/conversations", conversations_list)
+    app.router.add_get("/conversations/{id}", conversations_get)
+    app.router.add_get("/admin/api/search", api_search)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        listed = await client.get("/conversations?project=demo&scope=mine")
+        assert listed.status == 200
+        assert [row["id"] for row in (await listed.json())["conversations"]] == [ordinary]
+        assert "EXTERNAL_PRIVATE_SUMMARY" not in await listed.text()
+        searched = await client.get(f"/admin/api/search?q={ordinary}")
+        assert searched.status == 200
+        assert [row["id"] for row in (await searched.json())["conversations"]] == [ordinary]
+        detail = await client.get(f"/conversations/{ordinary}")
+        assert detail.status == 200
+        assert (await detail.json())["summary"] == "ORDINARY_PRIVATE_SUMMARY"
+        denied = await client.get(f"/conversations/{external}")
+        assert denied.status == 404
+        assert "EXTERNAL_PRIVATE_SUMMARY" not in await denied.text()
     finally:
         await client.close()
 
@@ -181,10 +259,24 @@ async def test_external_title_never_enters_shared_chat_memory(tmp_path):
     db, cid, _state, _project = await external_task(tmp_path)
     marker = "EXTERNAL_PRIVATE_SUMMARY"
     await db.set_conversation_summary(cid, marker)
-    assert await db.search_memories("demo") == []
-    # Even a historical index row cannot turn registration data into chat context.
-    await db.add_memory(cid, "demo", marker)
-    assert await db.search_memories("demo", marker) == []
+    actor = identity.OWNER
+    assert await db.search_memories("demo", actor=actor) == []
+    # Even an administrator cannot index an external registration as chat
+    # knowledge. A valid actor ensures this exercises the source boundary.
+    with pytest.raises(PermissionError, match="Origen de conocimiento"):
+        await db.add_memory(cid, "demo", marker, actor=actor)
+    assert (await db.get_conversation(cid))["summary"] == marker
+    # Model a historical index row directly; the public writer now correctly
+    # refuses this origin. No fixture disables the live source/ACL checks.
+    if db._fts_available:
+        await db.run("INSERT INTO memories_fts(summary,project_slug,conversation_id) VALUES(?,?,?)",
+                     (marker, "demo", cid))
+    assert await db.search_memories("demo", marker, actor=actor) == []
+    # Positive control: retrieval remains available for an ordinary live source.
+    ordinary = await db.create_conversation(project_slug="demo", requested_by=actor)
+    await db.add_memory(ordinary, "demo", "ORDINARY_CHAT_MEMORY", actor=actor)
+    memories = await db.search_memories("demo", "ORDINARY_CHAT_MEMORY", actor=actor)
+    assert [entry["conversation_id"] for entry in memories] == [ordinary]
 
 
 @pytest.mark.parametrize("kind", ["run", "feedback", "publish"])

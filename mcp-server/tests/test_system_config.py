@@ -57,6 +57,37 @@ async def cli():
 # ---------- GET/PUT /admin/api/config ----------
 
 
+@pytest.mark.parametrize("helper", ["_load_runtime_config_sync", "private_mcp_boot_enabled"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_config_readers_close_their_connection(monkeypatch, tmp_path, helper, failed):
+    from relay import config
+    monkeypatch.setenv("FOURBIS_DB_PATH", str(tmp_path / "config.db"))
+    monkeypatch.setattr(config.Path, "is_file", lambda _: True)
+    connection = mock.Mock()
+    connection.execute.return_value.fetchall.return_value = [("RELAY_PRIVATE_MCP_ENABLED", "1")]
+    connection.execute.return_value.fetchone.return_value = ("1",)
+    if failed:
+        connection.execute.side_effect = config.sqlite3.OperationalError("synthetic query failure")
+    connect = mock.Mock(return_value=connection)
+    monkeypatch.setattr(config.sqlite3, "connect", connect)
+    setter = mock.Mock()
+    monkeypatch.setattr(config, "set_runtime_config", setter)
+
+    result = getattr(config, helper)()
+
+    connection.close.assert_called_once_with()
+    connect.assert_called_once()
+    assert connect.call_args.kwargs["uri"] is True
+    assert connect.call_args.args[0].endswith("?mode=ro")
+    if helper == "private_mcp_boot_enabled":
+        assert result is (not failed)
+        setter.assert_not_called()
+    elif failed:
+        setter.assert_not_called()
+    else:
+        setter.assert_called_once_with({"RELAY_PRIVATE_MCP_ENABLED": "1"})
+
+
 @pytest.mark.parametrize("configured, supplied, expected", [
     ("", "", True),
     ("synthetic-key", "", False),
