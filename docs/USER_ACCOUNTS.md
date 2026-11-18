@@ -67,6 +67,12 @@ Google usa OAuth web con identidad, lectura de Gmail y envío de correo:
 `openid`, `email`, `gmail.readonly` y `gmail.send`. Configura el consentimiento
 y Gmail API en tu propio proyecto. No se usa delegación de todo el dominio.
 
+La misma conexión pide además `calendar.events` como permiso **opcional**
+(`include_granted_scopes=true`) para gestionar solicitudes de reunión. Si quieres
+usarlo, habilita Google Calendar API en tu proyecto y agrega ese permiso a la
+pantalla de consentimiento. Si la persona lo desmarca, Gmail sigue conectado y
+**Mi cuenta** le indica que vuelva a conectar para autorizar Calendar.
+
 `RELAY_OAUTH_KEY` es una clave Fernet estable que cifra los tokens en la base
 local. Guárdala fuera de Git y de la base, y respáldala de manera segura. Rotarla
 sin migrar los datos impide recuperar las conexiones guardadas.
@@ -95,6 +101,24 @@ un mensaje crea un borrador temporal por una hora; la persona revisa y pulsa
 **Enviar** desde **Mi cuenta**. Un timeout deja el envío incierto y no lo reintenta
 automáticamente. Desconectar elimina el token local; la revocación adicional
 en el proveedor corresponde a la persona.
+
+### Solicitudes de reunión
+
+Con Calendar autorizado, el chat puede leer el calendario principal del actor
+(`calendar_events`), calcular huecos libres en horario hábil
+(`calendar_free_slots`) y preparar en un solo borrador la respuesta en el mismo
+hilo de Gmail junto con el evento (`meeting_prepare`), o un evento sin correo
+(`calendar_prepare_event`). `gmail_prepare` acepta `reply_to_message_id` para
+responder en el hilo original.
+
+Nada se envía ni se agenda desde el chat. En **Mi cuenta**, **Revisar reunión**
+carga la respuesta y el evento; **Enviar y agendar** envía el correo y luego crea
+el evento con invitación a los asistentes y enlace de Google Meet, salvo que la
+reunión tenga un lugar físico. Si el correo sale y el evento falla, queda un
+formulario para reintentar solo el evento. El id del evento se deriva del
+`request_id`, así que un reintento tras un timeout no duplica la reunión. Las
+fechas deben llevar zona horaria explícita y las consultas privadas no reciben
+estas herramientas.
 
 ## Evidencia
 

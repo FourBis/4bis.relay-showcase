@@ -208,7 +208,7 @@ async def run_expert(
         instructions = f"{instructions}\n\n{expert_instructions.EVIDENCE_BLOCK}"
 
     tools: list[Any] = []
-    from .account_tools import account_tools
+    from .account_tools import account_tools, meeting_guidance as _meeting_guidance
     tools.extend(account_tools(project, read_only=policy.sql_read_only))
     if tools:
         instructions += ("\n\nLas conexiones GitHub/Gmail pertenecen al autor de ESTE turno. "
@@ -217,7 +217,8 @@ async def run_expert(
                          "la shell no recibe credenciales ni identidad de commit. "
                          "Publica respuestas/issues/PRs solo por pedido explícito del usuario. "
                          "Los correos que leas aquí se comparten con el hilo de trabajo. "
-                         "gmail_prepare guarda un borrador: el titular debe pulsar Enviar en Mi cuenta.")
+                         "gmail_prepare guarda un borrador: el titular debe pulsar Enviar en Mi cuenta.\n"
+                         + _meeting_guidance())
 
     bitacora = Bitacora.cargar(bitacora_json) if bitacora_json else Bitacora()
     if bitacora.hechos or bitacora.comandos:

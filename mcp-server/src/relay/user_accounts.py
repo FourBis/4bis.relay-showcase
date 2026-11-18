@@ -20,6 +20,11 @@ GOOGLE_SCOPES = frozenset({
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
 })
+# Calendar se pide en el mismo consentimiento, pero es opcional: Google permite
+# desmarcarlo y Gmail debe seguir funcionando. Cada uso verifica el scope.
+GOOGLE_CALENDAR_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/calendar.events",
+})
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 
 PROVIDERS = {
@@ -187,6 +192,7 @@ class AccountStore:
         self.pending: dict[str, dict] = {}
         self.generations: dict[tuple[str, str], int] = {}
         self.mail_drafts: dict[str, dict] = {}
+        self.event_drafts: dict[str, dict] = {}
 
     def lock(self, provider, email):
         return self.locks.setdefault((provider, email), asyncio.Lock())
@@ -324,4 +330,5 @@ class AccountStore:
                             if (v["provider"], v.get("email")) != (provider, email)}
             if provider == "google":
                 self.mail_drafts = {k: v for k, v in self.mail_drafts.items() if v["email"] != email}
+                self.event_drafts = {k: v for k, v in self.event_drafts.items() if v["email"] != email}
         return row

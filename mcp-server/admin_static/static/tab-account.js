@@ -1,5 +1,7 @@
 // Cuentas personales: Gmail se consulta desde esta vista; los borradores
 // preparados se conservan temporalmente en memoria para revisarlos y enviarlos.
+// Un borrador de reunión trae además la respuesta en hilo y el evento de
+// Google Calendar: un solo clic envía la respuesta y luego crea la invitación.
 import { $, api, escape } from "./api.js";
 import { confirmModal, emptyState, field, formSection, skeletonRows, toast } from "./ui.js";
 import { clearWorkspaceSession } from "./workspace.js";
@@ -13,11 +15,24 @@ const PROVIDER_PATHS = {
 let actor = null;
 let snapshot = null;
 let draftsSnapshot = [];
+let eventDraftsSnapshot = [];
+// Datos del borrador que no se editan en el formulario (hilo y evento).
+const composeExtras = new WeakMap();
 let currentQuery = "";
 let generation = 0;
 let composeRevision = 0;
 const SEND_REQUESTS_KEY = "relay.account.mail-send-ids.v1";
 const SEND_REQUESTS_LIMIT = 50;
+const EVENT_REQUESTS_KEY = "relay.account.event-ids.v1";
+// Borradores ya confirmados: el servidor los conserva hasta una hora y un
+// segundo clic reenviaría el correo o duplicaría la invitación.
+const DONE_DRAFTS_KEY = "relay.account.done-drafts.v1";
+const EVENT_ERRORS = {
+  calendar_scope_required: "Tu conexión de Google no autoriza Calendar. Pulsa «Volver a conectar» en Google y acepta el permiso de Calendar.",
+  google_reconnect_required: "Vuelve a conectar tu cuenta de Google.",
+  creation_uncertain: "Google no confirmó la creación. Reintentar es seguro: no se duplicará el evento.",
+  event_cancelled: "Ese evento ya existía y fue cancelado en Google Calendar.",
+};
 const attr = value => escape(value).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 export function parseRecipients(value, required = false) {
@@ -34,8 +49,8 @@ async function sha256(value) {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function readSendRequests(storage) {
-  const raw = storage.getItem(SEND_REQUESTS_KEY);
+function readSendRequests(storage, key = SEND_REQUESTS_KEY) {
+  const raw = storage.getItem(key);
   if (!raw) return [];
   const rows = JSON.parse(raw);
   if (!Array.isArray(rows) || rows.some(row => !Array.isArray(row) || row.length !== 2
@@ -46,37 +61,80 @@ function readSendRequests(storage) {
   return rows;
 }
 
-export async function requestIdForDraft(draft, email, storage,
-  makeId = () => crypto.randomUUID(), hash = sha256) {
+async function requestIdFor(key, values, email, storage, makeId, hash, full) {
   try {
     if (storage === undefined) storage = globalThis.localStorage;
     if (!storage || !email) throw new Error("No se pudo identificar tu cuenta para proteger el reintento.");
-    const payload = JSON.stringify([email.trim().toLowerCase(), draft.to, draft.cc,
-      draft.bcc, draft.subject, draft.body]);
-    const fingerprint = await hash(payload);
-    const rows = readSendRequests(storage);
+    const fingerprint = await hash(JSON.stringify([email.trim().toLowerCase(), ...values]));
+    const rows = readSendRequests(storage, key);
     const previous = rows.find(row => row[0] === fingerprint);
     if (previous) return { id: previous[1], fingerprint };
-    if (rows.length >= SEND_REQUESTS_LIMIT) {
-      throw new Error("Hay demasiados envíos sin confirmación guardados. Revisa Gmail antes de enviar otro correo.");
-    }
+    if (rows.length >= SEND_REQUESTS_LIMIT) throw new Error(full);
     const id = makeId();
-    storage.setItem(SEND_REQUESTS_KEY, JSON.stringify([...rows, [fingerprint, id]]));
+    storage.setItem(key, JSON.stringify([...rows, [fingerprint, id]]));
     return { id, fingerprint };
   } catch (error) {
     return { error: error?.message || "No se pudo guardar el identificador seguro de reintento." };
   }
 }
 
-export function forgetConfirmedSend(fingerprint, storage) {
+export async function requestIdForDraft(draft, email, storage,
+  makeId = () => crypto.randomUUID(), hash = sha256) {
+  // reply_to solo entra si existe: conserva los identificadores ya guardados.
+  const values = [draft.to, draft.cc, draft.bcc, draft.subject, draft.body,
+    ...(draft.reply_to ? [draft.reply_to] : [])];
+  return requestIdFor(SEND_REQUESTS_KEY, values, email, storage, makeId, hash,
+    "Hay demasiados envíos sin confirmación guardados. Revisa Gmail antes de enviar otro correo.");
+}
+
+export async function requestIdForEvent(event, email, storage,
+  makeId = () => crypto.randomUUID(), hash = sha256) {
+  const values = ["event", event.summary, event.start, event.end, event.time_zone || "",
+    event.attendees || [], event.location || "", event.description || "", Boolean(event.meet)];
+  return requestIdFor(EVENT_REQUESTS_KEY, values, email, storage, makeId, hash,
+    "Hay demasiados eventos sin confirmación guardados. Revisa Google Calendar antes de crear otro.");
+}
+
+export function forgetConfirmedSend(fingerprint, storage, key = SEND_REQUESTS_KEY) {
   try {
     if (storage === undefined) storage = globalThis.localStorage;
     if (!storage) return false;
-    const rows = readSendRequests(storage).filter(row => row[0] !== fingerprint);
-    storage.setItem(SEND_REQUESTS_KEY, JSON.stringify(rows));
+    const rows = readSendRequests(storage, key).filter(row => row[0] !== fingerprint);
+    storage.setItem(key, JSON.stringify(rows));
     return true;
   } catch {
     return false;
+  }
+}
+
+export function doneDrafts(storage = globalThis.localStorage) {
+  try {
+    const rows = JSON.parse(storage?.getItem(DONE_DRAFTS_KEY) || "[]");
+    return new Set(Array.isArray(rows) ? rows.filter(id => /^[a-f0-9]{32}$/.test(id)) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function markDraftDone(draftId, storage = globalThis.localStorage) {
+  if (!/^[a-f0-9]{32}$/.test(String(draftId || ""))) return;
+  try {
+    const rows = [...doneDrafts(storage), draftId].slice(-100);
+    storage?.setItem(DONE_DRAFTS_KEY, JSON.stringify(rows));
+  } catch { /* sin almacenamiento: solo se pierde el ocultamiento */ }
+}
+
+export function formatEventWhen(event, locale = "es-CL") {
+  const options = { timeZone: event.time_zone || undefined };
+  try {
+    const start = new Date(event.start);
+    const end = new Date(event.end);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw new Error("fecha");
+    const day = start.toLocaleDateString(locale, { ...options, weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    const hour = date => date.toLocaleTimeString(locale, { ...options, hour: "2-digit", minute: "2-digit" });
+    return `${day}, ${hour(start)}–${hour(end)}`;
+  } catch {
+    return `${event.start} – ${event.end}`;
   }
 }
 
@@ -111,9 +169,15 @@ function connectionMarkup(connection) {
   if (!snapshot.local_identity && connection.connected) {
     actions += ` <button class="btn danger" type="button" data-account-action="disconnect" data-provider="${attr(connection.provider)}">Desconectar</button>`;
   }
+  const calendarMissing = connection.provider === "google" && connection.connected
+    && !connection.needs_reconnect && connection.calendar === false;
   const explanation = connection.message || (connection.provider === "github"
     ? "Usa tu identidad de GitHub para las operaciones que admitan credenciales personales."
-    : "Conecta tu Gmail para buscar, leer y enviar correo desde Mi cuenta.");
+    : calendarMissing
+      ? "Gmail conectado sin Google Calendar. Para que Relay prepare reuniones e invitaciones, pulsa «Volver a conectar» y acepta el permiso de Calendar."
+      : connection.calendar
+        ? "Gmail y Google Calendar conectados: Relay puede preparar respuestas y reuniones que confirmas aquí."
+        : "Conecta tu Gmail para buscar, leer y enviar correo desde Mi cuenta.");
   return `<article class="form-section">
     <header class="form-section-head"><h3 class="form-section-title">${escape(connection.label || PROVIDER_NAMES[connection.provider] || connection.provider)}</h3>
       <p class="form-section-sub"><span class="badge ${badge}">${escape(status)}</span></p></header>
@@ -169,11 +233,20 @@ async function loadDrafts() {
   if (!root) return;
   root.innerHTML = '<p class="muted">Cargando borradores preparados…</p>';
   try {
-    const data = await api("account/gmail/drafts");
-    draftsSnapshot = Array.isArray(data.drafts) ? data.drafts : [];
-    root.innerHTML = draftsSnapshot.length ? `<section class="form-section"><header class="form-section-head"><div><h4 class="form-section-title">Borradores preparados desde chats</h4><p class="form-section-sub">Revísalos y cárgalos para confirmar el envío.</p></div></header><ul class="divide-y divide-zinc-800">${draftsSnapshot.map(draft => `<li class="flex items-center justify-between gap-3 py-2"><span class="min-w-0"><strong class="block truncate text-sm">${escape(draft.subject || "(sin asunto)")}</strong><span class="muted block truncate">Para: ${escape(recipientsText(draft.to))}</span></span><button class="btn btn-xs shrink-0" type="button" data-account-action="load-draft" data-draft-id="${attr(draft.draft_id)}">Revisar borrador</button></li>`).join("")}</ul></section>` : "";
+    const [data, events] = await Promise.all([api("account/gmail/drafts"),
+      api("account/calendar/drafts").catch(() => ({ drafts: [] }))]);
+    const done = doneDrafts();
+    draftsSnapshot = (Array.isArray(data.drafts) ? data.drafts : []).filter(d => !done.has(d.draft_id));
+    eventDraftsSnapshot = (Array.isArray(events.drafts) ? events.drafts : []).filter(d => !done.has(d.draft_id));
+    const tags = draft => [draft.reply_to ? '<span class="badge dim">Respuesta en hilo</span>' : "",
+      draft.event ? '<span class="badge ok">+ evento</span>' : ""].join(" ");
+    const mail = draftsSnapshot.map(draft => `<li class="flex items-center justify-between gap-3 py-2"><span class="min-w-0"><strong class="block truncate text-sm">${escape(draft.subject || "(sin asunto)")} ${tags(draft)}</strong><span class="muted block truncate">Para: ${escape(recipientsText(draft.to))}${draft.event ? ` · ${escape(formatEventWhen(draft.event))}` : ""}</span></span><button class="btn btn-xs shrink-0" type="button" data-account-action="load-draft" data-draft-id="${attr(draft.draft_id)}">${draft.event ? "Revisar reunión" : "Revisar borrador"}</button></li>`);
+    const onlyEvents = eventDraftsSnapshot.map(draft => `<li class="flex items-center justify-between gap-3 py-2"><span class="min-w-0"><strong class="block truncate text-sm">${escape(draft.event.summary)} <span class="badge ok">Evento</span></strong><span class="muted block truncate">${escape(formatEventWhen(draft.event))}</span></span><button class="btn btn-xs shrink-0" type="button" data-account-action="load-event" data-draft-id="${attr(draft.draft_id)}">Revisar evento</button></li>`);
+    const items = [...mail, ...onlyEvents];
+    root.innerHTML = items.length ? `<section class="form-section"><header class="form-section-head"><div><h4 class="form-section-title">Borradores preparados desde chats</h4><p class="form-section-sub">Revísalos y cárgalos para confirmar el envío o la reunión.</p></div></header><ul class="divide-y divide-zinc-800">${items.join("")}</ul></section>` : "";
   } catch (error) {
     draftsSnapshot = [];
+    eventDraftsSnapshot = [];
     root.innerHTML = `<p class="fail" role="status">No se pudieron cargar los borradores: ${escape(error.message)}</p>`;
   }
 }
@@ -183,7 +256,9 @@ function loadDraft(draftId) {
   if (!draft) return;
   ++composeRevision;
   const compose = $("#account-compose");
-  compose.innerHTML = composeMarkup(); compose.hidden = false;
+  const extras = { draft_id: draft.draft_id, reply_to: draft.reply_to || "", event: draft.event || null };
+  compose.innerHTML = composeMarkup(extras); compose.hidden = false;
+  composeExtras.set($("#account-mail-compose"), extras);
   $("#account-mail-to").value = recipientsText(draft.to);
   $("#account-mail-cc").value = recipientsText(draft.cc);
   $("#account-mail-bcc").value = recipientsText(draft.bcc);
@@ -252,8 +327,45 @@ async function openMessage(id) {
   }
 }
 
-function composeMarkup() {
+function eventSummaryMarkup(event) {
+  const people = (event.attendees || []).length ? escape(event.attendees.join(", ")) : "Sin invitados";
+  return `<dl class="grid gap-1 text-sm">
+    <div><dt class="muted inline">Evento:</dt> <dd class="inline">${escape(event.summary)}</dd></div>
+    <div><dt class="muted inline">Cuándo:</dt> <dd class="inline">${escape(formatEventWhen(event))}</dd></div>
+    <div><dt class="muted inline">Invitados:</dt> <dd class="inline">${people}</dd></div>
+    <div><dt class="muted inline">Lugar:</dt> <dd class="inline">${[event.location ? escape(event.location) : "", event.meet ? "Google Meet" : ""].filter(Boolean).join(" · ") || "—"}</dd></div>
+    ${event.description ? `<div><dt class="muted inline">Notas:</dt> <dd class="inline whitespace-pre-wrap">${escape(event.description)}</dd></div>` : ""}
+  </dl>`;
+}
+
+function eventFormMarkup(event, message = "") {
+  const body = `<form id="account-event-form" class="grid gap-3" novalidate>
+    ${eventSummaryMarkup(event)}
+    <p id="account-event-status" class="field-error" role="status" aria-live="polite">${escape(message)}</p>
+  </form>`;
+  return formSection({ title: "Crear evento en Google Calendar",
+    sub: (event.attendees || []).length ? "Al crearlo, Google envía la invitación a los asistentes." : "Se agrega a tu calendario.",
+    body, grid: false,
+    actions: '<button id="account-event-create" class="btn btn-primary" type="submit" form="account-event-form">Crear evento</button> <button class="btn" type="button" data-account-action="cancel-compose">Cancelar</button>' });
+}
+
+function showEventForm(event, message = "", draftId = "") {
+  ++composeRevision;
+  const compose = $("#account-compose");
+  compose.innerHTML = eventFormMarkup(event, message); compose.hidden = false;
+  composeExtras.set($("#account-event-form"), { event, draft_id: draftId });
+}
+
+function composeMarkup(extras = {}) {
   const from = googleConnection()?.email || snapshot?.email || "";
+  const reply = extras.reply_to
+    ? '<p class="muted" style="grid-column: 1 / -1">Se enviará como respuesta en el mismo hilo del correo original.</p>' : "";
+  const meeting = extras.event ? `<fieldset class="rounded border border-zinc-800 p-3" style="grid-column: 1 / -1">
+      <legend class="px-1 text-sm">Reunión propuesta</legend>
+      ${eventSummaryMarkup(extras.event)}
+      <label class="mt-2 flex items-center gap-2 text-sm"><input id="account-mail-event" type="checkbox" checked>
+        Crear también el evento${(extras.event.attendees || []).length ? " e invitar a los asistentes" : ""} al enviar</label>
+    </fieldset>` : "";
   const body = `<form id="account-mail-compose" class="form-grid" novalidate>
     ${field({ label: "De", id: "account-mail-from", control: `<input id="account-mail-from" class="input" value="${escape(from)}" readonly>` })}
     ${field({ label: "Para", id: "account-mail-to", required: true, hint: "Puedes separar varias direcciones con coma o punto y coma.", control: '<input id="account-mail-to" class="input" type="text" inputmode="email" autocomplete="off">' })}
@@ -261,10 +373,13 @@ function composeMarkup() {
     ${field({ label: "CCO", id: "account-mail-bcc", control: '<input id="account-mail-bcc" class="input" type="text" inputmode="email" autocomplete="off">' })}
     ${field({ label: "Asunto", id: "account-mail-subject", required: true, control: '<input id="account-mail-subject" class="input" type="text" maxlength="998" autocomplete="off">' })}
     ${field({ label: "Mensaje", id: "account-mail-body", required: true, control: '<textarea id="account-mail-body" class="input min-h-48" rows="8"></textarea>' })}
+    ${reply}${meeting}
     <p id="account-mail-compose-status" class="field-error" role="status" aria-live="polite"></p>
   </form>`;
-  return formSection({ title: "Redactar correo", sub: "Revisa el contenido y pulsa Enviar correo. Relay no enviará sin esa acción.", body,
-    grid: false, actions: '<button id="account-mail-send" class="btn btn-primary" type="submit" form="account-mail-compose">Enviar correo</button> <button class="btn" type="button" data-account-action="cancel-compose">Cancelar</button>' });
+  const sendLabel = extras.event ? "Enviar y agendar" : "Enviar correo";
+  return formSection({ title: extras.event ? "Responder y agendar reunión" : "Redactar correo",
+    sub: `Revisa el contenido y pulsa ${sendLabel}. Relay no enviará ni agendará sin esa acción.`, body,
+    grid: false, actions: `<button id="account-mail-send" class="btn btn-primary" type="submit" form="account-mail-compose">${sendLabel}</button> <button class="btn" type="button" data-account-action="cancel-compose">Cancelar</button>` });
 }
 
 async function sendMail(event) {
@@ -287,8 +402,11 @@ async function sendMail(event) {
       : !subject ? "Escribe un asunto." : "Escribe el mensaje.";
     return;
   }
+  const extras = composeExtras.get(form) || {};
   const draft = { from: googleConnection()?.email || snapshot.email, to: to.recipients,
-    cc: cc.recipients, bcc: bcc.recipients, subject, body };
+    cc: cc.recipients, bcc: bcc.recipients, subject, body,
+    ...(extras.reply_to ? { reply_to: extras.reply_to } : {}) };
+  const withEvent = Boolean(extras.event && $("#account-mail-event")?.checked);
   const request = await requestIdForDraft(draft, email);
   // Una nueva redacción o una edición durante el hash no autoriza el payload anterior.
   if (!current()) return;
@@ -303,12 +421,24 @@ async function sendMail(event) {
     const result = await api("account/gmail/send", { method: "POST", body: {
       request_id: request.id, to: draft.to, cc: draft.cc, bcc: draft.bcc,
       subject: draft.subject, body: draft.body,
+      ...(draft.reply_to ? { reply_to: draft.reply_to } : {}),
     } });
     if (result?.state !== "sent" || !result.message_id) {
       throw new Error(result?.error || "Relay no confirmó que Gmail aceptó el envío.");
     }
     toast(`Correo enviado por ${draft.from}.`, "ok");
     forgetConfirmedSend(request.fingerprint);
+    markDraftDone(extras.draft_id);
+    loadDrafts();
+    // El correo ya salió: el evento se crea aunque el formulario cambie, y si
+    // falla queda su propio formulario para reintentar sin reenviar el correo.
+    if (withEvent) {
+      const created = await createEvent(extras.event);
+      if (!created.ok) {
+        showEventForm(extras.event, created.error);
+        return;
+      }
+    }
     // El resultado pertenece al formulario y a la revisión enviados. No borrar
     // un borrador nuevo ni las ediciones hechas mientras Gmail respondía.
     if (!current()) return;
@@ -322,6 +452,58 @@ async function sendMail(event) {
   } finally {
     if (button.isConnected) button.disabled = false;
   }
+}
+
+export function errorCode(error) {
+  try {
+    const code = JSON.parse(error?.body || "").error;
+    return typeof code === "string" ? code : "";
+  } catch {
+    return "";
+  }
+}
+
+async function createEvent(event) {
+  const email = snapshot?.email;
+  const request = await requestIdForEvent(event, email);
+  if (request.error) return { ok: false, error: `${request.error} No se creó el evento.` };
+  try {
+    const result = await api("account/calendar/events", { method: "POST", body: {
+      request_id: request.id, summary: event.summary, start: event.start, end: event.end,
+      time_zone: event.time_zone || "", attendees: event.attendees || [],
+      location: event.location || "", description: event.description || "", meet: Boolean(event.meet),
+    } });
+    if (result?.state !== "created") throw new Error("Google no confirmó la creación del evento.");
+    forgetConfirmedSend(request.fingerprint, undefined, EVENT_REQUESTS_KEY);
+    const invited = (event.attendees || []).length ? " e invitaciones enviadas" : "";
+    toast(`Evento creado${invited}${result.meet_link ? " · con Google Meet" : ""}.`, "ok");
+    return { ok: true, result };
+  } catch (error) {
+    return { ok: false, error: EVENT_ERRORS[errorCode(error)] || error.message };
+  }
+}
+
+async function submitEvent(event) {
+  event.preventDefault();
+  const form = event.target;
+  const extras = composeExtras.get(form);
+  if (!extras?.event) return;
+  const button = $("#account-event-create");
+  const status = $("#account-event-status");
+  button.disabled = true;
+  status.textContent = "Creando evento…";
+  const created = await createEvent(extras.event);
+  if (created.ok) {
+    markDraftDone(extras.draft_id);
+    loadDrafts();
+    if (form.isConnected) {
+      const compose = $("#account-compose");
+      compose.hidden = true; compose.replaceChildren();
+    }
+    return;
+  }
+  if (form.isConnected) status.textContent = created.error;
+  if (button.isConnected) button.disabled = false;
 }
 
 async function connect(provider) {
@@ -385,6 +567,14 @@ function wireRoot(root) {
       $("#account-mail-to").focus();
     }
     if (action === "load-draft") loadDraft(button.dataset.draftId);
+    if (action === "load-event") {
+      const draft = eventDraftsSnapshot.find(item => item.draft_id === button.dataset.draftId);
+      if (draft) showEventForm(draft.event, "", draft.draft_id);
+    }
+    if (action === "cancel-compose" && $("#account-event-form")) {
+      $("#account-compose").replaceChildren(); $("#account-compose").hidden = true;
+      return;
+    }
     if (action === "cancel-compose") {
       const form = $("#account-mail-compose");
       const revision = composeRevision;
@@ -405,6 +595,7 @@ function wireRoot(root) {
       event.preventDefault(); loadMessages($("#account-mail-query").value);
     }
     if (event.target.id === "account-mail-compose") sendMail(event);
+    if (event.target.id === "account-event-form") submitEvent(event);
   });
 }
 
@@ -423,6 +614,7 @@ export async function loadAccount() {
   root.innerHTML = shellMarkup();
   snapshot = null;
   draftsSnapshot = [];
+  eventDraftsSnapshot = [];
   const request = ++generation;
   $("#account-identity").textContent = "Actualizando tus conexiones…";
   $("#account-connections").innerHTML = '<div class="card p-4"><span class="skeleton block h-5 w-1/2"></span><span class="skeleton mt-3 block h-4 w-3/4"></span></div><div class="card p-4"><span class="skeleton block h-5 w-1/2"></span><span class="skeleton mt-3 block h-4 w-3/4"></span></div>';

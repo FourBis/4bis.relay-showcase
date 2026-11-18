@@ -23,10 +23,13 @@ from .user_mail_content import message_view as _message_view
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 _MAX_LIMIT = 50
 _MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
-_SEND_FIELDS = {"request_id", "to", "cc", "bcc", "subject", "body"}
+_SEND_FIELDS = {"request_id", "to", "cc", "bcc", "subject", "body", "reply_to"}
 _SEND_REQUIRED = {"request_id", "to", "subject", "body"}
 _DRAFT_TTL = 60 * 60
 _DRAFTS_PER_USER = 20
+# Message-ID RFC 5322 tal como lo entrega Gmail; sin CR/LF ni espacios.
+_HEADER_ID = re.compile(r"^<[^<>\s]{1,995}>$")
+_MAX_REFERENCES = 20
 
 
 def _json(data: dict, status: int = 200) -> web.Response:
@@ -135,6 +138,35 @@ async def _read_messages(account: dict, query: str, limit: int) -> list[dict]:
             for msg in results]
 
 
+def _reply_to_id(value) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not _MESSAGE_ID.fullmatch(value):
+        raise ValueError("invalid_reply_to")
+    return value
+
+
+async def _reply_headers(account: dict, message_id: str) -> dict:
+    """Datos para responder en el mismo hilo: threadId y cadena de Message-ID."""
+    message = await _google_json(
+        "GET", f"messages/{quote(message_id, safe='')}", account,
+        params={"format": "metadata",
+                "metadataHeaders": ["Message-ID", "References", "Subject"]})
+    thread_id = message.get("threadId")
+    if not isinstance(thread_id, str) or not _MESSAGE_ID.fullmatch(thread_id):
+        raise _GoogleFailure
+    header_id = _header(message, "Message-ID").strip()
+    references = [ref for ref in _header(message, "References").split()
+                  if _HEADER_ID.fullmatch(ref)]
+    if header_id and not _HEADER_ID.fullmatch(header_id):
+        header_id = ""
+    if header_id:
+        references.append(header_id)
+    return {"thread_id": thread_id, "in_reply_to": header_id,
+            "references": references[-_MAX_REFERENCES:],
+            "subject": _header(message, "Subject")}
+
+
 async def mcp_read_mail(arguments: dict) -> dict:
     """Actor-bound Gmail read for an explicitly requested shared chat turn."""
     actor = current_actor.get()
@@ -178,15 +210,24 @@ def _prune_drafts(drafts: dict[str, dict], now: float) -> None:
 
 
 def _public_draft(draft_id: str, draft: dict) -> dict:
-    return {"draft_id": draft_id, **{
+    view = {"draft_id": draft_id, **{
         key: draft[key] for key in (
             "to", "cc", "bcc", "subject", "body", "created_at")}}
+    for key in ("reply_to", "event"):
+        if draft.get(key):
+            view[key] = draft[key]
+    return view
 
 
 def create_mail_draft(store, email: str, account_email: str, arguments: dict) -> dict:
-    allowed = {"to", "cc", "bcc", "subject", "body"}
+    allowed = {"to", "cc", "bcc", "subject", "body", "reply_to", "event"}
     if set(arguments) - allowed or not {"to", "subject", "body"} <= set(arguments):
         raise ValueError("invalid_fields")
+    reply_to = _reply_to_id(arguments.get("reply_to"))
+    event = None
+    if arguments.get("event") is not None:
+        from .user_calendar import validate_event
+        event = validate_event(arguments["event"])
     recipients = {
         "to": _addresses(arguments["to"], "to", required=True),
         "cc": _addresses(arguments.get("cc"), "cc"),
@@ -217,6 +258,7 @@ def create_mail_draft(store, email: str, account_email: str, arguments: dict) ->
     draft_id = uuid.uuid4().hex
     draft = {"email": email, "account_email": account_email,
              **recipients, "subject": subject, "body": content,
+             "reply_to": reply_to, "event": event,
              "created_at": now, "expires_at": now + _DRAFT_TTL}
     drafts[draft_id] = draft
     return _public_draft(draft_id, draft)
@@ -229,11 +271,27 @@ async def mcp_create_mail_draft(arguments: dict) -> dict:
     store, email = actor
     try:
         account = await require_account("google")
+        if arguments.get("event") is not None:
+            from .user_calendar import has_calendar_scope
+            if not has_calendar_scope(account):
+                return {"ok": False, "error": (
+                    "Tu conexión de Google no autoriza Calendar. Vuelve a conectar Google "
+                    "en Mi cuenta y acepta el permiso de Calendar.")}
+        reply_to = _reply_to_id(arguments.get("reply_to"))
+        if reply_to:
+            # Comprobar que el correo existe evita borradores con un hilo inventado.
+            await _reply_headers(account, reply_to)
         draft = create_mail_draft(store, email, account["email"], arguments)
     except AccountError:
         return {"ok": False, "error": "Conecta tu cuenta de Gmail en Mi cuenta."}
-    except (TypeError, ValueError, KeyError):
-        return {"ok": False, "error": "Los destinatarios, asunto o cuerpo del correo no son válidos."}
+    except (_GoogleUnauthorized, _GoogleTimeout, _GoogleFailure) as exc:
+        if isinstance(exc, _GoogleUnauthorized):
+            await _invalidate(store, email)
+        return {"ok": False, "error": "No pude abrir el correo a responder; revisa el message_id o Mi cuenta."}
+    except (TypeError, ValueError, KeyError) as exc:
+        if str(exc).startswith("invalid_event"):
+            return {"ok": False, "error": f"El evento no es válido ({exc}). Revisa fecha, hora e invitados."}
+        return {"ok": False, "error": "Los destinatarios, asunto, cuerpo o correo a responder no son válidos."}
     return {"ok": True, "draft_id": draft["draft_id"], "draft": draft,
             "open_url": "/admin/#/account"}
 
@@ -324,6 +382,7 @@ def _prepare_send(body: dict) -> tuple[str, dict, EmailMessage]:
     }
     subject, content = body["subject"], body["body"]
     _validate_message(subject, content)
+    reply_to = _reply_to_id(body.get("reply_to"))
     message = EmailMessage(policy=policy.SMTP)
     message["To"] = ", ".join(recipients["to"])
     if recipients["cc"]:
@@ -335,6 +394,9 @@ def _prepare_send(body: dict) -> tuple[str, dict, EmailMessage]:
     payload = {"to": recipients["to"], "cc": recipients["cc"],
                "bcc": recipients["bcc"], "subject": subject.strip(),
                "body": content}
+    if reply_to:
+        # Solo si existe: conserva el hash de los envíos previos sin respuesta.
+        payload["reply_to"] = reply_to
     return request_id, payload, message
 
 
@@ -389,6 +451,21 @@ async def api_gmail_send(request: web.Request) -> web.Response:
     except (ValueError, IndexError):
         return web.json_response({"error": "google_reconnect_required"}, status=409)
 
+    thread_id = None
+    if payload.get("reply_to"):
+        # Antes de reclamar el envío: si Gmail no entrega el hilo, nada salió.
+        try:
+            reply = await _reply_headers(account, payload["reply_to"])
+        except (_GoogleUnauthorized, _GoogleTimeout, _GoogleFailure) as exc:
+            if isinstance(exc, _GoogleUnauthorized):
+                await _invalidate(store, owner_email)
+                return _json({"error": "google_reconnect_required"}, status=401)
+            return _json({"error": "reply_unavailable"}, status=502)
+        thread_id = reply["thread_id"]
+        if reply["in_reply_to"]:
+            message["In-Reply-To"] = reply["in_reply_to"]
+            message["References"] = " ".join(reply["references"])
+
     claimed = await db.run(
         "INSERT OR IGNORE INTO account_mail_sends "
         "(email, request_id, state, payload_hash, created_at) "
@@ -402,7 +479,7 @@ async def api_gmail_send(request: web.Request) -> web.Response:
     try:
         result = await _google_json(
             "POST", "messages/send", account,
-            json={"raw": raw})
+            json={"raw": raw, **({"threadId": thread_id} if thread_id else {})})
     except (_GoogleUnauthorized, _GoogleTimeout, _GoogleFailure) as exc:
         await db.run(
             "UPDATE account_mail_sends SET state='uncertain' "
