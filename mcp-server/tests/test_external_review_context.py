@@ -291,3 +291,57 @@ def test_still_fails_honestly_when_the_diff_alone_does_not_fit(monkeypatch):
     files = [{"path": "a", "patch": "@@ -1 +1 @@\n-" + "x" * 50 + "\n+y", "content": "y\n", "content_at": "head"}]
     with pytest.raises(context.ReviewContextError, match="requiere revisión manual"):
         context._fit_context(files)
+
+
+# Un workflow de GitHub Actions referencia secretos; no los contiene. Antes,
+# `token: ${{ secrets.GITHUB_TOKEN }}` bloqueaba toda la revisión.
+_SOURCE_REFERENCES = [
+    "      - uses: actions/checkout@v4\n        with:\n          token: ${{ secrets.GITHUB_TOKEN }}\n",
+    "  password: ${{ secrets.DEPLOY_PASSWORD }}\n",
+    "interface Login { password: string; token?: string }\n",
+    "const secret = process.env.SECRET;\nconst apiKey = config.get('api');\n",
+    "if (password == null) return;\n",
+    'labels = { password: "Contraseña actual" }\n',
+    "set PASSWORD=%DB_PASSWORD%\n",
+    "token = os.environ['RELAY_TOKEN']\n",
+]
+
+
+@pytest.mark.parametrize("source", _SOURCE_REFERENCES)
+@pytest.mark.parametrize("location", ["content", "patch"])
+async def test_references_types_and_labels_are_not_credentials(remote, source, location):
+    raw = source.encode()
+    if location == "content":
+        sha, blob = git_blob(raw)
+        remote.row["sha"] = sha
+        remote.blobs[sha] = blob
+    else:
+        lines = source.rstrip("\n").split("\n")
+        remote.row.update(patch=f"@@ -0,0 +1,{len(lines)} @@\n" + "\n".join("+" + line for line in lines),
+                          additions=len(lines), deletions=0)
+    material = await context.read(remote.job)
+    if location == "content":
+        # El modelo recibe la referencia tal cual, no una versión mutilada.
+        assert material["files"][0]["content"] == source
+
+
+async def test_credential_block_names_file_and_line_without_the_value(remote):
+    source = "steps:\n  - run: echo ok\n  - env:\n      API_KEY: \"synthetic-private-value\"\n"
+    sha, blob = git_blob(source.encode())
+    remote.row["sha"] = sha
+    remote.blobs[sha] = blob
+    with pytest.raises(context.ReviewContextError) as failure:
+        await context.read(remote.job)
+    message = str(failure.value)
+    assert f"{remote.row['filename']}, línea 4" in message
+    assert "synthetic-private-value" not in message
+    remote.model.assert_not_awaited()
+
+
+def test_source_finding_classifies_literals_and_references():
+    finding = context.sensitive_source_finding
+    assert finding("token: ${{ secrets.GITHUB_TOKEN }}") is None
+    assert finding('token: "xxxxxx"') is None
+    assert finding("csrftoken: abcdef") is None
+    assert finding("password: hunter2xy") == (1, "valor literal asignado a un campo de credencial")
+    assert finding("a\nb\nurl: postgres://u:p4ssw0rd@host/db")[0] == 3

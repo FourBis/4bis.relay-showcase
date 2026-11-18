@@ -49,6 +49,14 @@ servicio que hayas configurado. Cambiar el modelo o los permisos no autoriza a
 repetir un intento fallido: usa **Reintentar revisión** después de revisar el
 estado. Para detener nuevas revisiones, desactiva la opción del proyecto.
 
+También puedes guardar una **configuración por defecto** para los proyectos que
+no tienen una propia: en el mismo formulario elige **Guardar como →
+Configuración por defecto**. Así las PR registradas se revisan aunque nadie haya
+configurado ese proyecto. Una configuración propia, aunque esté desactivada,
+tiene prioridad, y **Usar la configuración por defecto** la retira. La API
+equivalente es `PUT /admin/api/external-review/default-policy` con
+`{"policy": {...}}`, o `{"policy": null}` para quitarla.
+
 Los modos de publicación y destinatarios son decisiones separadas. Dejar
 `publication_mode` vacío conserva el informe en Relay. Los valores `personal`
 y `bot` requieren una cuenta conectada que acredite exactamente el tipo de
@@ -77,6 +85,14 @@ archivos. Las directrices del repositorio se leen del commit base autorizado,
 nunca de instrucciones añadidas por la propia PR. Si hay material potencialmente
 sensible, archivos no textuales, límites excedidos o evidencia incompleta, la
 revisión se bloquea en vez de presentar un recorte como cobertura completa.
+
+Se considera material sensible una firma de credencial reconocible (tokens con
+prefijo, clave privada, cabecera `Authorization` o URL con contraseña, campo
+secreto en JSON) o un valor literal asignado a un campo como `password`,
+`secret`, `api_key` o `token`. No bloquean las referencias como
+`${{ secrets.GITHUB_TOKEN }}`, `${VAR}` o `%VAR%`, las expresiones, los tipos
+(`password: string`) ni los textos de interfaz. El motivo del bloqueo indica el
+archivo y la línea, nunca el valor.
 
 El diff completo de cada archivo se envía siempre. Si además el contenido
 completo de los archivos supera los 200.000 caracteres, los archivos más grandes

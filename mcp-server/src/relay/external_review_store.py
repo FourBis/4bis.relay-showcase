@@ -147,9 +147,53 @@ def public(job):
             for previous in job.get("context_history", [])]}
 
 
+# Configuración de instalación para proyectos sin política propia: así una
+# revisión no depende de que el propietario configure cada proyecto. Se guarda
+# en system_config y se mantiene en memoria; load_default la refresca.
+DEFAULT_POLICY_KEY = "external_pr_review_default_policy"
+_POLICY_FIELDS = ("enabled", "model", "publication_mode", "publisher_actor", "recipients")
+_default_policy: dict = {}
+
+
+def own_policy(project):
+    value = ((project or {}).get("defaults_json") or {}).get("external_pr_review_policy")
+    return value if isinstance(value, dict) and value else {}
+
+
+def default_policy():
+    return {**_default_policy, "recipients": list(_default_policy.get("recipients", []))} if _default_policy else {}
+
+
 def policy(project):
-    value = (project.get("defaults_json") or {}).get("external_pr_review_policy")
-    return value if isinstance(value, dict) else {}
+    """Política efectiva: la propia del proyecto o, si no tiene, la de instalación."""
+    return own_policy(project) or default_policy()
+
+
+def policy_source(project):
+    return "project" if own_policy(project) else "default" if _default_policy else "none"
+
+
+def _set_default(value):
+    global _default_policy
+    _default_policy = ({key: value[key] for key in _POLICY_FIELDS if key in value}
+                       if isinstance(value, dict) and type(value.get("enabled")) is bool else {})
+
+
+async def load_default(db):
+    """Refresca la política de instalación desde system_config (fuente única)."""
+    try:
+        raw = await db.get_config(DEFAULT_POLICY_KEY, "")
+        _set_default(json.loads(raw) if raw else {})
+    except (TypeError, ValueError):
+        _set_default({})
+    return default_policy()
+
+
+async def save_default(db, value):
+    """`value` ya validado por external_review_config.validate, o {} para quitarla."""
+    await db.set_config(DEFAULT_POLICY_KEY, json.dumps(value, ensure_ascii=False, sort_keys=True) if value else "")
+    _set_default(value)
+    return default_policy()
 
 
 def enqueue(conn, task, project, actor, *, retry=False, observed_issue_digest=None):

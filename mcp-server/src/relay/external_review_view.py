@@ -47,5 +47,6 @@ async def enrich(db, task, *, can_configure=False):
         policy = jobs.policy(project)
         extras["review_configuration"] = {key: policy[key] for key in (
             "enabled", "model", "publication_mode", "publisher_actor", "recipients") if key in policy}
+        extras["review_configuration"]["source"] = jobs.policy_source(project)
     publications = [{**e, "historical": e["kind"] == "review" and e not in effects} for e in delivery["effects"]]
     return {**task, **extras, "external_review": review, "external_publications": publications, "allowed_actions": actions}

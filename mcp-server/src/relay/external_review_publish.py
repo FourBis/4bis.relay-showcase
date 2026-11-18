@@ -183,7 +183,7 @@ async def enqueue_effect(db, cid, kind, correlation_id, head_sha, payload, actor
 
 
 def _policy(project, actor, kind):
-    value = (project.get("defaults_json") or {}).get("external_pr_review_policy")
+    value = reviews.policy(project)
     if not isinstance(value, dict) or value.get("publication_mode") not in {"personal", "bot"}:
         raise PublicationError("Publicación bloqueada: configura modo explícito e identidad de publicación")
     if kind in REVIEW_KINDS and value.get("enabled") is not True:
