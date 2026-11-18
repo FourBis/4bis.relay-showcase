@@ -300,6 +300,7 @@ async def snapshot(db, cid, current_sha, *, base_sha=None):
 async def request(db, project, cid, actor, *, head_sha, retry=False, base_sha=None, context_revision=None):
     """Explicit local enqueue/retry; GET and startup never create jobs for old records."""
     current = await db.get_project(project["slug"])
+    await store.load_default(db)
     user = next((row for row in await db.list_users() if row["email"] == actor), None)
     if (not current or current.get("repo_path") != project.get("repo_path")
             or (current.get("defaults_json") or {}).get("read_only")

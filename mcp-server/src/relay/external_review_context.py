@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from . import external_pr
 from .expert_steps import _redactar
+from .secret_redaction import redact_read_text
 
 MAX_FILES = 50
 MAX_BLOB_BYTES = 100_000
@@ -24,6 +25,72 @@ MAX_TEAM_GUIDELINE_CHARS = 16_000
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _CREDENTIAL = re.compile(r'''(?ix)(["']?(?:password|passwd|pwd|api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|secret|token)["']?\s*[:=]\s*["'])([^"'\r\n]{3,})(["'])''')
 _UNQUOTED_CREDENTIAL = re.compile(r'''(?ix)(["']?\b(?:access[_-]?token|auth[_-]?token|token)\b["']?\s*[:=]\s*)(?!["'])(\[REDACTED\][^\s,;\#}\]]*|[^\s,;\#}\]]{3,})''')
+
+
+# Código fuente: una etiqueta como `token:` o `password=` no basta. Sólo
+# cuenta un valor literal; referencias (`${{ secrets.X }}`, `${VAR}`,
+# `%VAR%`), expresiones, tipos y marcadores de ejemplo no son credenciales.
+_SOURCE_KEY = (r"(?:password|passwd|pwd|api[_-]?key|apikey|secret|client[_-]?secret|"
+               r"access[_-]?key|access[_-]?token|auth[_-]?token|(?<![A-Za-z0-9])token)")
+_SOURCE_ASSIGNMENT = re.compile(
+    r"(?i)" + _SOURCE_KEY + r"[\"']?[ \t]*[:=][ \t]*"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;#}\]]+)")
+_REFERENCE = re.compile(r"^(?:\$\{|\$\(|\$[A-Za-z_]|\{\{|%[A-Za-z_][A-Za-z0-9_]*%|<[^<>]*>$|\[REDACTED)")
+_DOTTED = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\??\.[A-Za-z_$][A-Za-z0-9_$]*)+!?$")
+_NOT_VALUES = frozenset({
+    "string", "str", "number", "int", "integer", "bool", "boolean", "any", "object", "bytes", "secretstr",
+    "null", "none", "nil", "undefined", "true", "false", "required", "optional", "env", "environment",
+    "changeme", "change_me", "change-me", "example", "dummy", "placeholder", "redacted", "your_token",
+    "your-token", "your_password", "your-password", "your_api_key", "your-api-key", "password", "secret",
+    "token", "apikey", "api_key", "api-key"})
+_STRONG_REASON = "firma de credencial reconocible (token, clave privada, cabecera o URL con contraseña)"
+
+
+def _literal_secret(raw):
+    """True only for a literal value that could be a real credential."""
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
+    value = raw[1:-1].strip() if quoted else raw.strip()
+    if len(value) < (3 if quoted else 4) or _REFERENCE.match(value):
+        return False
+    lowered = value.lower().strip("*. ")
+    if not lowered or lowered in _NOT_VALUES or len(set(lowered)) == 1:
+        return False
+    if not quoted and (any(char in value for char in "([{") or _DOTTED.match(value)
+                       or value.startswith(("=", "<", ">", "!", "?"))):
+        return False  # Comparación, llamada, índice o ruta de configuración: no es un literal.
+    if quoted and any(char.isspace() for char in value):
+        return False  # Texto de interfaz o mensajes ("Contraseña actual"), no una credencial.
+    return True
+
+
+def sensitive_source_finding(text):
+    """Primera línea (1-based) y motivo de una posible credencial en código, o None."""
+    if not text:
+        return None
+    strong = redact_read_text(text)
+    if strong != text:
+        index = next((i for i, (a, b) in enumerate(zip(text, strong)) if a != b), min(len(text), len(strong)))
+        return text.count("\n", 0, index) + 1, _STRONG_REASON
+    for number, line in enumerate(text.splitlines(), 1):
+        for match in _SOURCE_ASSIGNMENT.finditer(line):
+            if _literal_secret(match["value"]):
+                return number, "valor literal asignado a un campo de credencial"
+    return None
+
+
+def _patch_source(patch):
+    """Las líneas del diff sin su marca (+, -, espacio) ni cabeceras de hunk."""
+    return "\n".join(line[1:] for line in patch.splitlines()
+                     if line[:1] in {"+", "-", " "})
+
+
+def _require_clean_source(text, path, *, where="archivo"):
+    finding = sensitive_source_finding(text)
+    if finding:
+        line, reason = finding
+        raise ReviewContextError(
+            f"Posible credencial en {where} {path}, línea {line} ({reason}); no se envió al modelo. "
+            "Revisa esa línea: si es una credencial real, retírala del PR y rota la clave.")
 
 
 def redact_text(value):
@@ -168,8 +235,6 @@ async def read(job):
                 or not isinstance(patch, str)):
             raise ReviewContextError("Diff no verificable")
         lines = changed_lines(patch, additions, deletions)
-        if redact_text(patch) != patch:
-            raise ReviewContextError("Se detectó material potencialmente sensible; no se envió al modelo")
         blob = await external_pr._api(f"{prefix}/git/blobs/{sha}")
         if (not isinstance(blob, dict) or blob.get("sha") != sha or blob.get("encoding") != "base64"
                 or type(blob.get("size")) is not int or not 0 <= blob["size"] <= MAX_BLOB_BYTES
@@ -183,10 +248,12 @@ async def read(job):
         actual = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
         if len(raw) != blob["size"] or len(raw) > MAX_BLOB_BYTES or actual != sha or "\0" in content:
             raise ReviewContextError("El contenido no coincide con el blob declarado")
-        if redact_text(content) != content:
-            raise ReviewContextError("Se detectó material potencialmente sensible; no se envió al modelo")
-        files.append({"path": path, "status": status, "blob_sha": sha, "patch": _redactar(patch),
-                      "content": _redactar(content), "content_at": "base" if status == "removed" else "head",
+        # Primero el archivo completo (da la línea real); luego el diff, que también
+        # trae líneas retiradas de la base.
+        _require_clean_source(content, path)
+        _require_clean_source(_patch_source(patch), path, where="el diff de")
+        files.append({"path": path, "status": status, "blob_sha": sha, "patch": redact_read_text(patch),
+                      "content": redact_read_text(content), "content_at": "base" if status == "removed" else "head",
                       "changed_lines": lines})
     _fit_context(files)
     await check_head(job)
@@ -309,9 +376,9 @@ async def read_guidelines(job, files):
         except (ValueError, UnicodeError):
             raise ReviewContextError("Una directriz base no es texto UTF-8 verificable") from None
         actual = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
-        if (len(raw) != blob["size"] or len(raw) > MAX_GUIDELINE_BYTES or actual != sha or "\0" in content
-                or redact_text(content) != content):
-            raise ReviewContextError("Una directriz base no coincide con su blob o contiene material potencialmente sensible")
+        if len(raw) != blob["size"] or len(raw) > MAX_GUIDELINE_BYTES or actual != sha or "\0" in content:
+            raise ReviewContextError("Una directriz base no coincide con su blob declarado")
+        _require_clean_source(content, path, where="la directriz")
         size += len(content)
         if size > MAX_GUIDELINE_CHARS:
             raise ReviewContextError("Directrices excesivas; requiere revisión manual sin recortes")

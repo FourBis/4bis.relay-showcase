@@ -65,7 +65,8 @@ def _authorized(conn, email, project):
 
 
 def _policy(project):
-    return project["defaults_json"].get("external_pr_review_policy", {}) if project else {}
+    from .external_review_store import policy
+    return policy(project) if project else {}
 
 
 def _configured(project):
