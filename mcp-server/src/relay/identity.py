@@ -366,6 +366,8 @@ _ACCOUNT_ROUTES = frozenset({
     ("GET", "/admin/api/account/gmail/messages/{id}"),
     ("POST", "/admin/api/account/gmail/send"),
     ("GET", "/admin/api/account/gmail/drafts"),
+    ("GET", "/admin/api/account/calendar/drafts"),
+    ("POST", "/admin/api/account/calendar/events"),
 })
 
 

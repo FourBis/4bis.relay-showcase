@@ -59,3 +59,26 @@ assert.equal(mod.isAuthorizationUrl("google", "https://accounts.google.com.evil.
 assert.equal(mod.isAuthorizationUrl("other", "https://accounts.google.com/o/oauth2/v2/auth"), false);
 
 console.log("account: recipients, request id y redirect OAuth ok");
+
+// Reunión: el hilo entra en la huella solo si existe y el evento tiene su propio registro.
+const threaded = await mod.requestIdForDraft({ ...draft, reply_to: "m1" }, "a@example.test", storage, makeId, hash);
+assert.notEqual(threaded.id, first.id, "responder en hilo es otra solicitud distinta del correo suelto");
+const meeting = { summary: "Demo", start: "2026-11-23T11:00:00-03:00", end: "2026-11-23T12:00:00-03:00",
+  attendees: ["ana@example.test"], meet: true };
+const eventA = await mod.requestIdForEvent(meeting, "a@example.test", storage, makeId, hash);
+assert.equal((await mod.requestIdForEvent({ ...meeting }, "a@example.test", storage, makeId, hash)).id, eventA.id,
+  "reintentar el mismo evento reutiliza el request_id: Google no lo duplica");
+assert.doesNotMatch(storage.getItem("relay.account.event-ids.v1"), /Demo|cliente/);
+assert.equal(mod.forgetConfirmedSend(eventA.fingerprint, storage, "relay.account.event-ids.v1"), true);
+assert.notEqual((await mod.requestIdForEvent(meeting, "a@example.test", storage, makeId, hash)).id, eventA.id);
+assert.match(mod.formatEventWhen({ ...meeting, time_zone: "America/Santiago" }), /23.*noviembre.*11:00.*12:00/);
+assert.equal(mod.errorCode({ body: '{"error":"calendar_scope_required"}' }), "calendar_scope_required");
+assert.equal(mod.errorCode({ body: "no-json" }), "");
+console.log("account: reunión, evento idempotente y formato de fecha ok");
+
+const doneStore = { values: new Map(), getItem(k) { return this.values.get(k) ?? null; }, setItem(k, v) { this.values.set(k, v); } };
+mod.markDraftDone("a".repeat(32), doneStore);
+mod.markDraftDone("no-es-id", doneStore);
+assert.deepEqual([...mod.doneDrafts(doneStore)], ["a".repeat(32)],
+  "un borrador confirmado se oculta y no se puede reenviar con otro clic");
+console.log("account: borradores confirmados ocultos ok");

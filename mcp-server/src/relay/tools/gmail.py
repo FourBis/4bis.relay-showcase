@@ -22,7 +22,8 @@ class GmailSendTool:
     name = "gmail_send"
     description = (
         "Prepara un borrador de Gmail personal; nunca envía directamente. "
-        "Args: to (string o lista), cc/bcc (listas opcionales), subject y body. "
+        "Args: to (string o lista), cc/bcc (listas opcionales), subject, body y "
+        "reply_to (ID Gmail, opcional, para responder en el hilo). "
         "La persona debe abrir Correo personal y pulsar Enviar."
     )
 
@@ -58,6 +59,8 @@ _SEND_SCHEMA: dict = {
             "bcc": {"type": "array", "items": {"type": "string"}},
             "subject": {"type": "string"},
             "body": {"type": "string"},
+            "reply_to": {"type": "string",
+                         "description": "ID Gmail del correo a responder en el mismo hilo (opcional)"},
         },
         "required": ["to", "subject", "body"],
     },

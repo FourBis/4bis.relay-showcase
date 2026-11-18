@@ -409,3 +409,24 @@ async def test_oauth_transport_errors_do_not_expose_provider_body(accounts, monk
     with pytest.raises(AccountError) as caught:
         await user_accounts.oauth_request("POST", "https://oauth2.googleapis.com/token")
     assert caught.value.reauth and "secret-never-exposed" not in str(caught.value)
+
+
+async def test_google_connect_requests_optional_calendar_and_reports_it(accounts):
+    from relay.user_accounts import GOOGLE_CALENDAR_SCOPES
+    client, store = accounts
+    query, _cookie = await start(client, "google")
+    requested = set(query["scope"][0].split())
+    assert GOOGLE_SCOPES | GOOGLE_CALENDAR_SCOPES <= requested
+    assert query["include_granted_scopes"] == ["true"]
+    profile = {"sub": "google-123", "email": "alex@example.test", "email_verified": True}
+
+    # Gmail sin Calendar sigue siendo una conexión válida: Calendar es opcional.
+    await store.save("google", "alex@example.test", profile, token())
+    google = lambda payload: next(i for i in payload["connections"] if i["provider"] == "google")
+    status = google(await (await client.get("/admin/api/account/connections")).json())
+    assert status["connected"] and status["calendar"] is False
+
+    await store.save("google", "alex@example.test", profile,
+                     token(scope=" ".join(GOOGLE_SCOPES | GOOGLE_CALENDAR_SCOPES)))
+    status = google(await (await client.get("/admin/api/account/connections")).json())
+    assert status["calendar"] is True

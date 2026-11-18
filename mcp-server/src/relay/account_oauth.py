@@ -13,7 +13,8 @@ from aiohttp import web
 from . import identity, user_accounts
 from .admin_users import _body, _check_origin
 from .app_state import DB_KEY
-from .user_accounts import AccountError, GOOGLE_SCOPES, PROVIDERS, provider_config, store_for
+from .user_accounts import (AccountError, GOOGLE_CALENDAR_SCOPES, GOOGLE_SCOPES, PROVIDERS,
+                            provider_config, store_for)
 
 COOKIE = "__Host-relay-oauth"
 STATE_TTL = 600
@@ -58,12 +59,15 @@ async def connections(request):
             allowed, message = False, str(exc)
         row = await store.row(provider, email) if allowed else None
         connected = bool(row and row["status"] == "connected")
+        calendar = False
         if connected:
             try:
                 data = store.decrypt(row["token_blob"])
                 access_token = data.get("access_token")
                 connected = (data.get("provider") == provider and data.get("relay_email") == email
                              and isinstance(access_token, str) and bool(access_token))
+                calendar = provider == "google" and GOOGLE_CALENDAR_SCOPES <= set(
+                    str(data.get("scope") or "").split())
                 if (row["expires_at"] and row["expires_at"] <=
                         time.time() + user_accounts.TOKEN_REFRESH_MARGIN_SECONDS):
                     connected = connected and bool(data.get("refresh_token")) and (
@@ -74,7 +78,8 @@ async def connections(request):
                       "connected": connected, "login": (row or {}).get("login", ""),
                       "email": (row or {}).get("account_email", ""),
                       "needs_reconnect": bool(row and not connected),
-                      "can_connect": configured and allowed, "message": message})
+                      "can_connect": configured and allowed, "message": message,
+                      **({"calendar": connected and calendar} if provider == "google" else {})})
     return _response({"email": email, "local_identity": email == identity.OWNER,
                       "native_login": await native_auth.enabled(request.app[DB_KEY]), "connections": items})
 
@@ -110,7 +115,8 @@ async def connect(request):
         if scopes:
             params["scope"] = scopes
     else:
-        params.update(scope=" ".join(sorted(GOOGLE_SCOPES | {"openid", "email"})),
+        params.update(scope=" ".join(sorted(GOOGLE_SCOPES | GOOGLE_CALENDAR_SCOPES | {"openid", "email"})),
+                      include_granted_scopes="true",
                       access_type="offline", prompt="consent select_account", login_hint=email)
     response = _response({"authorization_url": cfg["authorize"] + "?" + urlencode(params)})
     cookie, secure = cookie_options(cfg)
