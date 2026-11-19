@@ -317,6 +317,8 @@ async def _apply_task_action(request):
         else:
             raise ValueError("Acción desconocida")
         return web.json_response(await _task_snapshot(request, db, cid))
+    except PermissionError:
+        return web.json_response({"error": "Conversación no disponible"}, status=404)
     except AccountError as exc:
         return web.json_response({"error": str(exc), "connect_url": "/admin/#/account",
                                   "conversation_id": cid}, status=409)

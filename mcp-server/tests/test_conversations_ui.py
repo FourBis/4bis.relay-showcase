@@ -23,6 +23,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay.db import Database
+from relay import identity
 from relay.notify import NotifyClient
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -174,9 +175,11 @@ class TestFactsEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status, 400)
 
     async def test_lists_facts_for_project(self) -> None:
+        source = await self.db.create_conversation(
+            project_slug="demo", requested_by=identity.OWNER)
         await self.db.add_facts(
             "demo", ["usa postgres", "deploy con publish.ps1"],
-            source_conversation="c1")
+            source_conversation=source, actor=identity.OWNER)
         from relay.server import create_app
         async def fake_send(self_, *a, **kw):
             return True
@@ -194,8 +197,16 @@ class TestFactsEndpoint(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("deploy con publish.ps1", facts_text)
 
     async def test_other_project_not_listed(self) -> None:
-        await self.db.add_facts("demo", ["fact de demo"], source_conversation="c1")
-        await self.db.add_facts("otro", ["fact de otro"], source_conversation="c2")
+        await self.db.upsert_project({
+            "slug": "otro", "name": "Otro", "repo_path": self._tmp.name})
+        demo_source = await self.db.create_conversation(
+            project_slug="demo", requested_by=identity.OWNER)
+        other_source = await self.db.create_conversation(
+            project_slug="otro", requested_by=identity.OWNER)
+        await self.db.add_facts("demo", ["fact de demo"],
+            source_conversation=demo_source, actor=identity.OWNER)
+        await self.db.add_facts("otro", ["fact de otro"],
+            source_conversation=other_source, actor=identity.OWNER)
         from relay.server import create_app
         async def fake_send(self_, *a, **kw):
             return True

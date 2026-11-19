@@ -15,6 +15,10 @@ python -m pip install -e '.\mcp-server[dev]'
 
 El paquete y sus dependencias se describen en [mcp-server/pyproject.toml](../mcp-server/pyproject.toml). No hay un comando separado de migración o seed: el relay inicializa su SQLite al arrancar.
 
+En Windows, esa instalación incluye `tzdata` para interpretar las zonas IANA
+de Informe y Métricas. UTC funciona con la biblioteca estándar; una zona no
+disponible se rechaza y no se sustituye silenciosamente por UTC.
+
 ## 2. Configuración
 
 El servidor no carga `.env` por sí mismo. La plantilla de variables está en `.env.example`, en la raíz del repositorio. Conserva los secretos fuera del repositorio y deja los valores sensibles vacíos en ejemplos y documentación.

@@ -79,6 +79,7 @@ const review = panelHtml({mode:"write", state:"review", publish_allowed:true,
   pr_url:"https://example.invalid/pr/1", validation:{status:"stale", head_sha:"abc", detail:"antes correcta"}});
 assert.match(review, /pendiente de revisión/);
 assert.match(review, /Validación: obsoleta/);
+assert.match(review, /data-task-track\s/);
 assert.doesNotMatch(review, /data-task-track disabled/);
 assert.match(panelHtml({mode:"write",state:"implemented",publish_allowed:false}), /Publicar PR/);
 assert.match(panelHtml({mode:"write",state:"implemented",publish_allowed:false}),
@@ -87,7 +88,12 @@ const member = panelHtml({mode:"write",state:"review",can_control:false,
   publish_allowed:true,pr_url:"https://example.invalid/pr/1",tracking:{enabled:true}});
 assert.match(member, /pendiente de revisión/);
 assert.equal((member.match(/disabled\s+data-task-action/g) || []).length, 4);
-assert.match(member, /data-task-track disabled/);
+assert.doesNotMatch(member, /data-task-track/,
+  "sin permiso de control ni contrato de acciones no se ofrece seguimiento");
+const noActions = panelHtml({mode:"write",state:"review",can_control:true,
+  publish_allowed:true,pr_url:"https://example.invalid/pr/1",tracking:{enabled:true},allowed_actions:[]});
+assert.doesNotMatch(noActions, /data-task-action=|data-task-track/,
+  "un contrato vacío deniega las acciones aunque can_control sea true");
 assert.doesNotMatch(panelHtml({mode:"read_only",state:"ready"}), /Publicar PR/);
 const devReadOnly = panelHtml({mode:"read_only",state:"ready",
   allowed_actions:["continue","pause","cancel","enable_write"]});

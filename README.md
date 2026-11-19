@@ -1,12 +1,13 @@
 # FourBis Relay
 
-Esta rama prepara una ampliación local revisable: compartir conversaciones,
-recuperar solicitudes inciertas, revisión opcional de PR externos, archivo de
-cuentas y consultas MCP personales con alcance por proyecto. Su
-[recibo de paridad](docs/qa/parity-2026-11-01.md) distingue código, demo y
-validación pendiente. Todavía no acredita integración ni despliegue remoto.
-La demo modificada en esta rama usa sólo datos sintéticos; la URL publicada
-puede seguir mostrando una versión anterior.
+Las funciones de conversaciones compartidas, recuperación de solicitudes,
+revisión opcional de PR externos y consultas MCP personales se integraron en
+`develop` mediante el [PR #42](https://github.com/FourBis/4bis.relay-showcase/pull/42),
+que incluye el [#41](https://github.com/FourBis/4bis.relay-showcase/pull/41).
+El CI de esa integración falló; esta rama prepara su corrección. Consulta el
+[estado de validación](docs/qa/ci-followup-2026-11-02.md) antes de atribuirle
+funcionamiento verificado. La demo publicada usa datos sintéticos y no prueba
+el servidor ni una instalación conectada.
 
 **Español** · [English](README.en.md) · [Demo interactiva](https://fourbis.github.io/4bis.relay-showcase/) · [Instalación](docs/SETUP.md)
 
@@ -29,7 +30,7 @@ La [demo pública](https://fourbis.github.io/4bis.relay-showcase/) recrea parte 
 | Estado | Evidencia y alcance |
 |---|---|
 | Implementado en el código público | El [mapa de capacidades](docs/CAPABILITY_MAP.md) enlaza módulos, condiciones y límites. No todas las integraciones están configuradas por defecto. |
-| Integrado en `develop` | El [PR #38](https://github.com/FourBis/4bis.relay-showcase/pull/38) incorporó el registro de PR externos y la sincronización opcional de issues; el [#39](https://github.com/FourBis/4bis.relay-showcase/pull/39) corrigió observaciones concurrentes. Integración de código no equivale a despliegue. |
+| Integrado en `develop` | El [PR #42](https://github.com/FourBis/4bis.relay-showcase/pull/42) incorporó la ampliación y el mantenimiento del [#41](https://github.com/FourBis/4bis.relay-showcase/pull/41). El CI de la integración falló; el [seguimiento](docs/qa/ci-followup-2026-11-02.md) separa preparación, checks y despliegue. |
 | Demostrado en el navegador | La [revisión del 26 de octubre](docs/qa/showcase-verified-status-2026-10-26.md) comprobó los cinco escenarios de esa versión. Esta rama añade un sexto escenario, Modelos y bandeja, con revisión estática; no tiene una comprobación nueva en navegador. Todos usan datos sintéticos, sin modelos, GitHub ni backend. |
 | Disponible en una instancia | Depende de la versión instalada, sus permisos y su configuración. Esta revisión no acredita un despliegue conectado ni la disponibilidad operativa de PR externos. |
 

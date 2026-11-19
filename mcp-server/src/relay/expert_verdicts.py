@@ -402,3 +402,15 @@ def _parse_verifier(text: str) -> tuple[str, str, list[int]]:
         # `int("0")` es válido pero un paso "0" no existe; filtramos.
         pasos = [int(x) for x in _NUM_RE.findall(nums) if int(x) > 0]
     return verdict, feedback, pasos
+
+
+def _valid_correction(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        return (_validate_plan_correction(value) is None
+                and all(isinstance(step.get(k), str) and step[k].strip()
+                        for step in value["revised_steps"]
+                        for k in ("id", "description", "expected_output")))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False

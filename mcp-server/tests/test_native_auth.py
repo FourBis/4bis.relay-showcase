@@ -166,8 +166,9 @@ async def test_agent_reads_durable_result_while_markdown_export_is_pending(
     monkeypatch.setattr("relay.server_conversation_routes.git_flow.is_git_repo",
                         AsyncMock(return_value=False))
     monkeypatch.setattr("relay.server_expert_routes._run_expert_bg", AsyncMock())
-    # Este caso inyecta el resultado durable; no competir con otra admisión.
-    monkeypatch.setattr(task_service, "start_pending", Mock())
+    # Este caso guarda el resultado manualmente; la cola no debe competir
+    # con ese cierre ni iniciar un ejecutor real durante la lectura durable.
+    monkeypatch.setattr(task_service, "start_pending", lambda *_: None)
 
     created = await client.post("/conversations", json={
         "project": "demo", "author": "spoof@example.test"})

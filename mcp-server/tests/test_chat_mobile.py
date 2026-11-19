@@ -81,9 +81,22 @@ class TestAdjuntosComposer(unittest.TestCase):
     def test_los_adjuntos_viajan_en_el_run(self) -> None:
         cuerpo = _JS[_JS.index("async function sendCurrentMessage"):]
         cuerpo = cuerpo[:cuerpo.index("\n}")]
-        self.assertIn("attachments:", cuerpo)
-        # La limpieza selectiva y la recuperación se prueban ejecutando
-        # chat-draft-project.test.mjs, sin exigir vaciar otros borradores.
+        self.assertIn("attachments: enviados.map(file => file.id)", cuerpo)
+        # Consume sólo los IDs del envío en su contexto: conserva archivos
+        # añadidos después y no vacía la bandeja de otra conversación.
+        self.assertIn("const sentContext = attachmentContext", cuerpo)
+        consumo = (
+            "const sentIds = new Set(enviados.map(file => file.id));\n"
+            "  sentContext.attachments = sentContext.attachments.filter(file => !sentIds.has(file.id));\n"
+            "  syncAttachmentContext(sentContext);"
+        )
+        self.assertIn(consumo, cuerpo)
+        self.assertLess(cuerpo.index(consumo), cuerpo.index('await apiRoot("/experts/run"'))
+        sync = _JS[_JS.index("function syncAttachmentContext"):]
+        sync = sync[:sync.index("\n}")]
+        self.assertIn("if (attachmentContext !== context) return", sync)
+        self.assertIn("pendingAttachments = context.attachments", sync)
+        self.assertIn("renderAttachTray()", sync)
 
     def test_las_miniaturas_usan_el_id_sin_extension(self) -> None:
         """El endpoint resuelve por id pelado: con `.png` da 404 y la

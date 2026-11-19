@@ -217,3 +217,48 @@ def finish_staged_result(
             f"{result['content']}")
         result["sin_trabajo"] = True
     return result
+
+
+def finish_unstaged_result(result):
+    result["three_stage"] = False
+    result["plan"] = ""
+    result["verifier_verdict"] = ""
+    result["verifier_feedback"] = ""
+    result["planner_model"] = ""
+    result["verifier_model"] = ""
+    result["doc"] = ""
+    result["documenter_model"] = ""
+    result["stage_errors"] = {}
+    return result
+
+
+def planned_result(propuesta, planner_spec, historial, plan, planner_usage, stage_errors):
+    return {
+        "content": propuesta,
+        "model": planner_spec,
+        "tokens_in": None, "tokens_out": None,
+        "tool_calls": None, "duration_ms": 0,
+        "messages_json": historial, "phase_at_end": "planned",
+        "last_tool": None, "legs": 0, "steers": 0,
+        "steer_texts": [], "progress_events": [],
+        "plan": plan, "planner_model": planner_spec,
+        "verifier_verdict": "", "verifier_feedback": "",
+        "verifier_model": "", "doc": "", "documenter_model": "",
+        "three_stage": True,
+        "stage_usage": {"planner": planner_usage},
+        "stage_errors": stage_errors,
+    }
+
+
+def staged_recovery_usage(result, partial, acum, measured, executor_requests_used, requests_known):
+    value = merge_recovery_snapshot(result, partial or {})
+    for key in ("tokens_in", "tokens_out", "cache_read_tokens", "tool_calls", "duration_ms", "legs"):
+        extra = (partial or {}).get(key)
+        value[key] = (acum[key] + (extra or 0)
+                      if key in measured or extra is not None else None)
+    partial_requests_known = (partial is None or partial.get("requests") is not None
+                             or partial.get("_executor_attempted") is False)
+    value["requests"] = (executor_requests_used + int((partial or {}).get("requests") or 0)
+                         if requests_known and partial_requests_known else None)
+    value["progress_events"] = list(acum["progress_events"]) + list((partial or {}).get("progress_events") or [])
+    return value

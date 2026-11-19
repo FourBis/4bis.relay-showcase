@@ -49,8 +49,14 @@ class TestConversationsDb(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.db = Database(path=Path(self._tmp.name) / "test.db")
         await self.db.init_schema()
-        await self.db.upsert_project({
-            "slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
+        for slug in ("demo", "otro"):
+            await self.db.upsert_project({
+                "slug": slug, "name": slug, "repo_path": self._tmp.name})
+        self.actor = "member@example.test"
+        await self.db.set_user_role(self.actor, "member", project_slugs=["demo", "otro"])
+
+    async def _source(self, project="demo") -> str:
+        return await self.db.create_conversation(project_slug=project, requested_by=self.actor)
 
     async def asyncTearDown(self) -> None:
         self._tmp.cleanup()
@@ -136,44 +142,51 @@ class TestConversationsDb(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.stale_open_conversations(24), [])
 
     async def test_facts_append_and_list(self) -> None:
+        source = await self._source()
         n = await self.db.add_facts(
             "demo", ["usa postgres", "  ", "deploy con publish.ps1"],
-            source_conversation="c1")
+            source_conversation=source, actor=self.actor)
         self.assertEqual(n, 2)  # el item en blanco se saltea
-        facts = await self.db.list_facts("demo")
+        facts = await self.db.list_facts("demo", actor=self.actor)
         self.assertEqual(len(facts), 2)
-        self.assertEqual(await self.db.list_facts("otro"), [])
+        self.assertEqual(await self.db.list_facts("otro", actor=self.actor), [])
+        # Un actor ausente no obtiene ni modifica conocimiento de una fuente válida.
+        self.assertEqual(await self.db.list_facts("demo"), [])
+        with self.assertRaises(PermissionError):
+            await self.db.add_facts("demo", ["sin actor"], source_conversation=source)
 
     async def test_facts_nacen_pendientes_y_no_se_inyectan(self) -> None:
-        """Aprobación estricta (2026-08-21): lo que destila el compactador
-        espera revisión. Lo que escribe un humano nace aprobado — no hay a
-        quién pedirle permiso."""
-        await self.db.add_facts("demo", ["destilado por el LLM"])
-        await self.db.add_facts("demo", ["lo escribí yo"], status="approved")
+        """Aprobación y audiencia son controles independientes."""
+        source = await self._source()
+        await self.db.add_facts("demo", ["destilado por el LLM"],
+            source_conversation=source, actor=self.actor)
+        await self.db.add_facts("demo", ["lo escribí yo"], status="approved",
+            source_conversation=source, actor=self.actor)
 
-        # El panel los ve a los dos; la inyección solo al aprobado.
-        todos = await self.db.list_facts("demo")
+        # El panel autorizado los ve a los dos; la inyección sólo al aprobado.
+        todos = await self.db.list_facts("demo", actor=self.actor)
         self.assertEqual(len(todos), 2)
-        aprobados = await self.db.list_facts("demo", status="approved")
+        aprobados = await self.db.list_facts("demo", status="approved", actor=self.actor)
         self.assertEqual([f["fact"] for f in aprobados], ["lo escribí yo"])
 
         pendiente = next(f for f in todos if f["status"] == "pending")
-        self.assertTrue(await self.db.set_fact_status(pendiente["id"], "approved"))
+        self.assertFalse(await self.db.set_fact_status(pendiente["id"], "approved"))
+        self.assertTrue(await self.db.set_fact_status(pendiente["id"], "approved", actor=self.actor))
         self.assertEqual(
-            len(await self.db.list_facts("demo", status="approved")), 2)
+            len(await self.db.list_facts("demo", status="approved", actor=self.actor)), 2)
 
-        # Rechazar lo saca de la inyección pero lo deja en la tabla: sirve
-        # para ver qué destila mal el compactador.
-        await self.db.set_fact_status(pendiente["id"], "rejected")
+        # Rechazar lo saca de la inyección pero lo deja en la tabla.
+        await self.db.set_fact_status(pendiente["id"], "rejected", actor=self.actor)
         self.assertEqual(
-            len(await self.db.list_facts("demo", status="approved")), 1)
-        self.assertEqual(len(await self.db.list_facts("demo")), 2)
+            len(await self.db.list_facts("demo", status="approved", actor=self.actor)), 1)
+        self.assertEqual(len(await self.db.list_facts("demo", actor=self.actor)), 2)
 
-        self.assertFalse(await self.db.set_fact_status(99999, "approved"))
+        self.assertFalse(await self.db.set_fact_status(99999, "approved", actor=self.actor))
         with self.assertRaises(ValueError):
-            await self.db.set_fact_status(pendiente["id"], "quizas")
+            await self.db.set_fact_status(pendiente["id"], "quizas", actor=self.actor)
         with self.assertRaises(ValueError):
-            await self.db.add_facts("demo", ["x"], status="quizas")
+            await self.db.add_facts("demo", ["x"], status="quizas",
+                source_conversation=source, actor=self.actor)
 
     async def test_users_crud_y_normalizacion(self) -> None:
         """El email se normaliza a minúsculas al escribir: `identity`
@@ -205,56 +218,74 @@ class TestConversationsDb(unittest.IsolatedAsyncioTestCase):
             await self.db.set_user_role("  ", "owner")
 
     async def test_facts_supersede_soft(self) -> None:
-        await self.db.add_facts("demo", ["usa mysql", "deploy manual"])
-        await self.db.add_facts("otro", ["hecho ajeno"])
-        old_id = next(f["id"] for f in await self.db.list_facts("demo")
+        source = await self._source()
+        sibling = await self._source()
+        other = await self._source("otro")
+        await self.db.add_facts("demo", ["usa mysql", "deploy manual"],
+            source_conversation=source, actor=self.actor)
+        await self.db.add_facts("demo", ["otra conversación"],
+            source_conversation=sibling, actor=self.actor)
+        await self.db.add_facts("otro", ["hecho ajeno"],
+            source_conversation=other, actor=self.actor)
+        old_id = next(f["id"] for f in await self.db.list_facts("demo", actor=self.actor)
                       if f["fact"] == "usa mysql")
-        ajeno_id = (await self.db.list_facts("otro"))[0]["id"]
-        # id de otro proyecto NO se pisa (scoping); el propio sí.
+        sibling_id = next(f["id"] for f in await self.db.list_facts("demo", actor=self.actor)
+                          if f["source_conversation"] == sibling)
+        ajeno_id = (await self.db.list_facts("otro", actor=self.actor))[0]["id"]
+        # Ni otro proyecto ni otra conversación son publicables por compactar esta fuente.
         n = await self.db.supersede_facts(
-            [old_id, ajeno_id, 99999], "demo", superseded_by="c9")
+            [old_id, sibling_id, ajeno_id, 99999], "demo", superseded_by=source, actor=self.actor)
         self.assertEqual(n, 1)
-        vigentes = await self.db.list_facts("demo")
+        vigentes = await self.db.list_facts("demo", actor=self.actor, source_conversation=source)
         self.assertEqual([f["fact"] for f in vigentes], ["deploy manual"])
-        # el obsoleto sigue en la tabla para auditoría, con quién lo pisó
-        todos = await self.db.list_facts("demo", include_superseded=True)
+        todos = await self.db.list_facts("demo", include_superseded=True,
+            actor=self.actor, source_conversation=source)
         self.assertEqual(len(todos), 2)
         muerto = next(f for f in todos if f["fact"] == "usa mysql")
-        self.assertEqual(muerto["superseded_by"], "c9")
+        self.assertEqual(muerto["superseded_by"], source)
         self.assertTrue(muerto["superseded_at"])
-        # supersede es idempotente: ya obsoleto, no se re-marca
-        self.assertEqual(
-            await self.db.supersede_facts([old_id], "demo"), 0)
-        # el fact del otro proyecto quedó intacto
-        self.assertEqual(len(await self.db.list_facts("otro")), 1)
+        # La fuente válida permite comprobar la idempotencia del UPDATE.
+        self.assertEqual(await self.db.supersede_facts(
+            [old_id], "demo", superseded_by=source, actor=self.actor), 0)
+        self.assertEqual(len(await self.db.list_facts("otro", actor=self.actor)), 1)
+        self.assertEqual(len(await self.db.list_facts("demo", actor=self.actor,
+            source_conversation=sibling)), 1)
+        with self.assertRaises(PermissionError):
+            await self.db.supersede_facts([old_id], "demo", superseded_by=source)
 
     async def test_memories_fts_scoped_by_project(self) -> None:
         if not self.db._fts_available:
             self.skipTest("FTS5 no disponible en este sqlite")
-        await self.db.add_memory("c1", "demo", "se decidió usar postgres para sample-app")
-        await self.db.add_memory("c2", "demo", "el build corre con dotnet build")
-        await self.db.add_memory("c3", "otro", "postgres también acá pero es de OTRO proyecto")
+        c1, c2, c3 = await self._source(), await self._source(), await self._source("otro")
+        await self.db.add_memory(c1, "demo", "se decidió usar postgres para sample-app", actor=self.actor)
+        await self.db.add_memory(c2, "demo", "el build corre con dotnet build", actor=self.actor)
+        await self.db.add_memory(c3, "otro", "postgres también acá pero es de OTRO proyecto", actor=self.actor)
 
-        hits = await self.db.search_memories("demo", "postgres")
+        hits = await self.db.search_memories("demo", "postgres", actor=self.actor)
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["conversation_id"], "c1")
+        self.assertEqual(hits[0]["conversation_id"], c1)
+        self.assertNotIn(c3, [h["conversation_id"] for h in hits])
+        self.assertEqual(await self.db.search_memories("demo", "postgres"), [])
+        with self.assertRaises(PermissionError):
+            await self.db.add_memory(c1, "demo", "sin actor")
 
-        # operadores FTS5 en el query no rompen (quoting)
-        hits = await self.db.search_memories("demo", 'postgres AND "x -y:')
+        # Operadores FTS5 en el query no rompen (quoting).
+        hits = await self.db.search_memories("demo", 'postgres AND "x -y:', actor=self.actor)
         self.assertIsInstance(hits, list)
 
-        # re-indexar la misma conversación no duplica
-        await self.db.add_memory("c1", "demo", "resumen nuevo con postgres")
-        hits = await self.db.search_memories("demo", "postgres")
+        # Re-indexar la misma conversación no duplica.
+        await self.db.add_memory(c1, "demo", "resumen nuevo con postgres", actor=self.actor)
+        hits = await self.db.search_memories("demo", "postgres", actor=self.actor)
         self.assertEqual(len(hits), 1)
 
     async def test_search_memories_without_query_falls_back(self) -> None:
-        conv_id = await self.db.create_conversation(project_slug="demo")
+        conv_id = await self._source()
         await self.db.close_conversation(conv_id)
         await self.db.set_conversation_summary(conv_id, "resumen reciente")
-        hits = await self.db.search_memories("demo", "")
+        hits = await self.db.search_memories("demo", "", actor=self.actor)
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["summary"], "resumen reciente")
+        self.assertEqual(await self.db.search_memories("demo", ""), [])
 
 
 class TestMemoryModule(unittest.IsolatedAsyncioTestCase):
@@ -425,40 +456,42 @@ class TestRunExpertHistory(unittest.IsolatedAsyncioTestCase):
 
 
 class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
-    """Los facts tienen que LLEGAR al experto (2026-08-20).
+    """Los facts aprobados de la fuente autorizada llegan al experto."""
 
-    Se destilaban 536 hechos en 11 proyectos y no los leía nadie: la
-    única lectura automática se los devolvía al compactador para
-    deduplicar, y la vía manual de ADR-027 (`/fact <target>`) no se
-    invocó ni una vez en toda la historia del relay. Este test es el que
-    hace ruido si el cableado se corta otra vez.
-    """
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(path=Path(self._tmp.name) / "facts.db")
+        await self.db.init_schema()
+        await self.db.upsert_project({
+            "slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
+        self.actor = "member@example.test"
+        await self.db.set_user_role(self.actor, "member", project_slugs=["demo"])
+        initial_task = {"mode": "read_only", "read_only": True, "no_checkout": True, "state": "ready"}
+        self.cid = await self.db.create_conversation(project_slug="demo",
+            requested_by=self.actor, initial_task=initial_task)
+        sibling = await self.db.create_conversation(project_slug="demo",
+            requested_by=self.actor, initial_task=initial_task)
+        await self.db.add_facts("demo", ["SampleApp usa PostgreSQL en el 5433"],
+            source_conversation=self.cid, status="approved", actor=self.actor)
+        await self.db.add_facts("demo", ["hecho pendiente no aprobado"],
+            source_conversation=self.cid, actor=self.actor)
+        await self.db.add_facts("demo", ["hecho aprobado de otra conversación"],
+            source_conversation=sibling, status="approved", actor=self.actor)
 
-    class _DbFake:
-        def __init__(self, facts):
-            self._facts = facts
-            self.pedidos = []
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
 
-        async def list_facts(self, slug, limit=100, status=None):
-            self.pedidos.append((slug, status))
-            return self._facts
-
-        async def get_conversation_task(self, *_a, **_k):
-            return None
-
-        async def get_model(self, *_a, **_k):
-            return None
-
-        async def get_config(self, *_a, **_k):
-            return None
-
-    def _project(self, tmp, **defaults):
-        return {"slug": "demo", "repo_path": tmp, "system_prompt": "",
+    def _project(self, **defaults):
+        return {"slug": "demo", "repo_path": self._tmp.name, "system_prompt": "",
                 "mcp_servers": [], "native_tools": [],
-                "defaults_json": defaults}
+                "defaults_json": {"read_only": True, "native_shell": False,
+                    "native_files": False, "sql_tools": False, **defaults}}
 
-    async def _instructions(self, project, db):
-        """Corre el experto capturando las instructions que se armaron."""
+    async def _instructions(self, project, *, conversation_id=None, actor=None):
+        """El runner conserva su admisión real; sólo se observa el Agent."""
+        from relay import user_accounts
+        # resolved_project relee la configuración vigente del proyecto real.
+        await self.db.upsert_project(project)
         sink = {}
         real = expert_runner.Agent
 
@@ -474,47 +507,58 @@ class TestFactsAlwaysOn(unittest.IsolatedAsyncioTestCase):
             def __getattr__(self, n):
                 return getattr(self._inner, n)
 
-        with patch.object(expert_runner, "Agent", _Spy):
-            await run_expert(project, "hola", model_override="test", db=db)
+        with patch.object(expert_runner, "Agent", _Spy), user_accounts.bind_actor(self.db, actor):
+            await run_expert(project, "hola", model_override="test", db=self.db,
+                conversation_id=conversation_id or "")
         return sink["instructions"]
 
     async def test_con_el_flag_los_hechos_llegan_al_prompt(self) -> None:
-        db = self._DbFake([{"fact": "SampleApp usa PostgreSQL en el 5433"}])
-        with tempfile.TemporaryDirectory() as tmp:
-            instr = await self._instructions(
-                self._project(tmp, facts_always_on=True), db)
+        with patch.object(self.db, "list_facts", wraps=self.db.list_facts) as requested:
+            instr = await self._instructions(self._project(facts_always_on=True),
+                conversation_id=self.cid, actor=self.actor)
         self.assertIn("## Hechos del proyecto", instr)
         self.assertIn("SampleApp usa PostgreSQL en el 5433", instr)
-        # `approved` explícito: si esto pide "todos", la aprobación
-        # estricta no existe y un hecho sin revisar entra al prompt.
-        self.assertEqual(db.pedidos, [("demo", "approved")])
+        self.assertNotIn("hecho pendiente no aprobado", instr)
+        self.assertNotIn("hecho aprobado de otra conversación", instr)
+        requested.assert_awaited_once_with("demo", limit=200, status="approved",
+            actor=self.actor, source_conversation=self.cid)
 
     async def test_sin_el_flag_no_se_pagan_esos_tokens(self) -> None:
-        db = self._DbFake([{"fact": "SampleApp usa PostgreSQL en el 5433"}])
-        with tempfile.TemporaryDirectory() as tmp:
-            instr = await self._instructions(self._project(tmp), db)
+        with patch.object(self.db, "list_facts", wraps=self.db.list_facts) as requested:
+            instr = await self._instructions(self._project(),
+                conversation_id=self.cid, actor=self.actor)
         self.assertNotIn("## Hechos del proyecto", instr)
-        self.assertEqual(db.pedidos, [])   # ni siquiera se consulta
+        requested.assert_not_awaited()
+
+    async def test_sin_conversacion_no_se_consultan_hechos(self) -> None:
+        with patch.object(self.db, "list_facts", wraps=self.db.list_facts) as requested:
+            instr = await self._instructions(self._project(facts_always_on=True), actor=self.actor)
+        self.assertNotIn("## Hechos del proyecto", instr)
+        requested.assert_not_awaited()
+
+    async def test_sin_actor_no_admite_el_modelo(self) -> None:
+        with self.assertRaises(PermissionError):
+            await self._instructions(self._project(facts_always_on=True), conversation_id=self.cid)
 
     async def test_una_db_rota_no_mata_el_run(self) -> None:
-        class _DbRota:
-            async def list_facts(self, slug, limit=100):
-                raise RuntimeError("sqlite se cayó")
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+        from relay import user_accounts
+        expected = "Respuesta determinista sin hechos disponibles."
 
-            async def get_conversation_task(self, *_a, **_k):
-                return None
+        def reply(messages, info):
+            return ModelResponse(parts=[TextPart(content=expected)])
 
-            async def get_model(self, *_a, **_k):
-                return None
-
-            async def get_config(self, *_a, **_k):
-                return None
-
-        with tempfile.TemporaryDirectory() as tmp:
-            r = await run_expert(
-                self._project(tmp, facts_always_on=True), "hola",
-                model_override="test", db=_DbRota())
-        self.assertTrue(r["content"])
+        project = self._project(facts_always_on=True)
+        await self.db.upsert_project(project)
+        with patch.object(expert_runner.expert_models, "build_model", return_value=FunctionModel(reply)):
+            with patch.object(self.db, "list_facts", side_effect=RuntimeError("sqlite se cayó")) as requested:
+                with user_accounts.bind_actor(self.db, self.actor):
+                    result = await run_expert(project, "hola",
+                        model_override="test", db=self.db, conversation_id=self.cid)
+        requested.assert_awaited_once_with("demo", limit=200, status="approved",
+            actor=self.actor, source_conversation=self.cid)
+        self.assertEqual(result["content"], expected)
 
 
 class TestExpertsAsyncHttp(unittest.IsolatedAsyncioTestCase):

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from relay import admin, identity
+from relay import admin, conversation_access, identity
 from relay.db import Database
 
 
@@ -228,6 +228,7 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
 ) -> None:
     client, db, _app = await _make_client(tmp_path, monkeypatch)
     conv_id = await db.create_conversation(project_slug="fixture")
+    assert (await db.get_conversation(conv_id))["requested_by"] is None
     await db.update_conversation_task(
         conv_id,
         mode="write",
@@ -248,10 +249,22 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
     member_headers = {"Cf-Access-Jwt-Assertion": "fixture-jwt"}
     inspect = AsyncMock(return_value=None)
     try:
+        # La asignación no comparte hilos: sin invitación el detalle no existe
+        # para este miembro, aunque pertenezca al proyecto.
+        await db.set_user_role("member@example.test", "member",
+                               project_slugs=["fixture"])
+        with patch("relay.identity.verify", return_value="member@example.test"):
+            unshared = await client.get("/conversations?scope=shared", headers=member_headers)
+            assert conv_id not in {row["id"] for row in (await unshared.json())["conversations"]}
+            hidden = await client.get(f"/conversations/{conv_id}", headers=member_headers)
+            assert hidden.status == 404
+            assert "PRIVATE_" not in await hidden.text()
+        await conversation_access.set_share(
+            db, conv_id, identity.OWNER, "member@example.test", "read")
         with patch("relay.task_workspace.inspect_workspace", inspect):
             with patch("relay.identity.verify", return_value="member@example.test"):
                 list_response = await client.get(
-                    "/conversations", headers=member_headers
+                    "/conversations?scope=shared", headers=member_headers
                 )
                 detail_response = await client.get(
                     f"/conversations/{conv_id}", headers=member_headers
@@ -259,25 +272,38 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
                 task_response = await client.get(
                     f"/conversations/{conv_id}/task", headers=member_headers
                 )
+                task_before = await db.get_conversation_task(conv_id)
+                events_before = await db.list_conversation_events(conv_id)
                 pr_response = await client.post(
                     f"/conversations/{conv_id}/git/pr",
                     headers=member_headers,
                     json={},
+                )
+                control_response = await client.post(
+                    f"/conversations/{conv_id}/task", headers=member_headers,
+                    json={"action": "pause"},
                 )
 
         assert list_response.status == 200
         assert detail_response.status == 200
         assert task_response.status == 200
         assert pr_response.status == 403
+        assert control_response.status == 404
+        control_body = await control_response.text()
+        assert control_body == "Consulta no disponible."
+        assert "PRIVATE_" not in control_body
+        assert await db.get_conversation_task(conv_id) == task_before
+        assert await db.list_conversation_events(conv_id) == events_before
+        assert (await db.get_conversation_task(conv_id))["state"] == "blocked"
         assert not inspect.await_args_list or all(
             call.args[2] == conv_id for call in inspect.await_args_list
         )
 
-        listed = next(
-            item
-            for item in (await list_response.json())["conversations"]
-            if item["id"] == conv_id
-        )
+        listed_by_id = {item["id"]: item for item in (await list_response.json())["conversations"]}
+        assert conv_id in listed_by_id
+        listed = listed_by_id[conv_id]
+        assert listed["owner_email"] is None
+        assert listed["access"]["can_control"] is False
         member_views = [
             await list_response.json(),
             await detail_response.json(),
@@ -286,6 +312,8 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
         listed_task = _conversation_task(listed)
         detailed_task = _conversation_task(await detail_response.json())
         task_body = await task_response.json()
+        assert task_body["can_control"] is False
+        assert task_body["allowed_actions"] == []
         task_view = _task_payload(
             task_body.get("task_json", task_body.get("task", task_body))
         )
@@ -330,5 +358,13 @@ async def test_member_task_views_hide_private_metadata_and_git_pr_is_forbidden(
         assert owner_task["futurefield"] == "PRIVATE_FUTURE_FIELD"
         assert owner_task["error"] == "PRIVATE_ERROR_DETAIL"
         assert owner_task["validation"]["detail"] == "PRIVATE_VALIDATION_DETAIL"
+
+        await conversation_access.revoke_share(
+            db, conv_id, identity.OWNER, "member@example.test")
+        with patch("relay.identity.verify", return_value="member@example.test"):
+            revoked_list = await client.get("/conversations?scope=shared", headers=member_headers)
+            revoked_detail = await client.get(f"/conversations/{conv_id}", headers=member_headers)
+        assert conv_id not in {row["id"] for row in (await revoked_list.json())["conversations"]}
+        assert revoked_detail.status == 404
     finally:
         await client.close()
