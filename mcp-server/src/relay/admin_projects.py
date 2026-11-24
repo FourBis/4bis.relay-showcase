@@ -400,9 +400,15 @@ async def api_projects_patch(request: web.Request) -> web.Response:
             return web.json_response({"error": "Sólo el administrador puede configurar revisión automática"}, status=403)
         from .external_review_config import validate
         try:
+            if body["external_pr_review_policy"] is None:
+                # Sin política propia: el proyecto vuelve a la configuración por defecto.
+                raise LookupError
+
             review_policy = validate(body["external_pr_review_policy"],
                 model_specs={row["spec"] for row in await db.list_models() if row.get("enabled", True)},
                 users=await db.list_users())
+        except LookupError:
+            review_policy = {}
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=422)
         policy_updates["external_pr_review_policy"] = review_policy

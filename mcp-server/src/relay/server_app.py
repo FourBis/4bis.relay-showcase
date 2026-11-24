@@ -195,6 +195,8 @@ def create_app(bind_host: str = "127.0.0.1") -> web.Application:
     app.router.add_get("/conversations/{id}/external-pr/images/{draft_id}", external_reviews.image_download)
     app.router.add_post("/conversations/{id}/external-pr/images/{draft_id}/confirm", external_reviews.image_confirm)
     app.router.add_get("/admin/api/external-review/notifications", external_reviews.inbox)
+    app.router.add_get("/admin/api/external-review/default-policy", external_reviews.default_policy_get)
+    app.router.add_put("/admin/api/external-review/default-policy", external_reviews.default_policy_put)
     app.router.add_post("/admin/api/external-review/notifications/{notification_id}/read", external_reviews.inbox_read)
     app.router.add_get("/projects/{slug}/issues", server_issue_routes.issues)
     app.router.add_get("/projects/{slug}/pulls", server_issue_routes.pulls)

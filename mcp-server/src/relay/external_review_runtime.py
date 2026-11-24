@@ -36,6 +36,7 @@ def _review_summary(job):
 
 async def recover(db):
     await jobs.recover(db)
+    await jobs.load_default(db)
     await external_review_publish.recover(db)
     await external_review_notify.ensure_schema(db)
     await external_evidence_images.cleanup_confirmed(db)
@@ -55,10 +56,12 @@ async def _observe(db):
     # Rotation is scheduling state only: denied records must not acquire fake
     # activity or keep the next eligible record outside the bounded batch.
     cursor = getattr(db, "_external_review_observe_cursor", "")
+    # Los proyectos sin política propia siguen la de instalación, si está activa.
+    default_on = int(jobs.default_policy().get("enabled") is True)
     query = ("SELECT c.id,c.project_slug,c.requested_by FROM conversations c JOIN projects p "
              "ON p.slug=c.project_slug COLLATE NOCASE WHERE c.status='open' AND p.enabled=1 "
              "AND json_extract(c.task_json,'$.mode')='external_pr' "
-             "AND json_extract(p.defaults_json,'$.external_pr_review_policy.enabled')=1 "
+             f"AND (json_extract(p.defaults_json,'$.external_pr_review_policy.enabled')=1 OR {default_on}=1) "
              "AND c.id>? ORDER BY c.id LIMIT 100")
     for after in (cursor, "") if cursor else ("",):
         rows = await db.run(query, (after,))
@@ -187,6 +190,7 @@ async def _notify(db):
 
 async def run_once(db, *, observe=True):
     await jobs.ensure_schema(db)
+    await jobs.load_default(db)
     await external_review_publish.ensure_schema(db)
     if observe:
         await _observe(db)
