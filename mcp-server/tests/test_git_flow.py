@@ -425,6 +425,9 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
         _init_repo(self.repo)
+        # /cerrar exige develop explícita; main se conserva para probar
+        # HEAD movido y cambios pendientes en la rama incorrecta.
+        _git(self.repo, "branch", "develop")
         self.branch = await git_conversations.open_conversation_branch(
             str(self.repo), "usuario-demo-a")
 
@@ -441,7 +444,7 @@ class TestFinalizePr(unittest.IsolatedAsyncioTestCase):
         clean, _ = await git_branches.working_tree_clean(str(self.repo))
         self.assertTrue(clean)
         rc, count = await git_process._git(
-            str(self.repo), "rev-list", "--count", f"main..{self.branch}")
+            str(self.repo), "rev-list", "--count", f"develop..{self.branch}")
         self.assertEqual(count.strip(), "1")
         # Sin remoto: el push falla pero el error es post-commit.
         self.assertIsNotNone(out["error"])

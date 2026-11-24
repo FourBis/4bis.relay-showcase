@@ -315,13 +315,35 @@ async def _postgres(dsn: str, sql: str, params: list, *,
     return columnas, datos, len(filas) > MAX_ROWS
 
 
+def _error_del_motor(kind: str, error: Exception) -> str:
+    """Clasifica causas conocidas sin repetir identificadores ni texto del driver."""
+    if kind == "sqlite" and isinstance(error, sqlite3.Error):
+        message = str(error).lower()
+        if message.startswith("no such column:"):
+            return ("error de sqlite: columna inexistente. Consulta el esquema "
+                    "permitido y corrige la referencia a la columna.")
+        if message.startswith("no such table:"):
+            return ("error de sqlite: tabla inexistente. Consulta el esquema "
+                    "permitido y corrige la referencia a la tabla.")
+        if (message == "incomplete input" or message.startswith("unrecognized token:")
+                or message.startswith('near "') and message.endswith('": syntax error')):
+            return "error de sqlite: sintaxis SQL no válida. Revisa la sintaxis de la consulta."
+        if message.startswith(("database is locked", "database table is locked")):
+            return "error de sqlite: base ocupada. Espera a que termine la otra operación."
+        if message.startswith("attempt to write a readonly database"):
+            return ("error de sqlite: base de solo lectura. Solicita al responsable "
+                    "revisar el permiso de escritura; no intentes eludirlo.")
+    return (f"error de {kind}: {type(error).__name__}. No se pudo completar la consulta; "
+            "revisa la conexión y la consulta sin pegar credenciales en el chat.")
+
+
 async def consultar(dsn: str, sql: str, *, params: Optional[list] = None,
                     solo_lectura: bool = True) -> str:
     """Ejecuta y devuelve la tabla formateada.
 
-    Los errores del MOTOR vuelven como texto porque son **información
-    para el modelo**: "column x does not exist" le dice qué corregir; una
-    excepción solo le dice que algo salió mal.
+    Los errores del MOTOR vuelven como diagnósticos seguros para el modelo:
+    una causa conocida indica qué revisar, sin repetir identificadores,
+    parámetros, rutas o credenciales del mensaje original del driver.
 
     Lo único que sí lanza es `SqlNoPermitido`, y a propósito: un permiso
     denegado no es un resultado, y quien llama tiene que decidir qué
@@ -349,8 +371,7 @@ async def consultar(dsn: str, sql: str, *, params: Optional[list] = None,
     except Exception as e:  # noqa: BLE001 — el error del motor es la respuesta
         # Los drivers pueden repetir DSN o parámetros decodificados. El
         # mensaje crudo no debe entrar al historial ni a los logs.
-        return (f"error de {kind}: {type(e).__name__}. No se pudo completar la consulta; "
-                "revisa la conexión y la consulta sin pegar credenciales en el chat.")
+        return _error_del_motor(kind, e)
     if not cols:
         return "(la consulta no devolvió columnas)"
     return _formatear(cols, filas, truncado=truncado)

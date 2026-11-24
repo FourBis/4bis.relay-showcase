@@ -1,5 +1,6 @@
 """Instrucciones de planificación, verificación y documentación."""
 from __future__ import annotations
+import json
 
 
 
@@ -245,3 +246,82 @@ _PV_TIMEOUT_S = 60.0
 #: arrancan sin tiempo y el turno termina sin veredicto ni resumen — o
 #: sea, gastando el modelo para tirar el resultado.
 RESERVA_CIERRE_S = 90.0
+
+
+def executor_plan_block(plan, *, trivial=False):
+    plan_block = ""
+    if plan and not trivial:
+        plan_block = (
+            "## Plan a ejecutar (del planificador)\n"
+            f"{plan}\n\n"
+            "Sigue estos pasos en orden. Si descubris que un paso es\n"
+            "incorrecto, o que el pedido del humano es mas simple que el\n"
+            "plan, indicarlo en la respuesta final y continuar igual: el\n"
+            "plan es una guia, no un contrato.\n"
+            "Al terminar cada paso, marcalo con `plan_step_done(nro)`."
+        )
+    elif trivial:
+        plan_block = (
+            "## Plan a ejecutar (del planificador)\n"
+            f"{plan}\n\n"
+            "Pedido trivial: resuélvelo directo, sin exploración."
+        )
+    return plan_block
+
+
+def executor_interruption_prompt(ev):
+    return (
+        "\n\n## Interrupción reportada por el ejecutor\n"
+        "El ejecutor paró antes de terminar y emitió la señal\n"
+        "`EXECUTOR_INTERRUPTION`. El plan actual no le sirvió.\n\n"
+        f"- Razón: {ev['reason']}\n"
+        f"- Paso afectado: {ev['affected_step_id']}\n"
+        "- Contexto del error:\n"
+        f"  {ev['error_context']}\n"
+        "- Avance parcial registrado:\n"
+        f"  {json.dumps(ev['partial_progress'], ensure_ascii=False)}\n\n"
+        "Emití un PLAN REVISADO que esquive el problema: cambia el\n"
+        "orden, reemplaza el paso bloqueado por un equivalente, o\n"
+        "parte el paso en subtareas. NO repitas el plan original.\n"
+        "Mantené todo lo que el ejecutor YA avanzó (ver\n"
+        "`partial_progress`): empezar de cero perdería ese\n"
+        "trabajo.\n"
+    )
+
+
+EMPTY_RETRY_PROMPT = (
+    "No ejecutaste NINGUNA herramienta en el turno anterior: "
+    "describiste el trabajo y cerraste. Hazlo ahora, de verdad.\n"
+    "- Si necesitas la salida de un comando, LLÁMALO con la tool "
+    "`shell`. Escribir el comando en tu respuesta y pedir que te "
+    "confirmen el resultado no es ejecutarlo.\n"
+    "- Si necesitas ver un archivo, léelo con `read_file`.\n"
+    "- No pidas permiso para leer ni para ejecutar: ya lo tienes.\n"
+    "- Si de verdad hace falta una decisión humana (instalar algo, "
+    "elegir entre caminos que no son equivalentes), usa "
+    "`ask_human`: es la única forma válida de frenar el turno.\n"
+    "- Si el pedido era solo una pregunta y ya la respondiste, "
+    "dilo en una línea y cierra. No inventes trabajo para "
+    "justificar el turno."
+)
+
+
+def continuation_prompt(feedback, continuation_correction=None):
+    if continuation_correction is not None:
+        pending = "\n".join(
+            f"- {step['description']}: {step['expected_output']}"
+            for step in continuation_correction["revised_steps"]
+            if step["status"] != "done")
+        user = (
+            "Revisa el estado actual y continúa esta misma tarea desde "
+            "su historial. Conserva los efectos ya realizados y completa "
+            "los criterios pendientes, dentro de los límites vigentes:\n\n"
+            f"{continuation_correction['feedback_to_executor'][:2000]}\n"
+            f"{pending[:2000]}")
+    else:
+        user = (
+            "Continúa la tarea. El verificador revisó lo que hiciste y dice "
+            f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
+            "cierra con el resumen final. Si al mirarlo descubres que ya "
+            "estaba cubierto, dilo y no rehagas el trabajo.")
+    return user

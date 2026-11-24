@@ -233,21 +233,60 @@ def test_cero_filas_no_es_un_error(base):
 
 
 def test_error_del_motor_vuelve_como_texto(base):
-    """El error es útil sin copiar SQL ni rutas privadas al historial."""
-    out = _run(dbtool.consultar(base, "SELECT no_existe FROM t"))
-    assert out.startswith("error de sqlite")
-    assert "OperationalError" in out
-    assert "no_existe" not in out
-    assert "SELECT" not in out
-    assert base not in out
+    """Conserva causa y siguiente paso sin repetir un identificador privado."""
+    sql = "SELECT columna_privada_demo FROM t"
+    out = _run(dbtool.consultar(base, sql))
+    assert out.startswith("error de sqlite:")
+    assert "columna inexistente" in out
+    assert "esquema permitido" in out and "corrige" in out
+    assert "columna_privada_demo" not in out
+    assert sql not in out and base not in out
+
+
+@pytest.mark.parametrize("sql,causa", [
+    ("SELECT * FROM tabla_privada_demo", "tabla inexistente"),
+    ("SELECT FROM t", "sintaxis SQL no válida"),
+])
+def test_error_sqlite_distingue_causas_sin_repetir_la_consulta(base, sql, causa):
+    out = _run(dbtool.consultar(base, sql))
+    assert out.startswith("error de sqlite:")
+    assert causa in out
+    assert "Consulta el esquema permitido" in out or "Revisa la sintaxis" in out
+    assert "tabla_privada_demo" not in out
+    assert sql not in out and base not in out
+
+
+@pytest.mark.parametrize("kind,prefix,causa", [
+    ("sqlite", "no such column: ", "columna inexistente"),
+    ("sqlite", "detalle desconocido: ", "revisa la conexión y la consulta"),
+    ("postgres", "detalle desconocido: ", "revisa la conexión y la consulta"),
+])
+def test_error_del_driver_no_repite_datos_sensibles(monkeypatch, caplog, kind, prefix, causa):
+    dsn = "postgres://usuario_demo:clave_demo@host.example/base_demo?token=token_demo"
+    path = "/ruta_privada_demo/base_demo.db"
+    query = "SELECT columna_privada_demo FROM tabla_privada_demo"
+    raw = prefix + f"{dsn}; {path}; {query}; parámetro=valor_privado_demo"
+
+    async def fail(*args, **kwargs):
+        raise sqlite3.OperationalError(raw) if kind == "sqlite" else RuntimeError(raw)
+
+    monkeypatch.setattr(dbtool, f"_{kind}", fail)
+    out = _run(dbtool.consultar(path if kind == "sqlite" else dsn, "SELECT 1"))
+    assert out.startswith(f"error de {kind}:") and causa in out
+    for private in (dsn, path, query, "usuario_demo", "clave_demo", "token_demo",
+                    "columna_privada_demo", "tabla_privada_demo", "valor_privado_demo"):
+        assert private not in out
+        assert private not in caplog.text
 
 
 def test_archivo_inexistente_vuelve_como_texto(tmp_path):
-    out = _run(dbtool.consultar(str(tmp_path / "nada.db"), "SELECT 1"))
-    assert out.startswith("error: no se encontró la base local")
-    assert "nada.db" not in out
-    assert str(tmp_path) not in out
-    assert "SELECT 1" not in out
+    path = tmp_path / "base_privada_demo.db"
+    out = _run(dbtool.consultar(str(path), "SELECT 1"))
+    assert out.startswith("error:")
+    assert "no se encontró la base local" in out
+    assert "Revisa la conexión registrada" in out
+    assert str(tmp_path) not in out and path.name not in out
+    assert not path.exists(), "La consulta no debe crear una base inexistente."
 
 
 def test_sqlite_de_lectura_se_abre_en_modo_ro(base):
@@ -471,6 +510,8 @@ def test_describir_marca_las_escribibles():
 class EndpointsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        # Los clientes se agregan después y cierran primero (cleanup LIFO).
+        self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
@@ -478,14 +519,11 @@ class EndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database()
         await self.db.init_schema()
 
-    async def asyncTearDown(self) -> None:
-        self._tmp.cleanup()
-
     async def _client(self):
         from relay.server import create_app
         client = TestClient(TestServer(create_app()))
-        await client.start_server()
         self.addAsyncCleanup(client.close)
+        await client.start_server()
         return client
 
     async def test_get_no_devuelve_el_dsn_entero(self) -> None:
@@ -598,25 +636,36 @@ async def _tools_del_agente(proj, db):
 
     from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import FunctionModel
+    from relay.user_accounts import bind_actor
 
-    await db.create_conversation(project_slug=proj["slug"], conversation_id="v1")
+    actor = "sql-owner@example.test"
+    await db.set_user_role(actor, "owner")
+    await db.upsert_project(proj)
+    cid = await db.create_conversation(project_slug=proj["slug"], requested_by=actor)
+    chat_id = await db.create_chat(project_slug=proj["slug"], source="test", author=actor,
+                                  target=proj["slug"], conversation_id=cid, requested_by=actor)
     nombres = set()
+    invoked = False
 
     def responder(messages, info):
+        nonlocal invoked
+        invoked = True
         nombres.update(tool.name for tool in info.function_tools)
         return ModelResponse(parts=[TextPart("ok")])
 
     with patch.object(expert_models, "build_model",
                       lambda s: FunctionModel(responder)), \
-         patch.object(cbm_runtime, "cbm_binary_path", lambda: None):
+         patch.object(cbm_runtime, "cbm_binary_path", lambda: None), \
+         bind_actor(db, actor):
         await expert_runner.run_expert(
             proj, "hola", db=db, model_override="minimax:MiniMax-M3",
-            chat_id="c1", conversation_id="v1")
+            chat_id=chat_id, conversation_id=cid)
+    assert invoked, "La ausencia de tools SQL sólo vale si el agente llegó al modelo."
     return nombres
 
 
 def _proj(tmp, **extra):
-    p = {"slug": "demo", "repo_path": str(tmp), "system_prompt": "p",
+    p = {"slug": "demo", "name": "Demo", "repo_path": str(tmp), "system_prompt": "p",
          "mcp_servers": [], "native_tools": [], "defaults_json": {}}
     p.update(extra)
     return p
@@ -655,6 +704,8 @@ class PermisoSinDsnTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        # Registrar primero el directorio permite cerrar la app antes de borrarlo.
+        self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
@@ -663,11 +714,8 @@ class PermisoSinDsnTests(unittest.IsolatedAsyncioTestCase):
         await self.db.init_schema()
         from relay.server import create_app
         self.client = TestClient(TestServer(create_app()))
-        await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
-
-    async def asyncTearDown(self) -> None:
-        self._tmp.cleanup()
+        await self.client.start_server()
 
     async def test_post_sin_dsn_conserva_la_cadena(self) -> None:
         await self.db.upsert_db_connection(

@@ -5,13 +5,18 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
+def _zone(tz_name: str):
+    # UTC no necesita la base IANA, que Windows no incluye con Python.
+    return timezone.utc if tz_name == "UTC" else ZoneInfo(tz_name)
+
+
 def parse_window(query, *, default_days: int, days_min: int, days_max: int,
                  range_max_days: int = 366,
                  needs_previous: bool = False) -> dict:
     """Valida from/to, tz y fallback days. Devuelve error como string."""
     tz_name = (query.get("tz") or "UTC").strip()
     try:
-        ZoneInfo(tz_name)
+        _zone(tz_name)
     except (ZoneInfoNotFoundError, ValueError):
         return {"error": "tz debe ser una zona IANA válida"}
 
@@ -51,7 +56,7 @@ def parse_window(query, *, default_days: int, days_min: int, days_max: int,
 
 def utc_window(from_date: str, to_date: str, tz_name: str) -> tuple[str, str, int]:
     """Convierte días locales inclusivos a instantes UTC [inicio, fin)."""
-    zone = ZoneInfo(tz_name)
+    zone = _zone(tz_name)
     start_date = date.fromisoformat(from_date)
     end_date = date.fromisoformat(to_date) + timedelta(days=1)
     start = datetime.combine(start_date, time.min, zone).astimezone(timezone.utc)
@@ -75,7 +80,7 @@ def local_timestamp(value: str, tz_name: str) -> str:
     stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
-    local = stamp.astimezone(ZoneInfo(tz_name))
+    local = stamp.astimezone(_zone(tz_name))
     return f"{local.year:04d}-{local:%m-%dT%H:%M:%S}"
 
 

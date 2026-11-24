@@ -22,6 +22,8 @@ dependencies = [
     "watchdog>=4",
     # CRM local (trycompai/crm): el relay le lee el Postgres read-only.
     "asyncpg>=0.29",
+    # Windows no incluye la base IANA que usan las fechas locales de informes.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

@@ -32,6 +32,8 @@ from relay.db import Database
 class FlagsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        # Los cleanups son LIFO: cerrar la app y sus workers antes de borrar DB.
+        self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
         os.environ["FOURBIS_DB_PATH"] = str(base / "test.db")
         os.environ["FOURBIS_CHATS_DIR"] = str(base / "chats")
@@ -43,11 +45,8 @@ class FlagsTests(unittest.IsolatedAsyncioTestCase):
             "defaults_json": {"model": "minimax:MiniMax-M3", "timeout": 900}})
         from relay.server import create_app
         self.client = TestClient(TestServer(create_app()))
-        await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
-
-    async def asyncTearDown(self) -> None:
-        self._tmp.cleanup()
+        await self.client.start_server()
 
     async def _flags(self) -> dict:
         r = await self.client.get("/admin/api/projects/demo/flags")

@@ -23,6 +23,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient, TestServer
 
 from relay.db import Database
+from relay import identity
 from relay.notify import NotifyClient
 
 _ENV_KEYS = ("FOURBIS_DB_PATH", "FOURBIS_CHATS_DIR", "FOURBIS_JSONL_DIR")
@@ -50,28 +51,28 @@ class TestMemoriesEndpoint(unittest.IsolatedAsyncioTestCase):
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
         # 3 conversaciones cerradas con summaries distintos
         self.c1 = await self.db.create_conversation(
-            project_slug="demo", discord_thread_id="th1")
+            project_slug="demo", discord_thread_id="th1", requested_by=identity.OWNER)
         await self.db.close_conversation(self.c1)
         await self.db.set_conversation_summary(
             self.c1, "se decidió usar postgres para sample-app por performance")
         await self.db.add_memory(self.c1, "demo",
-            "se decidió usar postgres para sample-app por performance")
+            "se decidió usar postgres para sample-app por performance", actor=identity.OWNER)
 
         self.c2 = await self.db.create_conversation(
-            project_slug="demo", discord_thread_id="th2")
+            project_slug="demo", discord_thread_id="th2", requested_by=identity.OWNER)
         await self.db.close_conversation(self.c2)
         await self.db.set_conversation_summary(
             self.c2, "el deploy corre con publish.ps1 en release")
         await self.db.add_memory(self.c2, "demo",
-            "el deploy corre con publish.ps1 en release")
+            "el deploy corre con publish.ps1 en release", actor=identity.OWNER)
 
         self.c3 = await self.db.create_conversation(
-            project_slug="demo", discord_thread_id="th3")
+            project_slug="demo", discord_thread_id="th3", requested_by=identity.OWNER)
         await self.db.close_conversation(self.c3)
         await self.db.set_conversation_summary(
             self.c3, "commercedemo quedó en pausa por auth de google")
         await self.db.add_memory(self.c3, "demo",
-            "commercedemo quedó en pausa por auth de google")
+            "commercedemo quedó en pausa por auth de google", actor=identity.OWNER)
 
     async def asyncTearDown(self) -> None:
         _clear_env()
@@ -128,10 +129,10 @@ class TestMemoriesEndpoint(unittest.IsolatedAsyncioTestCase):
     async def test_scope_by_project_no_leak(self) -> None:
         await self.db.upsert_project({
             "slug": "otro", "name": "Otro", "repo_path": self._tmp.name})
-        c4 = await self.db.create_conversation(project_slug="otro")
+        c4 = await self.db.create_conversation(project_slug="otro", requested_by=identity.OWNER)
         await self.db.close_conversation(c4)
         await self.db.set_conversation_summary(c4, "postgres también en otro")
-        await self.db.add_memory(c4, "otro", "postgres también en otro")
+        await self.db.add_memory(c4, "otro", "postgres también en otro", actor=identity.OWNER)
 
         from relay.server import create_app
         async def fake_send(self_, *a, **kw):
@@ -179,7 +180,7 @@ class TestMemoriesNoFTS5(unittest.IsolatedAsyncioTestCase):
         self.db._fts_available = False
         await self.db.upsert_project({
             "slug": "demo", "name": "Demo", "repo_path": self._tmp.name})
-        cid = await self.db.create_conversation(project_slug="demo")
+        cid = await self.db.create_conversation(project_slug="demo", requested_by=identity.OWNER)
         await self.db.close_conversation(cid)
         await self.db.set_conversation_summary(cid, "resumen de prueba")
 

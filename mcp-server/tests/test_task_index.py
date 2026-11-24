@@ -1,8 +1,9 @@
 """Las lecturas de arquitectura/índice respetan el workspace de conversación."""
 import json
-from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
 from relay import admin_diagrams, admin_indexing, admin_workspace, identity
@@ -20,11 +21,13 @@ class _Db:
 
 def _request(slug="demo", conversation="conv-1"):
     db = _Db()
-    return SimpleNamespace(
-        app={DB_KEY: db},
-        match_info={"slug": slug},
-        query={"conversation": conversation} if conversation else {},
-    )
+    app = web.Application()
+    app[DB_KEY] = db
+    query = "?conversation=" + conversation if conversation else ""
+    request = make_mocked_request("GET", "/projects/" + slug + query,
+                                  app=app, match_info={"slug": slug})
+    request[identity.IDENTITY_KEY] = identity.OWNER
+    return request
 
 
 @pytest.mark.asyncio
@@ -58,7 +61,18 @@ async def test_index_and_architecture_use_task_root(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cross_project_conversation_is_rejected(tmp_path, monkeypatch):
+async def test_cross_project_conversation_is_rejected(monkeypatch):
+    # Unidad del vínculo proyecto/conversación: aun con lectura autorizada,
+    # una conversación de otro proyecto debe ser rechazada.
+    authorize = AsyncMock()
+    monkeypatch.setattr(admin_workspace.conversation_access, "require", authorize)
+    request = _request(slug="other")
+    response = await admin_diagrams.api_project_architecture(request)
+    assert response.status == 400
+    authorize.assert_awaited_once_with(request.app[DB_KEY], "conv-1", identity.OWNER, "read")
+
+
+async def test_cross_project_conversation_is_rejected_end_to_end(tmp_path, monkeypatch):
     db = Database(tmp_path / "relay.db")
     await db.init_schema()
     await db.upsert_project({"slug": "demo", "name": "Demo", "enabled": True,

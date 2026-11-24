@@ -15,6 +15,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .graph_resume_inspection import (
+    ResumeInspectionDenied, ResumeInspectionStale, open_inspection,
+)
+
 
 class TaskWorkspaceError(RuntimeError):
     """El workspace no puede usarse sin intervención explícita."""
@@ -414,10 +418,15 @@ def _safe_task_paths(db: Any, project: dict, conv_id: str, task: dict) -> tuple[
 
 
 async def inspect_workspace(
-    db: Any, project: dict, conv_id: str, *, fetch: bool = False,
+    db: Any, project: dict, conv_id: str, *, fetch: bool = False, inspection=None,
 ) -> dict:
     """Reconcilia identidad, HEAD y remoto sin tocar cambios del usuario."""
-    task = await db.get_conversation_task(conv_id)
+    async def persist(**fields):
+        if inspection is None:
+            return await _persist(db, conv_id, **fields)
+        return await inspection.persist(fields)
+
+    task = inspection.task if inspection is not None else await db.get_conversation_task(conv_id)
     if not task:
         return {"state": "missing", "error": "conversación sin task_json"}
     if task.get("no_checkout") is True:
@@ -432,7 +441,7 @@ async def inspect_workspace(
         return task
     if task.get("state") == "cleaned":
         if task.get("workspace_state") != "cleaned":
-            task = await _persist(db, conv_id, workspace_state="cleaned",
+            task = await persist(workspace_state="cleaned",
                                   workspace_error="")
         return task
     try:
@@ -441,7 +450,7 @@ async def inspect_workspace(
             raise TaskWorkspaceError(
                 "workspace ausente; recuperación manual requerida (no se recreó)")
         if task.get("mode") == "read_only":
-            return await _persist(db, conv_id, workspace_state="ok",
+            return await persist(workspace_state="ok",
                                   workspace_error="")
 
         await _validate_identity(source, workspace, task["branch"])
@@ -477,12 +486,14 @@ async def inspect_workspace(
             # Conserva SHA/detalle probado; sólo deja explícito que ya no
             # acredita el árbol actual.
             fields["validation"] = {"status": "stale"}
-        return await _persist(db, conv_id, **fields)
+        return await persist(**fields)
+    except (ResumeInspectionDenied, ResumeInspectionStale):
+        raise  # Una denegación/CAS nunca se convierte en otro diagnóstico.
     except Exception as exc:
         fields = {"workspace_state": "blocked", "workspace_error": str(exc)}
         if task.get("state") not in {"cancelled", "finished", "cleaned"}:
             fields["state"] = "blocked"
-        return await _persist(db, conv_id, **fields)
+        return await persist(**fields)
 
 
 async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
@@ -491,7 +502,8 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
     Conversaciones anteriores a ``task_json`` siguen intactas. Una tarea ya
     versionada, en cambio, debe reconciliar como ``ready`` o el run se corta.
     """
-    task = await db.get_conversation_task(conv_id)
+    inspection = await open_inspection(db, project, conv_id)
+    task = inspection.task if inspection is not None else await db.get_conversation_task(conv_id)
     if not task:
         return dict(project)
     if task.get("no_checkout") is True:
@@ -507,7 +519,10 @@ async def resolved_project(db: Any, project: dict, conv_id: str) -> dict:
                 "defaults_json": {**(current.get("defaults_json") or {}), "read_only": True}}
     if task.get("mode") == "external_pr":
         raise TaskWorkspaceError("Un PR externo solo registra evidencia y revisión; no ejecuta código ni Git.")
-    task = await inspect_workspace(db, project, conv_id)
+    if inspection is None:
+        task = await inspect_workspace(db, project, conv_id)
+    else:
+        task = await inspect_workspace(db, project, conv_id, inspection=inspection)
     if task.get("workspace_state") != "ok" or task.get("workspace_error"):
         raise TaskWorkspaceError(
             task.get("workspace_error") or "workspace no disponible")

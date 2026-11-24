@@ -236,20 +236,24 @@ async def test_sqlite_respects_file_veto_even_when_connection_can_write(db, tmp_
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE hidden (value)")
         connection.execute("INSERT INTO hidden VALUES ('confidential')")
+    await db.upsert_db_connection("restricted-demo", str(path), escribir=True)
     def model(messages, info):
         results = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)
                    and p.tool_name == "db_query"]
         if results:
             return ModelResponse(parts=[TextPart(str(results[-1].content))])
         return ModelResponse(parts=[ToolCallPart("db_query", {
-            "conexion": str(path), "sql": "SELECT * FROM hidden"})])
+            "conexion": "restricted-demo", "sql": "SELECT * FROM hidden"})])
     project = await db.get_project("demo")
     project["defaults_json"] = {"rutas_vedadas": ["private"]}
-    with patch.object(expert_models, "build_model", return_value=FunctionModel(model)):
+    with (patch.object(expert_models, "build_model", return_value=FunctionModel(model)),
+          patch.object(dbtool, "consultar", new_callable=AsyncMock) as query):
         result = await expert_runner.run_expert(project, "query", db=db, model_override="function")
     output = result["content"]
-    assert "no está disponible con los permisos de este run" in output
-    assert "confidential" not in output
+    assert output == "error: la base SQLite no está disponible con los permisos de este run."
+    query.assert_not_awaited()
+    for private in (str(path), path.name, "hidden", "confidential"):
+        assert private not in output
 
 
 def test_nested_extra_root_cannot_remove_a_file_veto(tmp_path):
@@ -362,10 +366,12 @@ async def test_conversation_uses_durable_output_and_exposes_outcome(app, db, tmp
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_generated_images_are_persisted_without_unverified_discord_push(db, monkeypatch, cancelled):
-    from relay import attachments
+async def test_generated_images_are_persisted_and_scoped_without_external_delivery(db, monkeypatch, cancelled):
+    from relay import attachments, user_accounts
     aid, path, _ = attachments.store(b"image-fixture", mimetype="image/png")
-    cid = await db.create_chat(project_slug="demo", source="test", author="", target="demo")
+    conv_id = await db.create_conversation(project_slug="demo", requested_by="owner")
+    cid = await db.create_chat(project_slug="demo", source="test", author="", target="demo",
+                               conversation_id=conv_id, requested_by="owner")
     async def runner(project, user, **kwargs):
         kwargs["rescue"]["image_artifacts"] = {aid: path.name}
         if cancelled:
@@ -375,11 +381,21 @@ async def test_generated_images_are_persisted_without_unverified_discord_push(db
     monkeypatch.setattr(server.experts, "run_expert_staged", runner)
     monkeypatch.setattr(server_expert_jobs, "_suggest_followups", AsyncMock(return_value=[]))
     notify = AsyncMock()
-    await server._run_expert_bg(db=db, notify=notify, running={}, progress={}, chat_id=cid,
-        project=await db.get_project("demo"), user="capturar", skills_block="", system_extra="",
-        model_override="test", target="demo", source="test", author="", conversation=None)
-    notify.send.assert_not_awaited()
+    with user_accounts.bind_actor(db, "owner"):
+        await server._run_expert_bg(db=db, notify=notify, running={}, progress={}, chat_id=cid,
+            project=await db.get_project("demo"), user="capturar", skills_block="", system_extra="",
+            model_override="test", target="demo", source="test", author="",
+            conversation=await db.get_conversation(conv_id))
+    notify.send.assert_not_called()  # No verified external audience is associated with this run.
+    assert (attachments.scope_dir(conv_id) / path.name).is_file()
+    output = json.loads((await db.run("SELECT payload FROM chat_outputs WHERE chat_id=?", (cid,)))[0]["payload"])
+    assert output["result_metadata"]["image_artifacts"] == {aid: path.name}
+    assert f"/attachments/{aid}" in output["content"]
     row = await db.get_chat(cid)
+    if cancelled:
+        assert row["stages_json"] is None
+    else:
+        assert json.loads(row["stages_json"])["resultado"] == "aprobado"
     from pathlib import Path
     assert f"/attachments/{aid}" in Path(row["md_path"]).read_text(encoding="utf-8")
     assert row["status"] == ("cancelled" if cancelled else "ok")
@@ -450,45 +466,152 @@ def request(app, body, path="/experts/run", id=None):
     return req
 
 
-async def test_concurrent_idempotent_conversation_creation_has_one_winner(app, db):
+@pytest.mark.parametrize("same_request", [False, True])
+async def test_concurrent_creation_deduplicates_only_the_same_request(app, db, same_request):
+    bodies = [{"project": "demo", "request_id": "creation-1"},
+              {"project": "demo", "request_id": "creation-1" if same_request else "creation-2"}]
     results = await asyncio.gather(*(
-        server.conversations_create(request(app, {"project": "demo", "request_id": "same-create"}, "/conversations"))
-        for _ in range(2)))
-    assert sorted(r.status for r in results) == [200, 201]
-    assert len({json.loads(r.text)["id"] for r in results}) == 1
-    assert len(await db.run("SELECT id FROM conversations WHERE status='open'")) == 1
+        server.conversations_create(request(app, body, "/conversations")) for body in bodies))
+    # Las consultas sin Git son independientes; sólo una identidad repetida deduplica.
+    assert sorted(r.status for r in results) == ([200, 201] if same_request else [201, 201])
+    replies = [json.loads(r.text) for r in results]
+    ids = {body["id"] for body in replies}
+    assert len(ids) == (1 if same_request else 2)
+    assert len(await db.run("SELECT id FROM conversations WHERE status='open'")) == len(ids)
+    for reply in replies:
+        assert reply["creation_receipt"]["ready"] is True
+        state = await db.get_conversation_task(reply["id"])
+        assert state["mode"] == "read_only" and state["no_checkout"] is True
+        assert not reply.get("branch")
+    if same_request:
+        assert replies[0]["creation_receipt"] == replies[1]["creation_receipt"]
+        conflict = await server.conversations_create(request(app,
+            {**bodies[0], "author": "otro borrador"}, "/conversations"))
+        assert conflict.status == 409
+        assert json.loads(conflict.text)["code"] == "creation_contract_conflict"
+        assert len(await db.run("SELECT id FROM conversations")) == 1
 
 
-async def test_two_project_aliases_keep_distinct_conversation_identities(app, db):
+async def test_project_aliases_allow_independent_no_checkout_consultations(app, db, monkeypatch):
+    from relay import task_workspace
     project = await db.get_project("demo")
     await db.upsert_project({"slug": "alias", "name": "Alias", "repo_path": project["repo_path"]})
-    first = await server.conversations_create(request(app, {"project": "demo", "request_id": "same-create"}))
-    second = await server.conversations_create(request(app, {"project": "alias", "request_id": "same-create"}))
-    assert first.status == 201
-    assert second.status == 201
-    first_id, second_id = json.loads(first.text)["id"], json.loads(second.text)["id"]
-    assert first_id != second_id
-    assert (await db.get_conversation(first_id))["project_slug"] == "demo"
-    assert (await db.get_conversation(second_id))["project_slug"] == "alias"
+    provision = AsyncMock(side_effect=AssertionError("una consulta sin Git no debe crear worktrees"))
+    monkeypatch.setattr(task_workspace, "initialize_task", provision)
+    ids = []
+    for slug in ("demo", "alias"):
+        response = await server.conversations_create(request(app,
+            {"project": slug, "request_id": "independent-consultation"}))
+        assert response.status == 201
+        reply = json.loads(response.text)
+        ids.append(reply["id"])
+        assert not reply["branch"] and reply["creation_receipt"]["ready"] is True
+        state = await db.get_conversation_task(reply["id"])
+        assert state["no_checkout"] is True and state["mode"] == "read_only"
+        assert state["read_only"] is True and state["publish_allowed"] is False
+    assert len(set(ids)) == 2
+    assert len(await db.run("SELECT id FROM conversations")) == 2
+    provision.assert_not_awaited()
 
 
-async def test_active_turn_blocks_another_turn_and_close_until_background_finishes(app, db, monkeypatch):
-    conv = await db.create_conversation(project_slug="demo")
-    done = asyncio.Event()
-    monkeypatch.setattr(server_expert_routes, "_run_expert_bg", lambda **kw: done.wait())
-    monkeypatch.setattr(server.git_flow, "is_git_repo", AsyncMock(return_value=True))
-    body = {"target": "demo", "user": "revisar", "conversation": conv}
+async def test_legacy_checkout_blocks_creation_through_project_alias(app, db, monkeypatch):
+    import subprocess
+    from relay import git_branches, identity
+    project = await db.get_project("demo")
+    await db.upsert_project({"slug": "alias", "name": "Alias", "repo_path": project["repo_path"]})
+    # Precondición real: checkout Git temporal y conversación histórica sin worktree.
+    subprocess.run(["git", "init", "-b", "work/legacy", project["repo_path"]],
+                   check=True, capture_output=True)
+    monkeypatch.setattr(server.git_flow, "is_git_repo", git_branches.is_git_repo)
+    assert await server.git_flow.is_git_repo(project["repo_path"])
+    legacy = await db.create_conversation(project_slug="demo", branch="work/legacy",
+                                          requested_by=identity.OWNER)
+    for slug in ("demo", "alias"):
+        response = await server.conversations_create(request(app, {"project": slug}))
+        assert response.status == 409
+        assert json.loads(response.text)["conversation_id"] == legacy
+    assert len(await db.run("SELECT id FROM conversations")) == 1
+
+
+async def test_managed_turns_queue_fifo_and_closing_view_preserves_work(app, db, monkeypatch):
+    from relay import identity, task_service, task_workspace
+    conv = await db.create_conversation(project_slug="demo", requested_by=identity.OWNER)
+    await task_workspace.initialize_no_checkout(db, await db.get_project("demo"), conv)
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    started = []
+    admitted_views = []
+
+    async def run(**kw):
+        # Exercise the real admission gate; the worker body remains simulated.
+        await expert_runner.require_model_admission(db, conv)
+        admitted_views.append((await db.get_conversation(conv))["status"])
+        position = len(started)
+        started.append(kw["chat_id"])
+        entered[position].set()
+        await release[position].wait()
+        await db.finish_chat(kw["chat_id"], status="ok")
+        kw["running"].pop(kw["chat_id"], None)
+
+    # La cola usa el worker de jobs, no el alias del handler HTTP legado.
+    monkeypatch.setattr(server_expert_jobs, "_run_expert_bg", run)
+    body = {"target": "demo", "user": "revisar", "conversation": conv, "request_id": "turn-1"}
     first = await server.experts_run(request(app, body))
     assert first.status == 202
+    first_id = json.loads(first.text)["id"]
     try:
-        assert (await server.experts_run(request(app, body))).status == 409
-        assert (await server.conversations_close(request(app, {}, id=conv))).status == 409
-        assert len(await db.run("SELECT id FROM chats")) == 1
+        await asyncio.wait_for(entered[0].wait(), 2)
+        replay = await server.experts_run(request(app, body))
+        assert replay.status == 202 and json.loads(replay.text)["id"] == first_id
+        conflict = await server.experts_run(request(app, {**body, "user": "pedido distinto"}))
+        assert conflict.status == 409
+        second = await server.experts_run(request(app,
+            {**body, "request_id": "turn-2", "user": "segundo pedido"}))
+        assert second.status == 202
+        second_id = json.loads(second.text)["id"]
+        assert second_id != first_id and started == [first_id]
+        events = await db.list_conversation_events(conv)
+        assert [event["state"] for event in events] == ["processing", "pending"]
+        assert len(await db.run("SELECT id FROM chats")) == 2
+        # Cerrar la vista no cancela la tarea ni borra los eventos durables.
+        closed = await server.conversations_close(request(app, {}, id=conv))
+        assert closed.status == 200
+        assert (await db.get_conversation(conv))["status"] == "closed"
+        assert [e["state"] for e in await db.list_conversation_events(conv)] == ["processing", "pending"]
+        release[0].set()
+        await asyncio.wait_for(entered[1].wait(), 2)
+        assert started == [first_id, second_id]
+        assert admitted_views == ["open", "closed"]
+        assert (await db.get_chat(first_id))["status"] == "ok"
+        assert (await db.get_chat(second_id))["status"] == "running"
     finally:
         tasks = list(app[server.BG_TASKS_KEY])
-        done.set()
-        await asyncio.gather(*tasks)
+        for gate in release:
+            gate.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 2)
+    assert [event["state"] for event in await db.list_conversation_events(conv)] == ["applied", "applied"]
+    assert [chat["status"] for chat in await db.run("SELECT status FROM chats")] == ["ok", "ok"]
     assert not coordination.busy(db, await db.get_project("demo"))
+
+
+@pytest.mark.parametrize("reason", ["legacy_closed", "paused", "disabled_actor"])
+async def test_closed_view_admission_preserves_denials(app, db, reason):
+    from relay import task_workspace, user_accounts
+
+    actor = "creator@example.test"
+    await db.set_user_role(actor, "member", enabled=True, project_slugs=["demo"])
+    cid = await db.create_conversation(project_slug="demo", requested_by=actor)
+    if reason != "legacy_closed":
+        await task_workspace.initialize_no_checkout(db, await db.get_project("demo"), cid)
+    if reason == "paused":
+        await db.update_conversation_task(cid, state="paused")
+    elif reason == "disabled_actor":
+        await db.set_user_role(actor, "member", enabled=False)
+    await db.close_conversation(cid)
+
+    with user_accounts.bind_actor(db, actor):
+        with pytest.raises(PermissionError):
+            await expert_runner.require_model_admission(db, cid)
 
 
 async def test_stale_history_cannot_overwrite_a_finished_turn(db):

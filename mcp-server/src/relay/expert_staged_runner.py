@@ -26,16 +26,7 @@ from .task_workspace import resolved_project
 logger = logging.getLogger("relay.experts")
 
 
-def _valid_correction(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    try:
-        return (expert_verdicts._validate_plan_correction(value) is None
-                and all(isinstance(step.get(k), str) and step[k].strip()
-                        for step in value["revised_steps"]
-                        for k in ("id", "description", "expected_output")))
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return False
+from .expert_verdicts import _valid_correction
 
 
 async def run_expert_staged(
@@ -114,16 +105,7 @@ async def run_expert_staged(
         ver_enabled = defaults.get("verifier", True)
     if not enabled:
         result = await expert_runner.run_expert(project, user, **kwargs)
-        result["three_stage"] = False
-        result["plan"] = ""
-        result["verifier_verdict"] = ""
-        result["verifier_feedback"] = ""
-        result["planner_model"] = ""
-        result["verifier_model"] = ""
-        result["doc"] = ""
-        result["documenter_model"] = ""
-        result["stage_errors"] = {}
-        return result
+        return expert_result.finish_unstaged_result(result)
 
     async def authorize_stage():
         await expert_runner.require_model_admission(kwargs.get("db"),
@@ -196,39 +178,10 @@ async def run_expert_staged(
             ModelRequest(parts=[UserPromptPart(content=user)]),
             ModelResponse(parts=[TextPart(content=propuesta)]),
         ])
-        return {
-            "content": propuesta,
-            "model": planner_spec,
-            "tokens_in": None, "tokens_out": None,
-            "tool_calls": None, "duration_ms": 0,
-            "messages_json": historial, "phase_at_end": "planned",
-            "last_tool": None, "legs": 0, "steers": 0,
-            "steer_texts": [], "progress_events": [],
-            "plan": plan, "planner_model": planner_spec,
-            "verifier_verdict": "", "verifier_feedback": "",
-            "verifier_model": "", "doc": "", "documenter_model": "",
-            "three_stage": True,
-            "stage_usage": {"planner": planner_usage},
-            "stage_errors": stage_errors,
-        }
+        return expert_result.planned_result(
+            propuesta, planner_spec, historial, plan, planner_usage, stage_errors)
 
-    plan_block = ""
-    if plan and not trivial:
-        plan_block = (
-            "## Plan a ejecutar (del planificador)\n"
-            f"{plan}\n\n"
-            "Sigue estos pasos en orden. Si descubris que un paso es\n"
-            "incorrecto, o que el pedido del humano es mas simple que el\n"
-            "plan, indicarlo en la respuesta final y continuar igual: el\n"
-            "plan es una guia, no un contrato.\n"
-            "Al terminar cada paso, marcalo con `plan_step_done(nro)`."
-        )
-    elif trivial:
-        plan_block = (
-            "## Plan a ejecutar (del planificador)\n"
-            f"{plan}\n\n"
-            "Pedido trivial: resuélvelo directo, sin exploración."
-        )
+    plan_block = expert_stage_prompts.executor_plan_block(plan, trivial=trivial)
 
     extra_orig = kwargs.get("system_extra") or ""
     if plan_block:
@@ -318,16 +271,8 @@ async def run_expert_staged(
         must add its partial usage to completed rounds, never overwrite them.
         Completed rounds are counted once, immediately after they return.
         """
-        value = expert_result.merge_recovery_snapshot(result, partial or {})
-        for key in ("tokens_in", "tokens_out", "cache_read_tokens", "tool_calls", "duration_ms", "legs"):
-            extra = (partial or {}).get(key)
-            value[key] = (acum[key] + (extra or 0)
-                          if key in measured or extra is not None else None)
-        partial_requests_known = (partial is None or partial.get("requests") is not None
-                                 or partial.get("_executor_attempted") is False)
-        value["requests"] = (executor_requests_used + int((partial or {}).get("requests") or 0)
-                             if requests_known and partial_requests_known else None)
-        value["progress_events"] = list(acum["progress_events"]) + list((partial or {}).get("progress_events") or [])
+        value = expert_result.staged_recovery_usage(
+            result, partial, acum, measured, executor_requests_used, requests_known)
         value.update(three_stage=True, plan=plan, planner_model=planner_spec,
             verifier_verdict=verdict, verifier_feedback=feedback,
             verifier_model=verifier_spec if verifier_corrio else "",
@@ -451,23 +396,7 @@ async def run_expert_staged(
                     logger.debug(
                         "no pude adelantar executor_interruption a la "
                         "DB: %r", _e)
-            interrupt_ctx = (
-                "\n\n## Interrupción reportada por el ejecutor\n"
-                "El ejecutor paró antes de terminar y emitió la señal\n"
-                "`EXECUTOR_INTERRUPTION`. El plan actual no le sirvió.\n\n"
-                f"- Razón: {ev['reason']}\n"
-                f"- Paso afectado: {ev['affected_step_id']}\n"
-                "- Contexto del error:\n"
-                f"  {ev['error_context']}\n"
-                "- Avance parcial registrado:\n"
-                f"  {json.dumps(ev['partial_progress'], ensure_ascii=False)}\n\n"
-                "Emití un PLAN REVISADO que esquive el problema: cambia el\n"
-                "orden, reemplaza el paso bloqueado por un equivalente, o\n"
-                "parte el paso en subtareas. NO repitas el plan original.\n"
-                "Mantené todo lo que el ejecutor YA avanzó (ver\n"
-                "`partial_progress`): empezar de cero perdería ese\n"
-                "trabajo.\n"
-            )
+            interrupt_ctx = expert_stage_prompts.executor_interruption_prompt(ev)
             revised_user = user_original + interrupt_ctx
             planner_history = (
                 result.get("messages_json") or history_json
@@ -512,19 +441,8 @@ async def run_expert_staged(
                 plan = rev_plan
                 checkpoint()
                 # Reemplaza el plan; si es trivial, conserva el camino corto.
-                new_plan_block = ""
-                if plan and not trivial and signal != "trivial":
-                    new_plan_block = (
-                        "## Plan a ejecutar (del planificador)\n"
-                        f"{plan}\n\n"
-                        "Sigue estos pasos en orden. Si descubris que un "
-                        "paso es\nincorrecto, o que el pedido del humano "
-                        "es mas simple que el\nplan, indicarlo en la "
-                        "respuesta final y continuar igual: el\nplan es "
-                        "una guia, no un contrato.\n"
-                        "Al terminar cada paso, marcalo con "
-                        "`plan_step_done(nro)`."
-                    )
+                new_plan_block = (expert_stage_prompts.executor_plan_block(plan)
+                                  if plan and not trivial and signal != "trivial" else "")
                 kwargs["system_extra"] = (
                     f"{new_plan_block}\n\n{extra_orig}"
                     if new_plan_block else extra_orig
@@ -658,42 +576,14 @@ async def run_expert_staged(
 
         if reintento_vacio:
             forzadas += 1
-            user = (
-                "No ejecutaste NINGUNA herramienta en el turno anterior: "
-                "describiste el trabajo y cerraste. Hazlo ahora, de verdad.\n"
-                "- Si necesitas la salida de un comando, LLÁMALO con la tool "
-                "`shell`. Escribir el comando en tu respuesta y pedir que te "
-                "confirmen el resultado no es ejecutarlo.\n"
-                "- Si necesitas ver un archivo, léelo con `read_file`.\n"
-                "- No pidas permiso para leer ni para ejecutar: ya lo tienes.\n"
-                "- Si de verdad hace falta una decisión humana (instalar algo, "
-                "elegir entre caminos que no son equivalentes), usa "
-                "`ask_human`: es la única forma válida de frenar el turno.\n"
-                "- Si el pedido era solo una pregunta y ya la respondiste, "
-                "dilo en una línea y cierra. No inventes trabajo para "
-                "justificar el turno.")
+            user = expert_stage_prompts.EMPTY_RETRY_PROMPT
             logger.info(
                 "run_expert_staged: turno sin tool calls → ronda %d/%d "
                 "forzada (verdict del verificador: %s)",
                 len(rondas) + 1, max_rondas + 1, verdict or "(sin verificar)")
         else:
-            if continuation_correction is not None:
-                pending = "\n".join(
-                    f"- {step['description']}: {step['expected_output']}"
-                    for step in continuation_correction["revised_steps"]
-                    if step["status"] != "done")
-                user = (
-                    "Revisa el estado actual y continúa esta misma tarea desde "
-                    "su historial. Conserva los efectos ya realizados y completa "
-                    "los criterios pendientes, dentro de los límites vigentes:\n\n"
-                    f"{continuation_correction['feedback_to_executor'][:2000]}\n"
-                    f"{pending[:2000]}")
-            else:
-                user = (
-                    "Continúa la tarea. El verificador revisó lo que hiciste y dice "
-                    f"que falta esto: {feedback or 'completar el plan'}. Atiéndelo y "
-                    "cierra con el resumen final. Si al mirarlo descubres que ya "
-                    "estaba cubierto, dilo y no rehagas el trabajo.")
+            user = expert_stage_prompts.continuation_prompt(
+                feedback, continuation_correction)
             logger.info(
                 "run_expert_staged: needs_more → ronda %d/%d sola (feedback: %s)",
                 len(rondas) + 1, max_rondas + 1, (feedback or "")[:120])
